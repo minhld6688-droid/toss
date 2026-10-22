@@ -69,27 +69,22 @@ pub struct HostAddr {
 
 impl HostAddr {
     /// Picks the relay URL and up to [`MAX_TICKET_ADDRS`] direct addresses of
-    /// `addr`: public IPv4, public IPv6, private (LAN) IPv4, then the rest;
-    /// loopback, unspecified and link-local addresses are left out.
+    /// `addr`, best first: public IPv4 (port-mapped / QAD), global IPv6, private
+    /// (LAN) IPv4, then unique-local IPv6; loopback, unspecified and link-local
+    /// addresses are left out. Up to [`MIN_TICKET_LAN_ADDRS`] private LAN IPv4
+    /// addresses are always kept when present (same-LAN editors dial them
+    /// directly), even if there are more public addresses than slots.
     pub fn from_endpoint_addr(addr: &EndpointAddr) -> HostAddr {
         let relay = addr
             .relay_urls()
             .next()
             .map(|u| u.to_string())
             .unwrap_or_default();
-        let mut ranked: Vec<(u8, SocketAddr)> = addr
-            .ip_addrs()
-            .filter_map(|a| addr_rank(a).map(|r| (r, *a)))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        ranked.sort_by_key(|(r, _)| *r);
         HostAddr {
             relay,
-            addrs: ranked
+            addrs: pick_addrs(addr.ip_addrs().copied())
                 .into_iter()
-                .take(MAX_TICKET_ADDRS)
-                .map(|(_, a)| a.to_string())
+                .map(|a| a.to_string())
                 .collect(),
         }
     }
@@ -113,20 +108,47 @@ impl HostAddr {
     }
 }
 
-/// Sort rank of a direct address for tickets (lower = better), `None` = useless remotely.
-fn addr_rank(a: &SocketAddr) -> Option<u8> {
+/// Private LAN IPv4 addresses a ticket keeps when the host has them (see
+/// [`HostAddr::from_endpoint_addr`]).
+pub const MIN_TICKET_LAN_ADDRS: usize = 2;
+
+/// Address classes for tickets, in ticket order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AddrClass {
+    /// Public IPv4 (port-mapped, QAD-observed, or a public interface address).
+    PublicV4,
+    /// Global unicast IPv6.
+    GlobalV6,
+    /// RFC 1918 / CGNAT IPv4: reachable on the same LAN (or VPN) only.
+    LanV4,
+    /// Unique-local IPv6 (fc00::/7): LAN only.
+    LanV6,
+}
+
+/// Class of a direct address and a sub-rank inside the class (lower = better);
+/// `None` = useless to a remote peer (loopback, link-local, unspecified, port 0).
+pub(crate) fn addr_class(a: &SocketAddr) -> Option<(AddrClass, u8)> {
     if a.port() == 0 {
         return None;
     }
     match a.ip().to_canonical() {
         IpAddr::V4(ip) => {
+            let o = ip.octets();
             if ip.is_unspecified() || ip.is_loopback() || ip.is_link_local() || ip.is_broadcast() {
                 None
-            } else if ip.is_private() || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64) {
-                // RFC 1918 and carrier-grade NAT (100.64/10): LAN only.
-                Some(2)
+            } else if o[0] == 192 && o[1] == 168 {
+                // Home routers: the most likely LAN of a studio / editor.
+                Some((AddrClass::LanV4, 0))
+            } else if o[0] == 10 {
+                Some((AddrClass::LanV4, 1))
+            } else if o[0] == 172 && (16..32).contains(&o[1]) {
+                // Includes Docker's default bridges (172.17+): last among RFC 1918.
+                Some((AddrClass::LanV4, 2))
+            } else if o[0] == 100 && o[1] & 0xc0 == 64 {
+                // Carrier-grade NAT (100.64/10, also Tailscale): LAN/VPN only.
+                Some((AddrClass::LanV4, 3))
             } else {
-                Some(0)
+                Some((AddrClass::PublicV4, 0))
             }
         }
         IpAddr::V6(ip) => {
@@ -134,13 +156,46 @@ fn addr_rank(a: &SocketAddr) -> Option<u8> {
             if ip.is_unspecified() || ip.is_loopback() || (seg0 & 0xffc0) == 0xfe80 {
                 None
             } else if (seg0 & 0xfe00) == 0xfc00 {
-                // Unique local (fc00::/7): LAN only.
-                Some(3)
+                Some((AddrClass::LanV6, 0))
             } else {
-                Some(1)
+                Some((AddrClass::GlobalV6, 0))
             }
         }
     }
+}
+
+/// Orders and caps direct addresses for a ticket (see [`HostAddr::from_endpoint_addr`]).
+pub(crate) fn pick_addrs(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
+    let mut ranked: Vec<((AddrClass, u8), SocketAddr)> = addrs
+        .into_iter()
+        .filter_map(|a| addr_class(&a).map(|c| (c, a)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ranked.sort_by_key(|(c, _)| *c);
+    let lan = ranked
+        .iter()
+        .filter(|((c, _), _)| *c == AddrClass::LanV4)
+        .count();
+    let reserved = lan.min(MIN_TICKET_LAN_ADDRS);
+    // Slots for addresses ahead of the LAN ones (public v4 / global v6).
+    let mut ahead = MAX_TICKET_ADDRS - reserved;
+    let mut out = Vec::new();
+    for ((class, _), a) in ranked {
+        if out.len() == MAX_TICKET_ADDRS {
+            break;
+        }
+        match class {
+            AddrClass::PublicV4 | AddrClass::GlobalV6 => {
+                if ahead > 0 {
+                    ahead -= 1;
+                    out.push(a);
+                }
+            }
+            AddrClass::LanV4 | AddrClass::LanV6 => out.push(a),
+        }
+    }
+    out
 }
 
 /// A ticket: body plus ed25519 signature by the host key over `postcard(body)`.
@@ -725,6 +780,76 @@ mod tests {
             || a.contains("169.254")));
         assert!(HostAddr::default().is_empty());
         assert_eq!(HostAddr::default().summary(), "relay=- direct=0");
+    }
+
+    #[test]
+    fn host_addr_keeps_lan_addrs() {
+        let sk = SecretKey::generate();
+        let ip = |s: &str| TransportAddr::Ip(s.parse().unwrap());
+        // 10 public addresses (e.g. a host with many public v4/v6) + 3 LAN.
+        let mut parts = vec![
+            ip("172.17.0.1:41820"),
+            ip("192.168.1.20:41820"),
+            ip("10.8.0.2:41820"),
+        ];
+        for i in 0..6u8 {
+            parts.push(ip(&format!("[2001:db8::{i}]:41820")));
+        }
+        for i in 0..4u8 {
+            parts.push(ip(&format!("198.51.100.{i}:41820")));
+        }
+        let ha = HostAddr::from_endpoint_addr(&EndpointAddr::from_parts(sk.public(), parts));
+        assert_eq!(ha.addrs.len(), MAX_TICKET_ADDRS);
+        // public v4 first, then global v6, then the 2 best LAN addresses.
+        assert!(ha.addrs[..4].iter().all(|a| a.starts_with("198.51.100.")));
+        assert!(ha.addrs[4..6].iter().all(|a| a.starts_with("[2001:db8::")));
+        assert_eq!(&ha.addrs[6..], &["192.168.1.20:41820", "10.8.0.2:41820"]);
+
+        // Only LAN addresses: all kept (up to the cap), home LAN first, Docker last.
+        let parts = vec![
+            ip("172.17.0.1:5000"),
+            ip("10.0.0.5:5000"),
+            ip("192.168.0.7:5000"),
+            ip("[fd00::7]:5000"),
+        ];
+        let ha = HostAddr::from_endpoint_addr(&EndpointAddr::from_parts(sk.public(), parts));
+        assert_eq!(
+            ha.addrs,
+            [
+                "192.168.0.7:5000",
+                "10.0.0.5:5000",
+                "172.17.0.1:5000",
+                "[fd00::7]:5000"
+            ]
+        );
+
+        // One LAN address among many public ones is kept too.
+        let mut parts = vec![ip("192.168.1.9:7000")];
+        for i in 0..12u8 {
+            parts.push(ip(&format!("203.0.113.{i}:7000")));
+        }
+        let ha = HostAddr::from_endpoint_addr(&EndpointAddr::from_parts(sk.public(), parts));
+        assert_eq!(ha.addrs.len(), MAX_TICKET_ADDRS);
+        assert_eq!(ha.addrs.last().unwrap(), "192.168.1.9:7000");
+
+        // A full ticket with 8 addresses (6 of them IPv6) stays well under ~900 chars.
+        let mut body = admin_body(&sk.public(), 0, [3; 16]);
+        let mut parts = vec![
+            ip("192.168.1.20:41820"),
+            ip("10.8.0.2:41820"),
+            TransportAddr::Relay("https://aps1-1.relay.n0.iroh.link./".parse().unwrap()),
+        ];
+        for i in 0..8u16 {
+            parts.push(ip(&format!(
+                "[2001:db8:1234:5678:9abc:def0:1234:{i:x}]:41820"
+            )));
+        }
+        body.set_host_addr(&HostAddr::from_endpoint_addr(&EndpointAddr::from_parts(
+            sk.public(),
+            parts,
+        )));
+        let s = Ticket::sign(body, &sk).to_string();
+        assert!(s.len() <= 900, "ticket is {} chars", s.len());
     }
 
     #[test]
