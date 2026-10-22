@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS 15+ Local Network privacy: without these keys the system silently blocks
+       LAN traffic (mDNS and direct UDP to private addresses), so Toss falls back to the
+       relay even when both machines are on the same network. Tauri merges this file into
+       the bundle's Info.plist. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Toss cần truy cập mạng cục bộ để chuyển file trực tiếp giữa các máy trong cùng mạng (nhanh hơn nhiều so với qua relay).</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_toss._udp</string>
+  </array>
+</dict>
+</plist>
