@@ -15,8 +15,10 @@ Máy tổng là máy ở studio giữ file gốc và luôn bật để editor �
    - tắt Sleep / Hibernate khi cắm điện, đóng nắp laptop không làm gì;
    - tạo Scheduled Task **Toss**: chạy `Toss.exe --hidden` mỗi khi tài khoản đăng nhập, quyền cao nhất, tự chạy lại tối đa 5 lần nếu app thoát bất thường;
    - xoá mục autostart `Run` cũ của Toss (tránh chạy 2 bản);
-   - tạo luật Windows Firewall cho Toss nếu chưa có;
-   - in ra checklist các bước tay bên dưới.
+   - tạo **một** luật Windows Firewall tên `Toss`: chiều vào, **UDP**, cho `Toss.exe` (luật cũ chỉ theo chương trình hoặc luật Windows tự tạo khi hiện hộp thoại "Allow access" sẽ bị thay);
+   - kiểm tra cổng **UDP 41820** có đang do Toss giữ không (Toss chỉ lắng nghe cổng này khi **Chế độ máy tổng đang bật**);
+   - nếu có `toss-cli.exe` cạnh `Toss.exe` hoặc trong PATH: chạy `toss-cli diag` và in dòng **khả năng nối trực tiếp** (High/Medium/Low) cùng trạng thái **port mapping (UPnP)**. Không có thì bỏ qua, thêm `-SkipDiag` để tắt hẳn;
+   - in ra checklist các bước tay bên dưới (gồm bật UPnP hoặc forward UDP 41820 trên router).
 
    Cần chỉ đường dẫn khác: `-ExePath "D:\Apps\Toss\Toss.exe"`. Gỡ task: thêm `-Uninstall`.
 
@@ -48,6 +50,8 @@ Vào BIOS/UEFI, đặt **Restore on AC Power Loss = Power On** (tên khác nhau 
 - PowerShell: `Get-ScheduledTask Toss | Get-ScheduledTaskInfo` cho biết lần chạy gần nhất và kết quả.
 - Từ máy editor: mở một link job thử.
 
-## Cổng UDP (tuỳ chọn)
+## Cổng UDP 41820 và router
 
-Mặc định không cần mở cổng nào, Toss tự đục NAT hoặc đi qua relay. Chi tiết trong `docs/INSTALL.md`.
+Máy tổng dùng cổng UDP cố định **41820**. Để editor ở xa nối **trực tiếp** (nhanh) thay vì qua relay (chậm), bật **UPnP** trên router studio (Toss tự mở cổng) hoặc forward tay **UDP 41820** tới IP cố định của máy tổng. Không làm cũng không hỏng gì, chỉ có thể rơi vào relay. Các bước chi tiết và cách đọc bảng Kết nối: `docs/INSTALL.md`, mục "Tốc độ & kết nối".
+
+Ghi chú: `toss-cli diag` trong script chạy bằng danh tính tạm (không đụng khoá của Toss đang chạy) nên nó đo mạng của máy này (NAT, UPnP), không đo riêng cổng 41820. Số liệu chính xác cho máy tổng thật nằm ở Toss → Cài đặt → Kết nối.
