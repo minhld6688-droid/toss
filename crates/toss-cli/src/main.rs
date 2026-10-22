@@ -231,6 +231,7 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
         device_name: name.clone(),
         app_version: toss_core::VERSION.to_string(),
+        net: Default::default(),
     };
     match &cli.cmd {
         Cmd::Id => {
@@ -590,7 +591,7 @@ async fn finish_transfer(node: Node, t: toss_core::Transfer, max_wait: u64) -> R
                     _ => {}
                 }
                 match &ev {
-                    TransferEvent::Progress { id, bytes_done, bytes_total, files_done, files_total, speed_bps, eta_s, path } if *id == t.id => {
+                    TransferEvent::Progress { id, bytes_done, bytes_total, files_done, files_total, speed_bps, eta_s, path, .. } if *id == t.id => {
                         if last_print.elapsed() >= Duration::from_secs(1) {
                             last_print = Instant::now();
                             eprintln!(

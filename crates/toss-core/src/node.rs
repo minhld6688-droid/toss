@@ -31,7 +31,7 @@ use crate::{
     transfer::{conn_path, Tracker, TransferEvent, TransferId, TransferState},
     util::unix_of,
     wire::{self, DirEntry},
-    CtlClient, ALPN_CTL, ALPN_XFER,
+    CtlClient, ALPN_CTL, ALPN_XFER, ALPN_XFER2,
 };
 
 /// Node configuration.
@@ -43,6 +43,9 @@ pub struct NodeConfig {
     pub device_name: String,
     /// App version, sent in hellos and reported in host status.
     pub app_version: String,
+    /// v0.4 network settings (relays, mDNS, port mapping, tuning).
+    #[serde(default)]
+    pub net: crate::net::NetConfig,
 }
 
 /// A named top folder a host may serve from.
@@ -491,6 +494,7 @@ impl Node {
         let mut builder = Endpoint::builder(presets::N0)
             .secret_key(secret.clone())
             .address_lookup(lookup.clone())
+            .transport_config(crate::tuning::transport_config(&cfg.net.tuning))
             .alpns(vec![]);
         if let Some(port) = port {
             use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
@@ -585,6 +589,17 @@ impl Node {
         self.inner.lookup.add_endpoint_info(addr);
     }
 
+    /// v0.4: this node's network situation (relay, addresses, port mapping, NAT, likelihood of direct).
+    pub async fn diagnostics(&self) -> crate::net::NetDiag {
+        crate::netdiag::diagnostics(&self.inner).await
+    }
+
+    /// v0.4: dials the host of `ticket` (ALPN xfer, no transfer), waits briefly for a direct
+    /// path and reports path / RTT / reason. Does not touch any job.
+    pub async fn test_connect(&self, ticket: &Ticket) -> crate::net::ConnectReport {
+        crate::netdiag::test_connect(&self.inner, ticket).await
+    }
+
     /// The fixed UDP port this node was started with (`None` = random).
     pub fn bind_port(&self) -> Option<u16> {
         self.inner.bind_port
@@ -606,7 +621,7 @@ impl Node {
                 *self.inner.host.write() = Some(rt);
                 self.inner
                     .endpoint
-                    .set_alpns(vec![ALPN_XFER.to_vec(), ALPN_CTL.to_vec()]);
+                    .set_alpns(vec![ALPN_XFER2.to_vec(), ALPN_XFER.to_vec(), ALPN_CTL.to_vec()]);
                 tracing::info!("host mode on");
                 self.inner.emit_host_status();
             }
@@ -840,7 +855,8 @@ async fn accept_loop(endpoint: Endpoint, inner: Weak<Inner>) {
                 conn.close(1u32.into(), b"host mode off");
                 return;
             }
-            if alpn == ALPN_XFER {
+            if alpn == ALPN_XFER || alpn == ALPN_XFER2 {
+                // xfer/2 (v0.4) vs xfer/1: host::handle_xfer branches on `conn.alpn()`.
                 host::handle_xfer(inner, conn).await;
             } else if alpn == ALPN_CTL {
                 crate::ctl::handle_ctl(inner, conn).await;

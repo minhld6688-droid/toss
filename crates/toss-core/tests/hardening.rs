@@ -40,6 +40,7 @@ async fn node(dir: &Path, name: &str) -> Node {
         data_dir: dir.join(format!("{name}-data")),
         device_name: name.to_string(),
         app_version: "test".into(),
+        net: Default::default(),
     })
     .await
     .expect("start node")

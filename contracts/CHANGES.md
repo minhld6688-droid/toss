@@ -87,3 +87,10 @@ Why: the real-network e2e (Windows host, macOS client) never connected: the clie
 - macOS Quick Action command is `for f in "$@"; do open -n -a Toss --args --share "$f"; done` (`-n` added to the coordinator's wording): without `-n`, `open` only activates an already-running Toss and drops `--args`; with it a short-lived second process forwards argv through single-instance and exits. Info.plist declares `NSSendFileTypes = [public.folder]` (what current Automator writes for "folders in Finder") plus legacy `NSSendTypes = [NSFilenamesPboardType]`, `NSRequiredContext.NSApplicationIdentifier = com.apple.finder`.
 - Context menu is (re)applied at every startup from `settings.context_menu` (register when on, remove when off), which also repairs the Windows command path after the app moved. Note: if the NSIS updater runs the old uninstaller, its `PREUNINSTALL` hook deletes the HKCU keys; the next launch writes them back.
 - Deps (coordinator-owned `Cargo.lock` gets new edges, no new versions): `toss-desktop` uses `blake3` (workspace), `winreg 0.56` (windows only), `plist 1` (dev-dependency).
+
+## 2026-10-22 — v0.4 speed (coordinator, approved)
+- New contract `speed-v0.4.md`; types in `crates/toss-core/src/net.rs`.
+- `NodeConfig.net: NetConfig` (serde default). `Node::diagnostics()`, `Node::test_connect()`.
+- `TransferEvent::Progress` / `TransferState`: `rtt_ms: Option<u32>`, `streams: u32`.
+- ALPN `toss/xfer/2` (segmented data streams) alongside `toss/xfer/1`; hosts accept both.
+- IPC: `get_diagnostics`, `add_firewall_rule`, `test_connect`, `set_net`, `export_logs`; `AppState.net`.

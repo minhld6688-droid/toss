@@ -21,6 +21,7 @@ export interface AppState {
   autostart: boolean;
   first_run: boolean;
   context_menu: boolean;        // "Tạo link Toss" registered in the OS right-click menu (v0.3)
+  net: NetConfig;               // v0.4
   auto_receive: boolean;        // v0.3: a clicked link with `get` starts downloading immediately (default true)           // true until setup finished
 }
 
@@ -42,7 +43,7 @@ export interface TicketSpec { job: string; root: string; path: string; ret: stri
 export interface TransferState {
   id: string; job: string; op: Op; side: Side; peer: string;
   status: Status; bytes_done: number; bytes_total: number; files_done: number; files_total: number;
-  speed_bps: number; eta_s: number | null; path: ConnPath; dest: string | null; error: string | null;
+  speed_bps: number; eta_s: number | null; path: ConnPath; rtt_ms: number | null; streams: number; dest: string | null; error: string | null;
   started_at: number;
 }
 
@@ -52,6 +53,18 @@ export interface JobRecord {
   last: { at: number; device: string; op: Op; files: number; bytes: number; ok: boolean; msg: string } | null;
   ticket: string;                     // re-signed string for display/copy (host side only)
 }
+
+// ---- v0.4 network (mirrors crates/toss-core/src/net.rs) ------------------
+export type Congestion = "bbr" | "cubic";
+export interface Tuning { stream_window_mb: number; send_window_mb: number; congestion: Congestion; streams: number; streams_high_rtt: number; chunk_kb: number; range_split_mb: number; small_file_kb: number }
+export interface NetConfig { relay_urls: string[]; mdns: boolean; portmap: boolean; tuning: Tuning }   // AppState.net
+export type Likelihood = "high" | "medium" | "low" | "unknown";
+export interface PortmapState { status: "off" | "probing" | "mapped" | "unavailable"; external_addr: string | null; protocol: string | null }
+export interface NatInfo { udp: boolean; global_v4: string | null; global_v6: string | null; mapping_varies_by_dest: boolean | null; hairpin: boolean | null; relay_latency_ms: number | null }
+export interface NetDiag { relay_url: string; relay_connected: boolean; custom_relay: boolean; direct_addrs: string[]; bind_port: number | null; mdns: boolean; portmap: PortmapState; nat: NatInfo; direct_likelihood: Likelihood; reasons: string[] }
+export type FirewallState = "ok" | "missing" | "unknown";
+export interface NetDiagUi extends NetDiag { firewall: FirewallState; log_dir: string }
+export interface ConnectReport { ok: boolean; path: ConnPath; rtt_ms: number | null; connect_ms: number; direct_after_ms: number | null; known_paths: string[]; reason: string }
 
 export interface DirEntry { name: string; is_dir: boolean; size: number; mtime: number }
 
@@ -103,6 +116,13 @@ export interface Commands {
   remote_list_jobs(): Promise<JobRecord[]>;
   remote_revoke(args: { id: string }): Promise<void>;
 
+  // v0.4 speed / diagnostics (contracts/speed-v0.4.md §3)
+  get_diagnostics(): Promise<NetDiagUi>;
+  add_firewall_rule(): Promise<void>;                                        // Windows UAC / macOS admin prompt
+  test_connect(args: { ticket: string }): Promise<ConnectReport>;
+  set_net(args: { net: NetConfig }): Promise<void>;                          // persisted; node restarts when idle
+  export_logs(): Promise<string>;                                            // path of the zip on the Desktop
+
   // misc
   qr_svg(args: { text: string }): Promise<string>;                           // SVG markup
   copy_text(args: { text: string }): Promise<void>;
@@ -120,7 +140,7 @@ export type Events = {
 export type TransferEvent =
   | { type: "started"; id: string; job: string; op: Op; side: Side; peer: string }
   | { type: "manifest"; id: string; files: number; bytes: number; to_do_files: number; to_do_bytes: number }
-  | { type: "progress"; id: string; bytes_done: number; bytes_total: number; files_done: number; files_total: number; speed_bps: number; eta_s: number | null; path: ConnPath }
+  | { type: "progress"; id: string; bytes_done: number; bytes_total: number; files_done: number; files_total: number; speed_bps: number; eta_s: number | null; path: ConnPath; rtt_ms: number | null; streams: number }
   | { type: "done"; id: string; files: number; bytes: number; elapsed_s: number; dest: string | null }
   | { type: "error"; id: string; code: ErrorCode; msg: string; retry_in_s: number | null }
   | { type: "paused"; id: string }

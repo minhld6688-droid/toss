@@ -28,6 +28,7 @@ async fn node(dir: &Path, name: &str) -> Node {
         data_dir: dir.join(format!("{name}-data")),
         device_name: name.to_string(),
         app_version: "test".into(),
+        net: Default::default(),
     })
     .await
     .expect("start node")
@@ -545,6 +546,7 @@ async fn fixed_bind_port() {
         data_dir: tmp.path().join(name),
         device_name: name.into(),
         app_version: "test".into(),
+        net: Default::default(),
     };
     let n = Node::start_with_port(cfg("a"), Some(port)).await.unwrap();
     assert_eq!(n.bind_port(), Some(port));

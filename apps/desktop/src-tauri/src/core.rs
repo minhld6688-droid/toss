@@ -147,6 +147,7 @@ impl Core {
             data_dir: self.data_dir.clone(),
             device_name: name,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
+            net: Default::default(),
         };
         let port = host.as_ref().and_then(|h| h.bind_port);
         let start = |port| {

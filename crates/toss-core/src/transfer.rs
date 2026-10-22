@@ -67,6 +67,10 @@ pub enum TransferEvent {
         eta_s: Option<u64>,
         /// Connection path.
         path: ConnPath,
+        /// v0.4: RTT of the selected path, ms (None = unknown).
+        rtt_ms: Option<u32>,
+        /// v0.4: data streams currently open.
+        streams: u32,
     },
     /// Finished successfully.
     Done {
@@ -203,6 +207,10 @@ pub struct TransferState {
     pub eta_s: Option<u64>,
     /// Connection path.
     pub path: ConnPath,
+    /// v0.4: RTT of the selected path, ms.
+    pub rtt_ms: Option<u32>,
+    /// v0.4: data streams currently open.
+    pub streams: u32,
     /// Destination folder.
     pub dest: Option<String>,
     /// Last error message.
@@ -307,6 +315,8 @@ impl Tracker {
             speed_bps: 0,
             eta_s: None,
             path: ConnPath::Unknown,
+            rtt_ms: None,
+            streams: 0,
             dest,
             error: None,
             started_at: now_unix(),
@@ -451,6 +461,8 @@ impl Tracker {
                 speed_bps: s.speed_bps,
                 eta_s: s.eta_s,
                 path: s.path,
+                rtt_ms: s.rtt_ms,
+                streams: s.streams,
             });
         });
         if let Some(ev) = ev {
