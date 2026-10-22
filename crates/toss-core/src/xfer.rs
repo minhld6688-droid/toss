@@ -172,7 +172,11 @@ pub(crate) async fn send_files(
     Ok(())
 }
 
-async fn send_one(conn: &Connection, item: SendItem, tracker: &Tracker) -> Result<(), SessErr> {
+async fn send_one(
+    conn: &Connection,
+    item: SendItem,
+    tracker: &Arc<Tracker>,
+) -> Result<(), SessErr> {
     let mut file = File::open(&item.abs)
         .await
         .with_context(|| format!("open {}", item.abs.display()))
@@ -183,6 +187,7 @@ async fn send_one(conn: &Connection, item: SendItem, tracker: &Tracker) -> Resul
             .with_context(|| format!("seek {}", item.abs.display()))
             .map_err(SessErr::Io)?;
     }
+    let _open = tracker.stream_open();
     let stall = stall_timeout();
     let mut stream = timed("open stream", stall, conn.open_uni()).await?;
     timed(
@@ -299,9 +304,10 @@ async fn recv_one(
     mut stream: RecvStream,
     items: &Mutex<HashMap<u32, RecvItem>>,
     base_c: &Path,
-    tracker: &Tracker,
+    tracker: &Arc<Tracker>,
     hashes: &HashCache,
 ) -> Result<RecvOne, SessErr> {
+    let _open = tracker.stream_open();
     let stall = stall_timeout();
     let (index, offset) = timed("read", stall, read_stream_header(&mut stream)).await?;
     let item = items
@@ -539,7 +545,8 @@ fn plan_streams(items: Vec<SendItem>, t: &Tuning) -> Vec<Vec<Seg>> {
         .filter(|i| i.size < small)
         .map(|i| i.size - i.offset.min(i.size))
         .sum();
-    let batch_cap = (small_total / u64::from(t.streams.max(1)).max(1)).clamp(256 * 1024, MAX_BATCH_BYTES);
+    let batch_cap =
+        (small_total / u64::from(t.streams.max(1)).max(1)).clamp(256 * 1024, MAX_BATCH_BYTES);
     let mut jobs = Vec::new();
     let mut batch: Vec<Seg> = Vec::new();
     let mut batch_bytes = 0u64;
@@ -870,11 +877,15 @@ impl FileSlot {
         let whole = offset == self.item.offset && len == self.remaining;
         let mut st = self.st.lock();
         if st.finishing || st.resolved {
-            return Err(SessErr::Other(anyhow!("{label}: segment after the file was complete")));
+            return Err(SessErr::Other(anyhow!(
+                "{label}: segment after the file was complete"
+            )));
         }
         if len > 0 {
             if st.claimed.iter().any(|&(a, b)| offset < b && a < end) {
-                return Err(SessErr::Other(anyhow!("{label}: overlapping segment at {offset}")));
+                return Err(SessErr::Other(anyhow!(
+                    "{label}: overlapping segment at {offset}"
+                )));
             }
             st.claimed.push((offset, end));
         }
@@ -1066,7 +1077,11 @@ async fn read_seg_header(stream: &mut RecvStream) -> Result<Option<[u8; SEG_HEAD
         {
             Some(n) => filled += n,
             None if filled == 0 => return Ok(None),
-            None => return Err(SessErr::Other(anyhow!("stream ended inside a segment header"))),
+            None => {
+                return Err(SessErr::Other(anyhow!(
+                    "stream ended inside a segment header"
+                )))
+            }
         }
     }
     Ok(Some(h))
@@ -1174,7 +1189,10 @@ async fn prepare(st: &Arc<RecvState>, slot: &Arc<FileSlot>, whole: bool) -> Resu
                     hash_range(&part, blake3::Hasher::new(), 0, offset, &st2.watch)
                 })
                 .await?;
-                *slot.rolling.lock() = Some(Rolling { hasher: h, upto: offset });
+                *slot.rolling.lock() = Some(Rolling {
+                    hasher: h,
+                    upto: offset,
+                });
             }
             Ok(())
         })
@@ -1394,7 +1412,11 @@ async fn finalize(
             }
         };
         if len != item.entry.size || hash != item.entry.hash {
-            tracing::warn!("hash mismatch for {} ({len}/{} bytes)", item.label, item.entry.size);
+            tracing::warn!(
+                "hash mismatch for {} ({len}/{} bytes)",
+                item.label,
+                item.entry.size
+            );
             let _ = std::fs::remove_file(part);
             return Ok(Fin::Mismatch(item.label.clone()));
         }
@@ -1464,5 +1486,100 @@ mod tests {
             total: 1,
         };
         assert!(check_manifest(&overflow).is_err());
+    }
+
+    #[test]
+    fn stream_plan() {
+        let item = |index, offset, size| SendItem {
+            index,
+            offset,
+            abs: PathBuf::from(format!("f{index}")),
+            size,
+        };
+        let t = Tuning {
+            range_split_mb: 1,
+            small_file_kb: 64,
+            streams: 4,
+            ..Tuning::default()
+        };
+        let mut items = vec![
+            item(0, 1000, 5 * MIB + 7), // split, resumed
+            item(1, 0, 300 * 1024),     // medium: own stream
+            item(2, 0, 0),              // empty: zero-length segment
+        ];
+        items.extend((3..103).map(|i| item(i, 0, 10_000)));
+        let jobs = plan_streams(items, &t);
+        let segs: Vec<&Seg> = jobs.iter().flatten().collect();
+        // Every byte exactly once, in order per file.
+        let mut cover: HashMap<u32, Vec<(u64, u64)>> = HashMap::new();
+        for s in &segs {
+            cover
+                .entry(s.index)
+                .or_default()
+                .push((s.offset, s.offset + s.len));
+        }
+        let big = &cover[&0];
+        assert!(big.len() >= 5, "{big:?}");
+        assert_eq!(big[0].0, 1000);
+        assert_eq!(big.last().unwrap().1, 5 * MIB + 7);
+        assert!(big.windows(2).all(|w| w[0].1 == w[1].0));
+        assert!(big.iter().all(|(a, b)| b - a <= MIB));
+        assert_eq!(cover[&2], vec![(0, 0)]);
+        assert_eq!(cover.len(), 103);
+        // Big segments and the medium file stand alone; small files share streams.
+        assert!(jobs.iter().filter(|j| j.len() > 1).count() >= 1);
+        assert!(jobs
+            .iter()
+            .filter(|j| j.len() > 1)
+            .all(|j| j.iter().all(|s| s.len <= 64 * 1024)));
+        assert!(jobs.len() < 103);
+        let left0 = segs
+            .iter()
+            .find(|s| s.index == 0)
+            .unwrap()
+            .left
+            .load(Ordering::Relaxed);
+        assert_eq!(left0 as usize, big.len());
+    }
+
+    #[test]
+    fn slot_watermark() {
+        let slot = FileSlot {
+            item: RecvItem {
+                entry: FileEntry {
+                    rel: "a".into(),
+                    size: 100,
+                    hash: [0; 32],
+                },
+                final_path: "a".into(),
+                part: "a.part".into(),
+                offset: 10,
+                label: "a".into(),
+                no_clobber: false,
+            },
+            remaining: 90,
+            prepared: tokio::sync::OnceCell::new(),
+            st: Mutex::new(SlotState::default()),
+            rolling: Mutex::new(None),
+            catching_up: AtomicBool::new(false),
+        };
+        assert!(slot.claim(5, 10).is_err()); // before the resume point
+        assert!(slot.claim(90, 20).is_err()); // past the end
+        assert!(!slot.claim(40, 30).unwrap());
+        assert!(slot.claim(50, 5).is_err()); // overlap
+        assert!(!slot.claim(10, 30).unwrap());
+        assert!(!slot.claim(70, 30).unwrap());
+        slot.mark_done(40, 70);
+        assert_eq!(slot.watermark(), 10);
+        slot.mark_done(10, 25);
+        assert_eq!(slot.watermark(), 25);
+        assert!(!slot.try_finish());
+        slot.mark_done(25, 40);
+        assert_eq!(slot.watermark(), 70);
+        slot.mark_done(70, 100);
+        assert_eq!(slot.watermark(), 100);
+        assert!(slot.try_finish());
+        assert!(!slot.try_finish());
+        assert!(slot.claim(0, 0).is_err());
     }
 }

@@ -22,12 +22,22 @@ pub(crate) const MAX_BATCH_FILES: usize = 4096;
 /// Largest segment of a split file. Small segments keep the out-of-order
 /// window (and so what a disconnect throws away) at ~streams × 64 MiB.
 pub(crate) const MAX_SEGMENT: u64 = 64 * MIB;
+/// Upper bound of the per-stream receive window actually configured.
+///
+/// noq's reassembly buffer refuses more than 1024 non-contiguous pieces per
+/// stream and then kills the *connection* (`INTERNAL_ERROR: too many gaps in
+/// stream buffer`). With an 8 MiB window (~7000 packets) a slow-reading
+/// receiver plus packet loss gets there: the loopback bench died that way at
+/// 4–8 MiB (BBR and Cubic) and never at 1–2 MiB. Bandwidth comes from more
+/// streams instead: 8–16 streams × 2 MiB = 16–32 MiB in flight, above the
+/// bandwidth-delay product of 1 Gbit/s at 130–260 ms.
+pub(crate) const MAX_STREAM_WINDOW: u64 = 2 * MIB;
 
 /// Transport config for the endpoint (windows, congestion controller, stream limits).
 /// iroh's keep-alive / idle / multipath defaults are kept (the builder starts from them).
 pub(crate) fn transport_config(t: &Tuning) -> QuicTransportConfig {
     let t = sane(t);
-    let stream_window = u64::from(t.stream_window_mb) * MIB;
+    let stream_window = (u64::from(t.stream_window_mb) * MIB).min(MAX_STREAM_WINDOW);
     let streams = u64::from(t.streams.max(t.streams_high_rtt));
     let conn_window = stream_window.saturating_mul(streams);
     let b = QuicTransportConfig::builder()
@@ -74,7 +84,12 @@ pub(crate) fn stream_target(conn: &Connection, t: &Tuning, cap: Option<u32>) -> 
     target_for(path, rtt, t, cap)
 }
 
-pub(crate) fn target_for(path: ConnPath, rtt_ms: Option<u32>, t: &Tuning, cap: Option<u32>) -> usize {
+pub(crate) fn target_for(
+    path: ConnPath,
+    rtt_ms: Option<u32>,
+    t: &Tuning,
+    cap: Option<u32>,
+) -> usize {
     let high = path == ConnPath::Relay || rtt_ms.is_some_and(|r| r > HIGH_RTT_MS);
     let n = if high {
         t.streams_high_rtt.max(t.streams)

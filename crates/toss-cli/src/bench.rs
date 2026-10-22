@@ -43,12 +43,23 @@ pub struct BenchArgs {
     /// Read/write chunk, KiB (tuning.chunk_kb).
     #[arg(long)]
     chunk_kb: Option<u32>,
+    /// Per-stream receive window, MiB (tuning.stream_window_mb).
+    #[arg(long)]
+    stream_window_mb: Option<u32>,
+    /// Split files above this size, MiB (tuning.range_split_mb).
+    #[arg(long)]
+    range_split_mb: Option<u32>,
     /// Scratch folder (default: system temp dir). Needs 2 × the data size.
     #[arg(long)]
     dir: Option<PathBuf>,
     /// Keep the scratch folder.
     #[arg(long)]
     keep: bool,
+    /// Sparse source files (all zeros, no disk space): for a RAM disk
+    /// (`--dir /dev/shm`) when the disk is too small. Hashing and transfer
+    /// costs are the same; only the host's disk reads become free.
+    #[arg(long)]
+    sparse: bool,
 }
 
 #[derive(Serialize)]
@@ -107,7 +118,12 @@ async fn run_in(args: &BenchArgs, base: &Path, size: u64) -> Result<BenchResult>
         base.display()
     );
     for i in 0..args.files {
-        write_file(&src.join(format!("IMG_{i:05}.CR3")), size, i as u64)?;
+        let p = src.join(format!("IMG_{i:05}.CR3"));
+        if args.sparse {
+            std::fs::File::create(&p)?.set_len(size)?;
+        } else {
+            write_file(&p, size, i as u64)?;
+        }
     }
 
     let mut net = NetConfig::default();
@@ -119,6 +135,12 @@ async fn run_in(args: &BenchArgs, base: &Path, size: u64) -> Result<BenchResult>
     }
     if let Some(c) = args.chunk_kb {
         net.tuning.chunk_kb = c;
+    }
+    if let Some(w) = args.stream_window_mb {
+        net.tuning.stream_window_mb = w;
+    }
+    if let Some(r) = args.range_split_mb {
+        net.tuning.range_split_mb = r;
     }
     let cfg = |name: &str| NodeConfig {
         data_dir: base.join(format!("{name}-data")),
@@ -193,9 +215,9 @@ async fn run_in(args: &BenchArgs, base: &Path, size: u64) -> Result<BenchResult>
         files: args.files,
         bytes,
         elapsed_s: round2(secs),
-        note: args.rtt_ms.map(|r| {
-            format!("--rtt-ms {r} ignored: no delay injection on in-process loopback")
-        }),
+        note: args
+            .rtt_ms
+            .map(|r| format!("--rtt-ms {r} ignored: no delay injection on in-process loopback")),
     })
 }
 

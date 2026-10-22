@@ -536,8 +536,15 @@ async fn host_put(
     );
     let summary = if conn.alpn() == ALPN_XFER2 {
         let pipe = Pipe::new(&inner.cfg.net.tuning, None);
-        xfer::receive_files_v2(conn, &plan.base_c, plan.items, &pipe, tracker, &inner.hashes)
-            .await?
+        xfer::receive_files_v2(
+            conn,
+            &plan.base_c,
+            plan.items,
+            &pipe,
+            tracker,
+            &inner.hashes,
+        )
+        .await?
     } else {
         xfer::receive_files(conn, &plan.base_c, plan.items, tracker, &inner.hashes).await?
     };

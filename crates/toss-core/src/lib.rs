@@ -30,8 +30,8 @@ mod xfer;
 /// Test hooks (not part of the contract).
 #[doc(hidden)]
 pub mod testing {
-    pub use crate::xfer::set_timeouts;
     pub use crate::client::force_xfer1_client;
+    pub use crate::xfer::set_timeouts;
 }
 
 pub use ctl::CtlClient;

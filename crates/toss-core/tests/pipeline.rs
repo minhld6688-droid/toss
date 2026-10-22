@@ -110,7 +110,12 @@ async fn setup(host_tuning: Tuning, client_tuning: Tuning) -> Setup {
     init();
     let tmp = tempfile::tempdir().unwrap();
     let t = tmp.path().to_path_buf();
-    let (root, ret, dest, work) = (t.join("root"), t.join("return"), t.join("dest"), t.join("work"));
+    let (root, ret, dest, work) = (
+        t.join("root"),
+        t.join("return"),
+        t.join("dest"),
+        t.join("work"),
+    );
     for d in [&root, &dest, &work] {
         std::fs::create_dir_all(d).unwrap();
     }
@@ -162,7 +167,11 @@ fn make_tree(base: &Path) -> Vec<String> {
     add("empty.xmp", 3, 0);
     for i in 0..60u64 {
         let dir = if i % 3 == 0 { "sub/a" } else { "sub/b/c" };
-        add(&format!("{dir}/IMG_{i:04}.xmp"), 100 + i, 1 + (i as usize * 997) % 20_000);
+        add(
+            &format!("{dir}/IMG_{i:04}.xmp"),
+            100 + i,
+            1 + (i as usize * 997) % 20_000,
+        );
     }
     rels.sort();
     rels
@@ -242,7 +251,11 @@ async fn v2_get_put_segments_and_batches() {
     // Changed big file with the same name: lands as "video (2).mp4".
     let changed = s.work.join("video.mp4");
     write_data(&changed, 77, 3 * MIB + 5);
-    let tr = s.client.put(t.clone(), vec![changed.clone()]).await.unwrap();
+    let tr = s
+        .client
+        .put(t.clone(), vec![changed.clone()])
+        .await
+        .unwrap();
     wait_done(&tr).await;
     assert_eq!(
         std::fs::read(s.ret.join("back/video.mp4")).unwrap(),
@@ -322,12 +335,20 @@ async fn v2_wire_format() {
             received += len;
             segs += 1;
             seen_files.insert(index);
-            assert!(got.entry(index).or_default().insert(offset, bytes).is_none());
+            assert!(got
+                .entry(index)
+                .or_default()
+                .insert(offset, bytes)
+                .is_none());
         }
         per_stream.push(segs);
     }
     let big_segs = &got[&big];
-    assert!(big_segs.len() >= 3, "big file in {} segments", big_segs.len());
+    assert!(
+        big_segs.len() >= 3,
+        "big file in {} segments",
+        big_segs.len()
+    );
     assert_eq!(*big_segs.keys().next().unwrap(), 1000);
     assert!(
         per_stream.iter().any(|n| *n >= 10),
@@ -374,7 +395,11 @@ async fn wait_part(part: &Path, done: &Path, min: u64) {
             !done.exists(),
             "transfer finished before it could be interrupted"
         );
-        assert!(t0.elapsed() < Duration::from_secs(60), "no progress on {}", part.display());
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "no progress on {}",
+            part.display()
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
@@ -508,7 +533,10 @@ async fn v2_stalled_receiver_frees_the_slot() {
     let s = setup(small_tuning(), small_tuning()).await;
     let f = s.root.join("big/big.bin");
     std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-    std::fs::File::create(&f).unwrap().set_len(256 << 20).unwrap();
+    std::fs::File::create(&f)
+        .unwrap()
+        .set_len(256 << 20)
+        .unwrap();
     let t = s.host.create_ticket(spec("big", "big", "")).unwrap();
     let conn = s
         .client
