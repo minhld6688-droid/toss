@@ -394,6 +394,7 @@ impl Core {
 
     pub async fn create_ticket(&self, spec: TicketSpec) -> Result<TicketInfo> {
         let node = self.node().await?;
+        wait_for_relay(&node).await;
         let t = node.create_ticket(to_core_spec(spec))?;
         Ok(self.info(&t))
     }
@@ -420,6 +421,7 @@ impl Core {
 
     pub async fn create_admin_ticket(&self, days: u32) -> Result<TicketInfo> {
         let node = self.node().await?;
+        wait_for_relay(&node).await;
         // Not in core-api.md, but provided by toss-core (see CHANGES.md).
         let t = node.create_admin_ticket(days)?;
         Ok(self.info(&t))
@@ -950,6 +952,15 @@ pub fn qr_svg(text: &str) -> Result<String> {
     ))
 }
 
+/// Tickets embed the host's relay URL (wire.md §1 v2). Right after the node
+/// starts the relay may not be known yet: give it a moment (no wait once known,
+/// at most 2 s so the UI never hangs on an offline machine).
+async fn wait_for_relay(node: &Node) {
+    if node.host_addr().relay.is_empty() {
+        node.wait_online(Duration::from_secs(2)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,7 +1100,17 @@ mod tests {
         assert_eq!(parsed.host, st.endpoint_id);
         let jobs = core.list_jobs().await.unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].ticket, info.ticket);
+        // Re-signed with the host's current addresses: same job, same id
+        // (the string only differs if the relay/direct addresses changed).
+        let relisted = core.parse_ticket(&jobs[0].ticket).unwrap();
+        assert_eq!(
+            (
+                relisted.id.as_str(),
+                relisted.job.as_str(),
+                relisted.host.as_str()
+            ),
+            (info.id.as_str(), "12A3 - RAW", st.endpoint_id.as_str())
+        );
         core.revoke(jobs[0].id.clone()).await.unwrap();
         assert!(core.list_jobs().await.unwrap()[0].revoked);
         assert!(core.parse_ticket("khong phai link").is_err());

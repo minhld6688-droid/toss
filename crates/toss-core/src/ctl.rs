@@ -51,10 +51,9 @@ impl CtlClient {
     }
 
     async fn dial(&self) -> Result<(Connection, SendStream, RecvStream)> {
-        let host = self.ticket.host().map_err(|e| anyhow!(e))?;
         let conn = self
             .inner
-            .connect(host, ALPN_CTL)
+            .dial_host(&self.ticket, ALPN_CTL)
             .await
             .context("host offline")?;
         let (mut send, mut recv) = conn.open_bi().await.context("open control stream")?;
@@ -167,7 +166,7 @@ impl CtlClient {
 /// Host side of `toss/ctl/1`.
 pub(crate) async fn handle_ctl(inner: Arc<Inner>, conn: Connection) {
     if let Err(e) = serve_ctl(&inner, &conn).await {
-        tracing::debug!(remote = %conn.remote_id().fmt_short(), "control session ended: {e:#}");
+        tracing::info!(remote = %conn.remote_id().fmt_short(), alpn = "toss/ctl/1", "control session ended: {e:#}");
     }
     conn.close(0u32.into(), b"bye");
 }
@@ -189,7 +188,7 @@ async fn serve_ctl(inner: &Arc<Inner>, conn: &Connection) -> Result<()> {
             },
         )
         .await?;
-        bail!("first request was not Auth");
+        bail!("denied: first request was not Auth");
     };
     let device = clean_text(&device, MAX_DEVICE);
     let verdict = verify_common(inner, &ticket).and_then(|()| {
@@ -209,9 +208,9 @@ async fn serve_ctl(inner: &Arc<Inner>, conn: &Connection) -> Result<()> {
         .await?;
         let _ = send.finish();
         let _ = tokio::time::timeout(Duration::from_secs(3), conn.closed()).await;
-        bail!("admin auth from {device} denied: {reason}");
+        bail!("denied: admin auth from {device}: {reason}");
     }
-    tracing::info!(%device, "admin connected");
+    tracing::info!(remote = %conn.remote_id().fmt_short(), %device, "admin connected");
     write_msg(&mut send, &CtlResponse::Ok).await?;
     loop {
         let req: CtlRequest = match read_msg(&mut recv).await {
@@ -265,9 +264,13 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
                     }
                 }
             }
-            CtlRequest::CreateTicket(spec) => {
-                CtlResponse::Ticket(issue_ticket(&inner.secret, &inner.jobs, &rt, spec)?)
-            }
+            CtlRequest::CreateTicket(spec) => CtlResponse::Ticket(issue_ticket(
+                &inner.secret,
+                &inner.jobs,
+                &rt,
+                spec,
+                &inner.host_addr(),
+            )?),
             CtlRequest::ListJobs => CtlResponse::Jobs(inner.jobs.list()),
             CtlRequest::Revoke { id } => {
                 inner.jobs.revoke(id)?;
@@ -278,7 +281,8 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
                 match inner.jobs.body(id, host) {
                     // Never hand out admin tickets: a holder could keep control
                     // after its own admin ticket is revoked.
-                    Some(body) if !body.admin => {
+                    Some(mut body) if !body.admin => {
+                        body.set_host_addr(&inner.host_addr());
                         CtlResponse::Ticket(Ticket::sign(body, &inner.secret))
                     }
                     Some(_) => CtlResponse::Denied {

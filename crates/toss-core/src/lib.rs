@@ -33,7 +33,7 @@ pub mod testing {
 pub use ctl::CtlClient;
 pub use jobs::{JobEvent, JobRecord};
 pub use node::{HostConfig, Node, NodeConfig, Root};
-pub use ticket::{Ticket, TicketBody, TicketSpec};
+pub use ticket::{HostAddr, Ticket, TicketBody, TicketSpec};
 pub use transfer::{ConnPath, Transfer, TransferEvent, TransferId, TransferState};
 
 /// Crate version.

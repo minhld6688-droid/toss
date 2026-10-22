@@ -9,7 +9,7 @@ host's iroh secret key (the same key that is the host's `EndpointId`).
 // crates/toss-core/src/ticket.rs
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TicketBody {
-    pub v: u8,                 // = 1
+    pub v: u8,                 // = 2
     pub id: [u8; 16],          // random, identifies the job; hex is the job id shown in UIs
     pub host: [u8; 32],        // host EndpointId (public key)
     pub job: String,           // human name, <= 80 chars, used as folder name (sanitized)
@@ -20,6 +20,10 @@ pub struct TicketBody {
     pub put: bool,             // client may upload into return root/ret
     pub admin: bool,           // control-channel access (see §4); get/put are false when true
     pub exp: u64,              // unix seconds; 0 = never
+    // --- v2 (appended; postcard field order is the wire order) ---
+    pub relay: String,         // host's home relay URL when signed, e.g. "https://use1-1.relay.n0.iroh.link./"; "" = unknown
+    pub addrs: Vec<String>,    // host's direct socket addrs as text ("1.2.3.4:5678", "[2001:db8::1]:5678"),
+                               // best first (public v4, public v6, LAN), loopback/link-local omitted; 0..=8
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -30,9 +34,27 @@ pub struct Ticket {
 ```
 
 String form: `toss1` + base32 (RFC 4648, no padding, **lowercase**) of
-`postcard(Ticket)`. Example length: ~330 chars. `Ticket::from_str` accepts
+`postcard(Ticket)`. Length: ~230 chars without addresses, typically ~350–550
+with a relay URL and a few direct addresses (≤ ~900 worst case). `Ticket::from_str` accepts
 upper or lower case, trims whitespace, accepts the string with or without the
-`toss://t/` or `https://<any host>/#` prefix.
+`toss://t/` or `https://<any host>/#` prefix. Only `v == 2` is accepted: the
+first byte of `postcard(Ticket)` is `v`, and a v1 ticket is refused with
+`TicketError::BadVersion(1)` ("ticket format v1 is not supported … ask the host
+for a new link") instead of a decode error.
+
+`relay`/`addrs` are covered by the signature like every other field. They are a
+dialing hint, not an authority: the QUIC/TLS handshake authenticates the host
+key, so stale or wrong addresses can only make a dial fail, never reach another
+host. They are filled from the live endpoint (`Endpoint::addr()`: home relay +
+direct addresses) whenever a ticket is signed — host-local `create_ticket` /
+`create_admin_ticket`, ctl `CreateTicket`, and the re-sign in `job_ticket` /
+ctl `JobTicket` (so a re-signed ticket carries the host's *current* addresses
+and its string differs from the original if they changed; id, job and
+permissions are identical). The offline CLI path (`toss-cli ticket` while
+`toss-cli host` runs) reads the last known values that the running host keeps
+in `<data_dir>/cli-host.json`. Clients dial `EndpointAddr { id: host, relay,
+addrs }` (see §5). Tickets reveal the host's IP addresses to their holders
+(they are bearer secrets anyway); pkarr publishing stays relay-only.
 
 Verification (host side, `Ticket::verify(&self, host_pk)`):
 1. `body.host == host_pk` and signature valid over `postcard(body)`.
@@ -144,8 +166,25 @@ control channel.
 - Secret key: `<data_dir>/key` (32 bytes, mode 0600; created on first run).
   `data_dir` = `dirs::data_dir()/toss` (`~/Library/Application Support/toss`,
   `%APPDATA%\toss`, `~/.local/share/toss`); the CLI accepts `--data-dir`.
-- iroh `Endpoint` built with default discovery (n0 DNS publish + resolve) and
-  default relays; ALPNs `toss/xfer/1` and `toss/ctl/1` on hosts, none on
-  pure clients. A client that is also an admin device accepts no ALPN.
-- `TransferEvent::Progress.path` reports `Direct` or `Relay` from
-  `endpoint.conn_type(remote)`.
+- iroh `Endpoint` built with `presets::N0` (pkarr publish of the home relay
+  URL to n0 + pkarr/DNS resolve, default n0 relays) plus an in-memory
+  `MemoryLookup` (`Node::add_peer_addr`); ALPNs `toss/xfer/1` and `toss/ctl/1`
+  on hosts, none on pure clients. A client that is also an admin device
+  accepts no ALPN.
+- Dialing (get, put, ctl): the client connects to the `EndpointAddr` built from
+  the ticket (host id + `relay` + `addrs`), so iroh starts via the host's relay
+  immediately and tries the direct addresses / hole-punches in parallel. n0
+  DNS/pkarr lookup is **not** required but still runs as a fallback (iroh
+  starts it whenever no path is selected, e.g. when the ticket's addresses are
+  stale or empty). Each attempt is bounded by 45 s (iroh's own handshake gives
+  up after ~30 s idle); the retry policy (every 30 s; Busy 1 h, HostOffline
+  24 h) is unchanged.
+- Logging (info level, target `toss_core`): client — every dial attempt (ticket
+  relay / number of direct addrs, home relay online?), success (path,
+  elapsed) or failure (error, paths iroh knew), plus a background n0 lookup
+  report after a failure; host — every accepted connection (remote id, ALPN,
+  path) and every denial with its reason; every node — home relay
+  connected / not connected (with the last error). iroh's own
+  `home is now relay …` only means the relay was *selected*.
+- `TransferEvent::Progress.path` reports `Direct` or `Relay` from the
+  connection's selected path (`Connection::paths()`, see CHANGES.md).

@@ -174,6 +174,8 @@ impl JobStore {
     }
 
     /// Reconstructs the ticket body of a stored job (to re-sign it for display).
+    /// `relay`/`addrs` are left empty: the caller fills in the host's current
+    /// addresses (they are not stored).
     pub fn body(&self, id: [u8; 16], host: [u8; 32]) -> Option<TicketBody> {
         let _g = self.lock.lock();
         self.load_jobs()
@@ -191,6 +193,8 @@ impl JobStore {
                 put: j.record.put,
                 admin: j.admin,
                 exp: j.record.exp,
+                relay: String::new(),
+                addrs: Vec::new(),
             })
     }
 

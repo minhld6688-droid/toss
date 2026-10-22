@@ -1,15 +1,22 @@
 //! Signed tickets (wire.md §1).
 
-use std::{fmt, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+};
 
 use data_encoding::BASE32_NOPAD;
-use iroh::{PublicKey, SecretKey, Signature};
+use iroh::{EndpointAddr, PublicKey, RelayUrl, SecretKey, Signature, TransportAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::util::now_unix;
 
-/// Current ticket format version.
-pub const TICKET_VERSION: u8 = 1;
+/// Current ticket format version (2: `relay` + `addrs` appended to the body).
+pub const TICKET_VERSION: u8 = 2;
+/// Maximum number of direct addresses carried in a ticket.
+pub const MAX_TICKET_ADDRS: usize = 8;
 /// Prefix of the string form.
 pub const TICKET_PREFIX: &str = "toss1";
 /// Maximum length of `TicketBody::job` in characters.
@@ -18,7 +25,7 @@ pub const MAX_JOB_LEN: usize = 80;
 /// The signed part of a ticket. Field order is the postcard wire order.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TicketBody {
-    /// Format version, = 1.
+    /// Format version, = 2.
     pub v: u8,
     /// Random job id; `hex(id)` is the job id shown in UIs.
     pub id: [u8; 16],
@@ -40,6 +47,100 @@ pub struct TicketBody {
     pub admin: bool,
     /// Expiry, unix seconds; 0 = never.
     pub exp: u64,
+    /// v2: the host's home relay URL when the ticket was signed; `""` = unknown.
+    pub relay: String,
+    /// v2: the host's direct socket addresses (`ip:port` / `[ip6]:port`) when
+    /// the ticket was signed, best first, at most [`MAX_TICKET_ADDRS`]; may be empty.
+    pub addrs: Vec<String>,
+}
+
+/// Where a host can be reached: the `relay` + `addrs` hint carried by v2
+/// tickets (wire.md §1). Clients dial these directly; n0 DNS/pkarr lookup
+/// stays active as a fallback.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostAddr {
+    /// Home relay URL, `""` = none known.
+    #[serde(default)]
+    pub relay: String,
+    /// Direct socket addresses as text, best first, ≤ [`MAX_TICKET_ADDRS`].
+    #[serde(default)]
+    pub addrs: Vec<String>,
+}
+
+impl HostAddr {
+    /// Picks the relay URL and up to [`MAX_TICKET_ADDRS`] direct addresses of
+    /// `addr`: public IPv4, public IPv6, private (LAN) IPv4, then the rest;
+    /// loopback, unspecified and link-local addresses are left out.
+    pub fn from_endpoint_addr(addr: &EndpointAddr) -> HostAddr {
+        let relay = addr
+            .relay_urls()
+            .next()
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let mut ranked: Vec<(u8, SocketAddr)> = addr
+            .ip_addrs()
+            .filter_map(|a| addr_rank(a).map(|r| (r, *a)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        ranked.sort_by_key(|(r, _)| *r);
+        HostAddr {
+            relay,
+            addrs: ranked
+                .into_iter()
+                .take(MAX_TICKET_ADDRS)
+                .map(|(_, a)| a.to_string())
+                .collect(),
+        }
+    }
+
+    /// True when neither a relay nor a direct address is known.
+    pub fn is_empty(&self) -> bool {
+        self.relay.is_empty() && self.addrs.is_empty()
+    }
+
+    /// `relay=<url|-> direct=<n>` for logs and CLI output.
+    pub fn summary(&self) -> String {
+        format!(
+            "relay={} direct={}",
+            if self.relay.is_empty() {
+                "-"
+            } else {
+                &self.relay
+            },
+            self.addrs.len()
+        )
+    }
+}
+
+/// Sort rank of a direct address for tickets (lower = better), `None` = useless remotely.
+fn addr_rank(a: &SocketAddr) -> Option<u8> {
+    if a.port() == 0 {
+        return None;
+    }
+    match a.ip().to_canonical() {
+        IpAddr::V4(ip) => {
+            if ip.is_unspecified() || ip.is_loopback() || ip.is_link_local() || ip.is_broadcast() {
+                None
+            } else if ip.is_private() || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64) {
+                // RFC 1918 and carrier-grade NAT (100.64/10): LAN only.
+                Some(2)
+            } else {
+                Some(0)
+            }
+        }
+        IpAddr::V6(ip) => {
+            let seg0 = ip.segments()[0];
+            if ip.is_unspecified() || ip.is_loopback() || (seg0 & 0xffc0) == 0xfe80 {
+                None
+            } else if (seg0 & 0xfe00) == 0xfc00 {
+                // Unique local (fc00::/7): LAN only.
+                Some(3)
+            } else {
+                Some(1)
+            }
+        }
+    }
 }
 
 /// A ticket: body plus ed25519 signature by the host key over `postcard(body)`.
@@ -83,8 +184,10 @@ pub enum TicketError {
     /// Postcard decoding failed.
     #[error("ticket is damaged (decode): {0}")]
     BadFormat(String),
-    /// Unknown version.
-    #[error("unsupported ticket version {0}")]
+    /// Unknown version (v1 tickets are no longer accepted).
+    #[error(
+        "ticket format v{0} is not supported by this app (expected v2); ask the host for a new link"
+    )]
     BadVersion(u8),
     /// Signature does not verify or host key mismatch.
     #[error("ticket signature is invalid")]
@@ -143,6 +246,20 @@ impl TicketBody {
     /// The host key as an iroh [`PublicKey`].
     pub fn host_key(&self) -> Result<PublicKey, TicketError> {
         PublicKey::from_bytes(&self.host).map_err(|_| TicketError::BadSignature)
+    }
+
+    /// Sets the `relay` / `addrs` hint (capped at [`MAX_TICKET_ADDRS`]).
+    pub fn set_host_addr(&mut self, addr: &HostAddr) {
+        self.relay = addr.relay.clone();
+        self.addrs = addr.addrs.iter().take(MAX_TICKET_ADDRS).cloned().collect();
+    }
+
+    /// The `relay` / `addrs` hint.
+    pub fn host_addr(&self) -> HostAddr {
+        HostAddr {
+            relay: self.relay.clone(),
+            addrs: self.addrs.clone(),
+        }
     }
 }
 
@@ -204,6 +321,29 @@ impl Ticket {
         self.body.host_key()
     }
 
+    /// What to dial: the host id plus the ticket's relay URL and direct
+    /// addresses. Unparsable entries are skipped (logged); at most
+    /// [`MAX_TICKET_ADDRS`] direct addresses are used.
+    pub fn endpoint_addr(&self) -> Result<EndpointAddr, TicketError> {
+        let id = self.host()?;
+        let mut addrs = Vec::new();
+        if !self.body.relay.is_empty() {
+            match self.body.relay.parse::<RelayUrl>() {
+                Ok(u) => addrs.push(TransportAddr::Relay(u)),
+                Err(e) => {
+                    tracing::warn!(relay = %self.body.relay, "ignoring bad relay URL in ticket: {e}")
+                }
+            }
+        }
+        for a in self.body.addrs.iter().take(MAX_TICKET_ADDRS) {
+            match a.parse::<SocketAddr>() {
+                Ok(sa) => addrs.push(TransportAddr::Ip(sa)),
+                Err(e) => tracing::warn!(addr = %a, "ignoring bad address in ticket: {e}"),
+            }
+        }
+        Ok(EndpointAddr::from_parts(id, addrs))
+    }
+
     /// Tolerant parse (see [`FromStr`]); provided as an inherent fn per core-api.md.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Ticket, TicketError> {
@@ -248,19 +388,25 @@ impl FromStr for Ticket {
         let bytes = BASE32_NOPAD
             .decode(data.as_bytes())
             .map_err(|e| TicketError::BadEncoding(e.to_string()))?;
-        let (ticket, rest): (Ticket, &[u8]) =
-            postcard::take_from_bytes(&bytes).map_err(|e| TicketError::BadFormat(e.to_string()))?;
-        if !rest.is_empty() {
-            return Err(TicketError::BadFormat("trailing bytes".into()));
-        }
-        if ticket.body.v != TICKET_VERSION {
-            return Err(TicketError::BadVersion(ticket.body.v));
-        }
+        // `v` is the first byte of postcard(Ticket) (a u8 is one raw byte).
+        // A v1 ticket (no `relay`/`addrs`) or a newer format does not decode
+        // as v2, so a plausible other version byte is reported as such rather
+        // than as damage.
+        let v = bytes.first().copied().unwrap_or(0);
+        let other_version = v != TICKET_VERSION && (1..=15).contains(&v);
+        let ticket = match postcard::take_from_bytes::<Ticket>(&bytes) {
+            Ok((t, [])) if t.body.v == TICKET_VERSION => t,
+            _ if other_version => return Err(TicketError::BadVersion(v)),
+            Ok((t, [])) => return Err(TicketError::BadVersion(t.body.v)),
+            Ok(_) => return Err(TicketError::BadFormat("trailing bytes".into())),
+            Err(e) => return Err(TicketError::BadFormat(e.to_string())),
+        };
         Ok(ticket)
     }
 }
 
-/// Builds the body for a job ticket from a spec (no validation of roots/paths).
+/// Builds the body for a job ticket from a spec (no validation of roots/paths);
+/// `relay`/`addrs` are empty (see [`TicketBody::set_host_addr`]).
 pub fn body_from_spec(host: &PublicKey, spec: &TicketSpec, id: [u8; 16]) -> TicketBody {
     TicketBody {
         v: TICKET_VERSION,
@@ -274,6 +420,8 @@ pub fn body_from_spec(host: &PublicKey, spec: &TicketSpec, id: [u8; 16]) -> Tick
         put: spec.put,
         admin: false,
         exp: exp_from_days(spec.days),
+        relay: String::new(),
+        addrs: Vec::new(),
     }
 }
 
@@ -291,6 +439,8 @@ pub fn admin_body(host: &PublicKey, days: u32, id: [u8; 16]) -> TicketBody {
         put: false,
         admin: true,
         exp: exp_from_days(days),
+        relay: String::new(),
+        addrs: Vec::new(),
     }
 }
 
@@ -362,6 +512,19 @@ mod tests {
             Ticket::from_str("toss1aaaa"),
             Err(TicketError::BadFormat(_))
         ));
+        // A truncated v2 ticket is damage, not a version problem.
+        let sk = SecretKey::generate();
+        let bytes = postcard::to_allocvec(&sample(&sk, 0)).unwrap();
+        let cut = format!(
+            "{TICKET_PREFIX}{}",
+            BASE32_NOPAD
+                .encode(&bytes[..bytes.len() - 10])
+                .to_ascii_lowercase()
+        );
+        assert!(matches!(
+            Ticket::from_str(&cut),
+            Err(TicketError::BadFormat(_))
+        ));
     }
 
     #[test]
@@ -417,6 +580,151 @@ mod tests {
         assert!(!future.is_expired());
         assert!(exp_from_days(0) == 0);
         assert!(exp_from_days(7) > now_unix() + 6 * 86_400);
+    }
+
+    #[test]
+    fn v2_roundtrip_with_addrs() {
+        let sk = SecretKey::generate();
+        let mut body = sample(&sk, 0).body;
+        let hint = HostAddr {
+            relay: "https://use1-1.relay.n0.iroh.link./".into(),
+            addrs: vec![
+                "203.0.113.7:61234".into(),
+                "[2001:db8::1]:61234".into(),
+                "192.168.1.20:61234".into(),
+                "10.0.0.5:61234".into(),
+                "[2001:db8:1234:5678:9abc:def0:1234:5678]:65535".into(),
+                "198.51.100.200:1".into(),
+                "172.16.200.1:40000".into(),
+                "[fd00::1]:40000".into(),
+            ],
+        };
+        body.set_host_addr(&hint);
+        let t = Ticket::sign(body, &sk);
+        let s = t.to_string();
+        assert!(s.starts_with("toss1"));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(s.len() < 900, "len {}", s.len());
+        let back = Ticket::from_str(&s).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.body.v, 2);
+        assert_eq!(back.body.host_addr(), hint);
+        back.verify(&sk.public()).unwrap();
+
+        let ea = back.endpoint_addr().unwrap();
+        assert_eq!(ea.id, sk.public());
+        assert_eq!(
+            ea.relay_urls().next().map(|u| u.to_string()).as_deref(),
+            Some("https://use1-1.relay.n0.iroh.link./")
+        );
+        assert_eq!(ea.ip_addrs().count(), 8);
+
+        // The hint is signed: changing it breaks the signature.
+        let mut t2 = t.clone();
+        t2.body.addrs.push("1.2.3.4:5".into());
+        assert_eq!(t2.verify(&sk.public()), Err(TicketError::BadSignature));
+        let mut t3 = t.clone();
+        t3.body.relay = "https://evil.example./".into();
+        assert_eq!(t3.verify(&sk.public()), Err(TicketError::BadSignature));
+
+        // Garbage entries are skipped when dialing, not fatal.
+        let mut body = sample(&sk, 0).body;
+        body.relay = "not a url".into();
+        body.addrs = vec!["nope".into(), "10.1.2.3:4".into()];
+        let t4 = Ticket::sign(body, &sk);
+        let ea = Ticket::from_str(&t4.to_string())
+            .unwrap()
+            .endpoint_addr()
+            .unwrap();
+        assert_eq!(ea.relay_urls().count(), 0);
+        assert_eq!(ea.ip_addrs().count(), 1);
+    }
+
+    #[test]
+    fn v1_tickets_are_refused_clearly() {
+        // A v1 ticket: same layout without relay/addrs, v = 1.
+        #[derive(Serialize)]
+        struct V1Body {
+            v: u8,
+            id: [u8; 16],
+            host: [u8; 32],
+            job: String,
+            root: String,
+            path: String,
+            ret: String,
+            get: bool,
+            put: bool,
+            admin: bool,
+            exp: u64,
+        }
+        #[derive(Serialize)]
+        struct V1Ticket {
+            body: V1Body,
+            #[serde(with = "sig64")]
+            sig: [u8; 64],
+        }
+        let v1 = V1Ticket {
+            body: V1Body {
+                v: 1,
+                id: [1; 16],
+                host: [2; 32],
+                job: "j".into(),
+                root: "RAW".into(),
+                path: String::new(),
+                ret: String::new(),
+                get: true,
+                put: false,
+                admin: false,
+                exp: 0,
+            },
+            sig: [3; 64],
+        };
+        let bytes = postcard::to_allocvec(&v1).unwrap();
+        let s = format!(
+            "{TICKET_PREFIX}{}",
+            BASE32_NOPAD.encode(&bytes).to_ascii_lowercase()
+        );
+        let err = Ticket::from_str(&s).unwrap_err();
+        assert_eq!(err, TicketError::BadVersion(1));
+        assert!(err.to_string().contains("new link"), "{err}");
+    }
+
+    #[test]
+    fn host_addr_ranking() {
+        let sk = SecretKey::generate();
+        let ip = |s: &str| TransportAddr::Ip(s.parse().unwrap());
+        let mut parts = vec![
+            ip("127.0.0.1:5000"),
+            ip("0.0.0.0:5000"),
+            ip("169.254.1.1:5000"),
+            ip("[fe80::1]:5000"),
+            ip("[::1]:5000"),
+            ip("192.168.1.2:5000"),
+            ip("[fd12::1]:5000"),
+            ip("[2001:db8::5]:5000"),
+            ip("100.64.0.9:5000"),
+            ip("203.0.113.9:5000"),
+            TransportAddr::Relay("https://relay.example./".parse().unwrap()),
+        ];
+        for i in 0..10u8 {
+            parts.push(ip(&format!("10.0.0.{i}:6000")));
+        }
+        let ha = HostAddr::from_endpoint_addr(&EndpointAddr::from_parts(sk.public(), parts));
+        assert_eq!(ha.relay, "https://relay.example./");
+        assert_eq!(ha.addrs.len(), MAX_TICKET_ADDRS);
+        assert_eq!(ha.addrs[0], "203.0.113.9:5000");
+        assert_eq!(ha.addrs[1], "[2001:db8::5]:5000");
+        assert!(ha.addrs[2..].iter().all(|a| a.starts_with("10.")
+            || a.starts_with("100.64.")
+            || a.starts_with("192.168.")));
+        assert!(!ha.addrs.iter().any(|a| a.contains("127.0.0.1")
+            || a.contains("fe80")
+            || a.contains("[::1]")
+            || a.contains("169.254")));
+        assert!(HostAddr::default().is_empty());
+        assert_eq!(HostAddr::default().summary(), "relay=- direct=0");
     }
 
     #[test]

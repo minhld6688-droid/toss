@@ -503,9 +503,20 @@ async fn remote_control() {
         .list_jobs()
         .iter()
         .any(|j| j.id == t.body.id && j.revoked));
-    // Re-signed ticket from the store is identical, locally and over ctl.
-    assert_eq!(s.host.job_ticket(t.body.id).unwrap(), t);
-    assert_eq!(ctl.job_ticket(t.body.id).await.unwrap(), t);
+    // Re-signed ticket from the store: same job and permissions, locally and
+    // over ctl, with the host's current addresses (identical while they are
+    // unchanged).
+    for re in [
+        s.host.job_ticket(t.body.id).unwrap(),
+        ctl.job_ticket(t.body.id).await.unwrap(),
+    ] {
+        re.verify(&s.host.endpoint_id()).unwrap();
+        let (mut a, mut b) = (re.body.clone(), t.body.clone());
+        assert_eq!(a.host_addr(), s.host.host_addr());
+        a.set_host_addr(&Default::default());
+        b.set_host_addr(&Default::default());
+        assert_eq!(a, b);
+    }
     // Admin tickets are never handed out over ctl; unknown ids fail.
     assert!(ctl.job_ticket(admin.body.id).await.is_err());
     assert!(ctl.job_ticket([0xee; 16]).await.is_err());
@@ -560,4 +571,95 @@ async fn fixed_bind_port() {
     assert_eq!(back.bind_port, Some(port));
     n.shutdown().await;
     r.shutdown().await;
+}
+
+/// Waits until the host knows at least one direct address (they come from
+/// interface enumeration / the first net report shortly after binding).
+async fn wait_direct_addrs(host: &Node) -> toss_core::HostAddr {
+    for _ in 0..100 {
+        let a = host.host_addr();
+        if !a.addrs.is_empty() {
+            return a;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("host has no direct addresses: {:?}", host.endpoint().addr());
+}
+
+/// The client is told nothing about the host (no `add_peer_addr`): it can
+/// only reach it through the relay/direct addresses embedded in the ticket
+/// (n0 discovery is not reachable from the test sandbox).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_dials_ticket_addrs() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let (root, ret, dest) = (t.join("root"), t.join("return"), t.join("dest"));
+    std::fs::create_dir_all(root.join("job")).unwrap();
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(root.join("job/a.bin"), data(7, 300_000)).unwrap();
+    std::fs::write(root.join("job/b.txt"), b"hello").unwrap();
+    let host = node(t, "host").await;
+    let client = node(t, "client").await;
+    host.set_host(Some(HostConfig::new(
+        vec![Root {
+            alias: "RAW".into(),
+            path: root.clone(),
+        }],
+        ret.clone(),
+    )))
+    .await
+    .unwrap();
+    let addr = wait_direct_addrs(&host).await;
+
+    let ticket = host.create_ticket(spec("via ticket", "job", "")).unwrap();
+    assert_eq!(ticket.body.v, 2);
+    assert_eq!(ticket.body.host_addr(), addr);
+    let ticket: Ticket = ticket.to_string().parse().unwrap();
+    let ea = ticket.endpoint_addr().unwrap();
+    assert_eq!(ea.id, host.endpoint_id());
+    assert_eq!(ea.ip_addrs().count(), addr.addrs.len());
+
+    // get
+    let tr = client.get(ticket.clone(), dest.clone()).await.unwrap();
+    let st = tokio::time::timeout(Duration::from_secs(90), tr.wait())
+        .await
+        .expect("get timed out");
+    assert_eq!(st.status, Status::Done, "{st:?}");
+    assert_same(
+        &root.join("job"),
+        &dest.join("via ticket"),
+        &["a.bin".into(), "b.txt".into()],
+    );
+
+    // put
+    let up = t.join("up");
+    std::fs::create_dir_all(&up).unwrap();
+    std::fs::write(up.join("c.jpg"), data(9, 4321)).unwrap();
+    let tr = client
+        .put(ticket.clone(), vec![up.join("c.jpg")])
+        .await
+        .unwrap();
+    let st = tokio::time::timeout(Duration::from_secs(90), tr.wait())
+        .await
+        .expect("put timed out");
+    assert_eq!(st.status, Status::Done, "{st:?}");
+    assert_eq!(
+        std::fs::read(ret.join("via ticket/c.jpg")).unwrap(),
+        data(9, 4321)
+    );
+
+    // ctl with an admin ticket, also only through its embedded addresses
+    let admin: Ticket = host
+        .create_admin_ticket(0)
+        .unwrap()
+        .to_string()
+        .parse()
+        .unwrap();
+    assert!(!admin.body.addrs.is_empty());
+    let ctl = client.ctl(admin).await.unwrap();
+    assert_eq!(ctl.status().await.unwrap().device, "host");
+    ctl.close().await;
+    client.shutdown().await;
+    host.shutdown().await;
 }

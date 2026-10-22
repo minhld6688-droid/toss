@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use toss_core::{
     jobs::JobStore,
     node::{
@@ -15,11 +16,26 @@ use toss_core::{
         load_or_create_secret_key,
     },
     transfer::Status,
-    HostConfig, JobRecord, Node, NodeConfig, Root, Ticket, TicketSpec, TransferEvent,
+    HostAddr, HostConfig, JobRecord, Node, NodeConfig, Root, Ticket, TicketSpec, TransferEvent,
 };
 
-/// Host config saved by `toss-cli host` so `toss-cli ticket` can validate specs.
+/// Host config saved by `toss-cli host` so `toss-cli ticket` can validate specs,
+/// plus the running host's last known relay/direct addresses for tickets.
 const HOST_FILE: &str = "cli-host.json";
+
+/// Contents of [`HOST_FILE`]: the host config (flattened, so files written by
+/// older versions still load) and the last known addresses.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct HostFile {
+    #[serde(flatten)]
+    cfg: HostConfig,
+    /// Last known relay URL + direct addresses of the running host.
+    #[serde(default)]
+    addr: HostAddr,
+    /// Unix seconds when `addr` was written (0 = never).
+    #[serde(default)]
+    addr_updated: u64,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "toss-cli", version, about = "Toss P2P file transfer (CLI)")]
@@ -30,13 +46,18 @@ struct Cli {
     /// Device name shown to the other side. Default: hostname.
     #[arg(long, global = true)]
     name: Option<String>,
+    /// get/put: give up (exit non-zero with the last error) once the host has
+    /// been unreachable or busy for this many seconds in a row. 0 = keep
+    /// retrying as the app does (busy: 1 h, offline: 24 h).
+    #[arg(long, global = true, default_value_t = 0, value_name = "SECS")]
+    max_wait: u64,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Print endpoint id and device name.
+    /// Print endpoint id and device name, then the running host's relay URL.
     Id,
     /// Run in host mode until Ctrl-C, printing one line per job event.
     Host {
@@ -215,6 +236,28 @@ async fn main() -> Result<()> {
         Cmd::Id => {
             let key = load_or_create_secret_key(&data_dir)?;
             println!("{}  {}", key.public(), name);
+            match std::fs::read(data_dir.join(HOST_FILE))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<HostFile>(&b).ok())
+            {
+                Some(f) if f.addr_updated > 0 => {
+                    println!(
+                        "relay: {}",
+                        if f.addr.relay.is_empty() {
+                            "none"
+                        } else {
+                            &f.addr.relay
+                        }
+                    );
+                    println!(
+                        "direct addresses: {} ({} as of {}s ago, written by `toss-cli host`)",
+                        f.addr.addrs.len(),
+                        f.addr.addrs.join(" "),
+                        now_unix().saturating_sub(f.addr_updated)
+                    );
+                }
+                _ => println!("relay: unknown (no `toss-cli host` has run with this data dir)"),
+            }
         }
         Cmd::Host {
             roots,
@@ -231,10 +274,19 @@ async fn main() -> Result<()> {
         }
         Cmd::Ticket(args) => {
             let t = if args.admin {
-                issue_admin_ticket_offline(&data_dir, args.days.unwrap_or(0))?
+                let addr = load_host_file(&data_dir)
+                    .map(|f| f.addr)
+                    .unwrap_or_default();
+                issue_admin_ticket_offline(&data_dir, args.days.unwrap_or(0), &addr)?
             } else {
-                let hc = load_host_file(&data_dir)?;
-                issue_ticket_offline(&data_dir, &hc, args.spec()?)?
+                let hf = load_host_file(&data_dir)?;
+                if hf.addr.is_empty() {
+                    eprintln!(
+                        "warning: no relay/direct address known for this host (is `toss-cli host` \
+                         running and online?); clients will depend on DNS discovery"
+                    );
+                }
+                issue_ticket_offline(&data_dir, &hf.cfg, args.spec()?, &hf.addr)?
             };
             print_ticket(&t, args.page_host.as_deref());
         }
@@ -253,13 +305,13 @@ async fn main() -> Result<()> {
             };
             let node = Node::start(cfg).await?;
             let t = node.get(ticket, dest).await?;
-            finish_transfer(node, t).await?;
+            finish_transfer(node, t, cli.max_wait).await?;
         }
         Cmd::Put { ticket, paths } => {
             let ticket = parse_ticket(ticket)?;
             let node = Node::start(cfg).await?;
             let t = node.put(ticket, paths.clone()).await?;
-            finish_transfer(node, t).await?;
+            finish_transfer(node, t, cli.max_wait).await?;
         }
         Cmd::Ctl { admin, cmd } => {
             let admin = parse_ticket(admin)?;
@@ -272,11 +324,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_host_file(data_dir: &Path) -> Result<HostConfig> {
+fn load_host_file(data_dir: &Path) -> Result<HostFile> {
     let p = data_dir.join(HOST_FILE);
     let bytes = std::fs::read(&p)
         .with_context(|| format!("{} not found; run `toss-cli host …` first", p.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", p.display()))
+}
+
+fn save_host_file(data_dir: &Path, f: &HostFile) -> Result<()> {
+    // Temp file + rename: `toss-cli ticket` may read it at any moment.
+    let p = data_dir.join(HOST_FILE);
+    let tmp = data_dir.join(format!("{HOST_FILE}.tmp{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(f)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &p).with_context(|| format!("rename to {}", p.display()))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn print_ticket(t: &Ticket, page_host: Option<&str>) {
@@ -286,6 +354,20 @@ fn print_ticket(t: &Ticket, page_host: Option<&str>) {
         t.id_hex(),
         t.body.job,
         t.deep_link()
+    );
+    eprintln!(
+        "host relay: {}  direct addresses: {}{}",
+        if t.body.relay.is_empty() {
+            "none"
+        } else {
+            &t.body.relay
+        },
+        t.body.addrs.len(),
+        if t.body.addrs.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", t.body.addrs.join(" "))
+        }
     );
     if let Some(h) = page_host {
         println!("{}", t.web_url(h));
@@ -332,8 +414,17 @@ async fn run_host(cfg: NodeConfig, hc: HostConfig) -> Result<()> {
     let data_dir = cfg.data_dir.clone();
     let node = Node::start_with_port(cfg, hc.bind_port).await?;
     node.set_host(Some(hc.clone())).await?;
-    std::fs::write(data_dir.join(HOST_FILE), serde_json::to_vec_pretty(&hc)?)
-        .context("save host config")?;
+    let mut hf = HostFile {
+        cfg: hc.clone(),
+        addr: node.host_addr(),
+        addr_updated: now_unix(),
+    };
+    save_host_file(&data_dir, &hf).context("save host config")?;
+    // Tickets carry the relay URL: give the relay connection a moment first.
+    let online = node.wait_online(Duration::from_secs(15)).await;
+    hf.addr = node.host_addr();
+    hf.addr_updated = now_unix();
+    save_host_file(&data_dir, &hf).context("save host config")?;
     println!(
         "host {} ({}) ready{}; Ctrl-C to stop",
         node.endpoint_id(),
@@ -342,6 +433,34 @@ async fn run_host(cfg: NodeConfig, hc: HostConfig) -> Result<()> {
             .map(|p| format!(" on UDP port {p}"))
             .unwrap_or_default()
     );
+    println!(
+        "relay: {}{}  direct addresses: {} ({})",
+        if hf.addr.relay.is_empty() {
+            "none"
+        } else {
+            &hf.addr.relay
+        },
+        if online { "" } else { " (not connected yet)" },
+        hf.addr.addrs.len(),
+        hf.addr.addrs.join(" ")
+    );
+    // Keep `cli-host.json` current so `toss-cli ticket` embeds live addresses.
+    {
+        let node = node.clone();
+        let data_dir = data_dir.clone();
+        tokio::spawn(async move {
+            let mut cur = hf.addr.clone();
+            while let Some(next) = node.host_addr_changed(&cur).await {
+                println!("addresses changed: {}", next.summary());
+                hf.addr = next.clone();
+                hf.addr_updated = now_unix();
+                if let Err(e) = save_host_file(&data_dir, &hf) {
+                    eprintln!("could not update {HOST_FILE}: {e:#}");
+                }
+                cur = next;
+            }
+        });
+    }
     let mut rx = node.subscribe();
     loop {
         tokio::select! {
@@ -418,14 +537,37 @@ fn event_line(ev: &TransferEvent) -> Option<String> {
     })
 }
 
-async fn finish_transfer(node: Node, t: toss_core::Transfer) -> Result<()> {
+/// Waits for the transfer, printing progress. With `max_wait > 0`, gives up
+/// once the host has been unreachable/busy for that many seconds in a row
+/// (counted from the start, reset whenever a session gets as far as the
+/// manifest), pausing the transfer (`.part` files are kept) and failing with
+/// the last error.
+async fn finish_transfer(node: Node, t: toss_core::Transfer, max_wait: u64) -> Result<()> {
     let mut rx = node.subscribe();
     let mut last_print = Instant::now() - Duration::from_secs(10);
     let wait = t.wait();
     tokio::pin!(wait);
+    let limit = (max_wait > 0).then(|| Duration::from_secs(max_wait));
+    let mut waiting_since = Some(Instant::now());
+    let mut last_error: Option<String> = None;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     let st = loop {
         tokio::select! {
             st = &mut wait => break st,
+            _ = tick.tick(), if limit.is_some() => {
+                if let (Some(limit), Some(since)) = (limit, waiting_since) {
+                    if since.elapsed() >= limit {
+                        let why = last_error
+                            .clone()
+                            .or_else(|| node.transfer(&t.id).and_then(|s| s.error))
+                            .unwrap_or_else(|| "still connecting to the host".into());
+                        eprintln!("giving up after {max_wait}s without reaching the host (--max-wait); .part files are kept");
+                        node.pause(&t.id).await.ok();
+                        node.shutdown().await;
+                        bail!("host not reachable within {max_wait}s: {why}");
+                    }
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("interrupted; pausing (re-run the same command to resume)");
                 node.pause(&t.id).await.ok();
@@ -439,6 +581,14 @@ async fn finish_transfer(node: Node, t: toss_core::Transfer) -> Result<()> {
                     // No more events (cannot happen while the node lives): just wait.
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break (&mut wait).await,
                 };
+                match &ev {
+                    TransferEvent::Manifest { id, .. } if *id == t.id => waiting_since = None,
+                    TransferEvent::Error { id, msg, retry_in_s: Some(_), .. } if *id == t.id => {
+                        last_error = Some(msg.clone());
+                        waiting_since.get_or_insert_with(Instant::now);
+                    }
+                    _ => {}
+                }
                 match &ev {
                     TransferEvent::Progress { id, bytes_done, bytes_total, files_done, files_total, speed_bps, eta_s, path } if *id == t.id => {
                         if last_print.elapsed() >= Duration::from_secs(1) {

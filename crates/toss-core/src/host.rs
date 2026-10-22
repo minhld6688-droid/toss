@@ -16,7 +16,7 @@ use crate::{
     jobs::{JobEvent, JobStore},
     node::{EntryKind, HostRuntime, Inner},
     paths::{check_inside, resolve_rel, sanitize_component, sanitize_rel, RelPath},
-    ticket::{self, Ticket, TicketError, TicketSpec, MAX_JOB_LEN},
+    ticket::{self, HostAddr, Ticket, TicketError, TicketSpec, MAX_JOB_LEN},
     transfer::{conn_path, ErrorCode, Side, Tracker},
     util::{clean_text, now_unix, random_id, random_suffix},
     wire::{
@@ -31,12 +31,14 @@ pub(crate) const MAX_DEVICE: usize = 64;
 /// Longest peer-supplied `Done.msg` kept in `jobs.json`.
 const MAX_PEER_MSG: usize = 2000;
 
-/// Signs a job ticket after validating the spec against the host config.
+/// Signs a job ticket after validating the spec against the host config;
+/// `addr` is the host's current relay/direct addresses (wire.md §1 v2).
 pub(crate) fn issue_ticket(
     secret: &SecretKey,
     jobs: &JobStore,
     rt: &HostRuntime,
     mut spec: TicketSpec,
+    addr: &HostAddr,
 ) -> Result<Ticket> {
     spec.job = spec.job.trim().chars().take(MAX_JOB_LEN).collect();
     if spec.job.is_empty() {
@@ -55,18 +57,40 @@ pub(crate) fn issue_ticket(
     }
     spec.path = path.as_str();
     spec.ret = sanitize_rel(&spec.ret).context("ret")?.as_str();
-    let body = ticket::body_from_spec(&secret.public(), &spec, random_id());
+    let mut body = ticket::body_from_spec(&secret.public(), &spec, random_id());
+    body.set_host_addr(addr);
     let t = Ticket::sign(body, secret);
     jobs.add(&t.body)?;
+    log_issued(&t);
     Ok(t)
 }
 
-/// Signs an admin ticket.
-pub(crate) fn issue_admin_ticket(secret: &SecretKey, jobs: &JobStore, days: u32) -> Result<Ticket> {
-    let body = ticket::admin_body(&secret.public(), days, random_id());
+/// Signs an admin ticket (with the host's current addresses, see [`issue_ticket`]).
+pub(crate) fn issue_admin_ticket(
+    secret: &SecretKey,
+    jobs: &JobStore,
+    days: u32,
+    addr: &HostAddr,
+) -> Result<Ticket> {
+    let mut body = ticket::admin_body(&secret.public(), days, random_id());
+    body.set_host_addr(addr);
     let t = Ticket::sign(body, secret);
     jobs.add(&t.body)?;
+    log_issued(&t);
     Ok(t)
+}
+
+fn log_issued(t: &Ticket) {
+    let addr = t.body.host_addr();
+    if addr.is_empty() {
+        tracing::warn!(
+            id = %t.id_hex(),
+            "ticket issued without relay/direct addresses (host not online yet?); \
+             clients will depend on n0 DNS discovery"
+        );
+    } else {
+        tracing::info!(id = %t.id_hex(), job = %t.body.job, "ticket issued ({})", addr.summary());
+    }
 }
 
 /// wire.md §1 steps 1–3 (signature, expiry, revocation).
@@ -162,7 +186,7 @@ fn try_acquire(inner: &Arc<Inner>, max: u32) -> Option<Slot> {
 }
 
 async fn deny(conn: &Connection, send: &mut iroh::endpoint::SendStream, reason: DenyReason) {
-    tracing::info!(remote = %conn.remote_id().fmt_short(), "denied: {reason}");
+    tracing::info!(remote = %conn.remote_id().fmt_short(), alpn = "toss/xfer/1", "denied: {reason}");
     let _ = write_msg(send, &HostHello::Denied { reason }).await;
     let _ = send.finish();
     // Give the client a moment to read the answer, then close.
@@ -182,11 +206,12 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
     let (mut send, mut recv, hello) = match hello {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            tracing::debug!(remote = %remote.fmt_short(), "bad hello: {e:#}");
+            tracing::info!(remote = %remote.fmt_short(), "denied: bad hello: {e:#}");
             conn.close(1u32.into(), b"bad hello");
             return;
         }
         Err(_) => {
+            tracing::info!(remote = %remote.fmt_short(), "denied: no hello within the pre-auth timeout");
             conn.close(1u32.into(), b"hello timeout");
             return;
         }

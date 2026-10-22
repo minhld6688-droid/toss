@@ -15,7 +15,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use iroh::{
     address_lookup::MemoryLookup,
     endpoint::{presets, Connection},
-    Endpoint, EndpointAddr, EndpointId, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, SecretKey, Watcher,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,8 @@ use crate::{
     host,
     jobs::{JobRecord, JobStore},
     paths::{canonicalize, resolve_inside},
-    ticket::{Ticket, TicketSpec},
-    transfer::{Tracker, TransferEvent, TransferId, TransferState},
+    ticket::{HostAddr, Ticket, TicketSpec},
+    transfer::{conn_path, Tracker, TransferEvent, TransferId, TransferState},
     util::unix_of,
     wire::{self, DirEntry},
     CtlClient, ALPN_CTL, ALPN_XFER,
@@ -295,16 +295,174 @@ impl Inner {
         }
     }
 
-    /// Dials `addr` with ALPN; times out after 30 s.
+    /// This node's current relay + direct addresses, as put into tickets.
+    pub fn host_addr(&self) -> HostAddr {
+        HostAddr::from_endpoint_addr(&self.endpoint.addr())
+    }
+
+    /// Dials `addr` with ALPN; times out after [`CONNECT_TIMEOUT`].
     pub async fn connect(&self, addr: impl Into<EndpointAddr>, alpn: &[u8]) -> Result<Connection> {
         let addr = addr.into();
         let id = addr.id;
-        match tokio::time::timeout(Duration::from_secs(30), self.endpoint.connect(addr, alpn)).await
-        {
+        match tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, alpn)).await {
             Ok(Ok(c)) => Ok(c),
             Ok(Err(e)) => Err(anyhow!(e)).with_context(|| format!("connect to {}", id.fmt_short())),
-            Err(_) => bail!("connect to {}: timed out", id.fmt_short()),
+            Err(_) => bail!(
+                "connect to {}: timed out after {}s",
+                id.fmt_short(),
+                CONNECT_TIMEOUT.as_secs()
+            ),
         }
+    }
+
+    /// Dials the host of `ticket`: its relay URL and direct addresses (v2
+    /// ticket) are handed to iroh together with the id, so it can start via
+    /// the relay at once and hole-punch in parallel; the n0 DNS/pkarr lookup
+    /// still runs as a fallback (iroh starts it whenever no path is selected).
+    /// Logs every attempt at info level.
+    pub async fn dial_host(&self, ticket: &Ticket, alpn: &[u8]) -> Result<Connection> {
+        let addr = ticket.endpoint_addr().map_err(|e| anyhow!(e))?;
+        let id = addr.id;
+        let host = id.fmt_short().to_string();
+        let alpn_s = String::from_utf8_lossy(alpn).to_string();
+        let relay = addr
+            .relay_urls()
+            .next()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "-".into());
+        let direct = addr.ip_addrs().count();
+        tracing::info!(
+            %host,
+            alpn = %alpn_s,
+            %relay,
+            direct,
+            online = self.endpoint.home_relay_status().get().iter().any(|r| r.is_connected()),
+            "dialing host (ticket addresses{}; n0 DNS/pkarr lookup as fallback)",
+            if relay == "-" && direct == 0 { ": none" } else { "" }
+        );
+        let started = Instant::now();
+        match self.connect(addr, alpn).await {
+            Ok(conn) => {
+                tracing::info!(
+                    %host,
+                    alpn = %alpn_s,
+                    path = ?conn_path(&conn),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "connected to host"
+                );
+                Ok(conn)
+            }
+            Err(e) => {
+                let known = match self.endpoint.remote_info(id).await {
+                    Some(info) => {
+                        let v: Vec<String> = info
+                            .addrs()
+                            .map(|a| format!("{:?} ({:?})", a.addr(), a.usage()))
+                            .collect();
+                        if v.is_empty() {
+                            "none".to_string()
+                        } else {
+                            v.join(", ")
+                        }
+                    }
+                    None => "none".to_string(),
+                };
+                tracing::info!(
+                    %host,
+                    alpn = %alpn_s,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    known_paths = %known,
+                    "dial failed: {e:#}"
+                );
+                // Diagnose discovery separately, without delaying the retry.
+                tokio::spawn(log_lookup(self.endpoint.clone(), id));
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Logs home relay connection changes at info level. iroh itself logs
+/// "home is now relay …" when it *selects* a relay (state `Connecting`) and
+/// relay dial failures only at debug level, so without this a host that never
+/// reached its relay looks healthy in the logs.
+async fn log_relay_status(endpoint: Endpoint) {
+    let mut w = endpoint.home_relay_status();
+    drop(endpoint); // the watcher alone; it disconnects when the endpoint is dropped
+    let mut last: Vec<(String, bool)> = Vec::new();
+    loop {
+        let cur = w.get();
+        let now: Vec<(String, bool)> = cur
+            .iter()
+            .map(|r| (r.url().to_string(), r.is_connected()))
+            .collect();
+        if now != last {
+            for r in &cur {
+                if r.is_connected() {
+                    tracing::info!(relay = %r.url(), "home relay connected");
+                } else if let Some(reason) = r.auth_denied_reason() {
+                    tracing::warn!(relay = %r.url(), "home relay refused this endpoint: {reason}");
+                } else if let Some(e) = r.last_error() {
+                    tracing::warn!(relay = %r.url(), "home relay not connected: {e:#}");
+                } else {
+                    tracing::info!(relay = %r.url(), "home relay connecting");
+                }
+            }
+            last = now;
+        }
+        if w.updated().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Connect timeout per dial attempt. Generous on purpose: the first attempt
+/// may need a DNS/pkarr lookup (staggered, several seconds), a fresh
+/// connection to the host's relay (iroh allows 10 s) and the QUIC handshake
+/// over it, on a busy machine.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Runs one n0 address lookup (DNS + pkarr, plus the in-memory table) for
+/// `id` and logs what it found, for diagnosing failed dials.
+async fn log_lookup(endpoint: Endpoint, id: EndpointId) {
+    use n0_future::StreamExt;
+    let host = id.fmt_short().to_string();
+    let Ok(services) = endpoint.address_lookup() else {
+        return;
+    };
+    let mut stream = services.resolve(id);
+    let res = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut found = Vec::new();
+        let mut errors = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(Ok(item)) => {
+                    let a = item.to_endpoint_addr();
+                    found.push(format!(
+                        "{}: relay={} direct={}",
+                        item.provenance(),
+                        a.relay_urls()
+                            .next()
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        a.ip_addrs().count()
+                    ));
+                }
+                Ok(Err(e)) => errors.push(format!("{e:#}")),
+                Err(e) => errors.push(format!("{e:#}")),
+            }
+        }
+        (found, errors)
+    })
+    .await;
+    match res {
+        Ok((found, _)) if !found.is_empty() => {
+            tracing::info!(%host, "address lookup: {}", found.join("; "));
+        }
+        Ok((_, errors)) => {
+            tracing::info!(%host, "address lookup found nothing: {}", errors.join("; "));
+        }
+        Err(_) => tracing::info!(%host, "address lookup: no answer within 15s"),
     }
 }
 
@@ -375,6 +533,7 @@ impl Node {
             put_reserved: Default::default(),
             bind_port: port,
         });
+        tokio::spawn(log_relay_status(endpoint.clone()));
         tokio::spawn(accept_loop(endpoint, Arc::downgrade(&inner)));
         Ok(Node { inner })
     }
@@ -392,6 +551,32 @@ impl Node {
     /// The underlying iroh endpoint (advanced use: `online()`, `addr()`, …).
     pub fn endpoint(&self) -> &Endpoint {
         &self.inner.endpoint
+    }
+
+    /// This node's current home relay + direct addresses (what tickets carry).
+    pub fn host_addr(&self) -> HostAddr {
+        self.inner.host_addr()
+    }
+
+    /// Waits until [`Node::host_addr`] differs from `prev` and returns the new
+    /// value; `None` when the endpoint is gone.
+    pub async fn host_addr_changed(&self, prev: &HostAddr) -> Option<HostAddr> {
+        let mut w = self.inner.endpoint.watch_addr();
+        loop {
+            let cur = HostAddr::from_endpoint_addr(&w.get());
+            if &cur != prev {
+                return Some(cur);
+            }
+            w.updated().await.ok()?;
+        }
+    }
+
+    /// Waits until the endpoint is connected to its home relay (so tickets
+    /// carry a relay URL), at most `timeout`. Returns whether it is online.
+    pub async fn wait_online(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.inner.endpoint.online())
+            .await
+            .is_ok()
     }
 
     /// Adds addressing info for a peer (direct addresses / relay) so it can be
@@ -450,7 +635,13 @@ impl Node {
             .inner
             .host_runtime()
             .ok_or_else(|| anyhow!("host mode is off"))?;
-        host::issue_ticket(&self.inner.secret, &self.inner.jobs, &rt, spec)
+        host::issue_ticket(
+            &self.inner.secret,
+            &self.inner.jobs,
+            &rt,
+            spec,
+            &self.inner.host_addr(),
+        )
     }
 
     /// Creates an admin ticket (control channel access). Errors if host mode is off.
@@ -458,12 +649,20 @@ impl Node {
         if self.inner.host.read().is_none() {
             bail!("host mode is off");
         }
-        host::issue_admin_ticket(&self.inner.secret, &self.inner.jobs, days)
+        host::issue_admin_ticket(
+            &self.inner.secret,
+            &self.inner.jobs,
+            days,
+            &self.inner.host_addr(),
+        )
     }
 
-    /// Re-signs the ticket of a stored job (same string as when created).
+    /// Re-signs the ticket of a stored job with the host's *current* relay and
+    /// direct addresses (same id, job and permissions as when created; the
+    /// string only differs if the addresses changed).
     pub fn job_ticket(&self, id: [u8; 16]) -> Option<Ticket> {
-        let body = self.inner.jobs.body(id, *self.endpoint_id().as_bytes())?;
+        let mut body = self.inner.jobs.body(id, *self.endpoint_id().as_bytes())?;
+        body.set_host_addr(&self.inner.host_addr());
         Some(Ticket::sign(body, &self.inner.secret))
     }
 
@@ -616,19 +815,28 @@ async fn accept_loop(endpoint: Endpoint, inner: Weak<Inner>) {
             let alpn = match accepting.alpn().await {
                 Ok(a) => a,
                 Err(e) => {
-                    tracing::debug!("alpn failed: {e:#}");
+                    tracing::info!("incoming connection failed (alpn): {e:#}");
                     return;
                 }
             };
+            let alpn_s = String::from_utf8_lossy(&alpn).to_string();
             let conn = match accepting.await {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::debug!("handshake failed: {e:#}");
+                    tracing::info!(alpn = %alpn_s, "incoming connection failed (handshake): {e:#}");
                     return;
                 }
             };
+            let remote = conn.remote_id().fmt_short().to_string();
+            tracing::info!(
+                %remote,
+                alpn = %alpn_s,
+                path = ?conn_path(&conn),
+                "incoming connection accepted"
+            );
             let Some(inner) = inner.upgrade() else { return };
             if inner.host.read().is_none() {
+                tracing::info!(%remote, alpn = %alpn_s, "denied: host mode off");
                 conn.close(1u32.into(), b"host mode off");
                 return;
             }
@@ -637,6 +845,7 @@ async fn accept_loop(endpoint: Endpoint, inner: Weak<Inner>) {
             } else if alpn == ALPN_CTL {
                 crate::ctl::handle_ctl(inner, conn).await;
             } else {
+                tracing::info!(%remote, alpn = %alpn_s, "denied: unknown alpn");
                 conn.close(1u32.into(), b"unknown alpn");
             }
         });
@@ -674,15 +883,22 @@ pub(crate) fn list_dir(rt: &HostRuntime, root: &str, rel: &str) -> Result<Vec<Di
 
 /// Creates a job ticket without a running node (e.g. `toss-cli ticket` while
 /// `toss-cli host` runs in another process): loads the key from `data_dir`,
-/// validates `spec` against `cfg`, signs and appends to `jobs.json`.
-pub fn issue_ticket_offline(data_dir: &Path, cfg: &HostConfig, spec: TicketSpec) -> Result<Ticket> {
+/// validates `spec` against `cfg`, signs and appends to `jobs.json`. `addr` is
+/// the running host's last known relay/direct addresses (the CLI persists them
+/// in `cli-host.json`); pass `HostAddr::default()` if unknown.
+pub fn issue_ticket_offline(
+    data_dir: &Path,
+    cfg: &HostConfig,
+    spec: TicketSpec,
+    addr: &HostAddr,
+) -> Result<Ticket> {
     let secret = load_or_create_secret_key(data_dir)?;
     let rt = HostRuntime::new(cfg.clone())?;
-    host::issue_ticket(&secret, &JobStore::open(data_dir), &rt, spec)
+    host::issue_ticket(&secret, &JobStore::open(data_dir), &rt, spec, addr)
 }
 
-/// Creates an admin ticket without a running node.
-pub fn issue_admin_ticket_offline(data_dir: &Path, days: u32) -> Result<Ticket> {
+/// Creates an admin ticket without a running node (see [`issue_ticket_offline`]).
+pub fn issue_admin_ticket_offline(data_dir: &Path, days: u32, addr: &HostAddr) -> Result<Ticket> {
     let secret = load_or_create_secret_key(data_dir)?;
-    host::issue_admin_ticket(&secret, &JobStore::open(data_dir), days)
+    host::issue_admin_ticket(&secret, &JobStore::open(data_dir), days, addr)
 }

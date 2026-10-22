@@ -350,8 +350,10 @@ async fn open(
     SessErr,
 > {
     tracker.set_status(Status::Connecting);
-    let host = job.ticket.host().map_err(|e| SessErr::Other(anyhow!(e)))?;
-    let conn = inner.connect(host, ALPN_XFER).await.map_err(net(false))?;
+    let conn = inner
+        .dial_host(&job.ticket, ALPN_XFER)
+        .await
+        .map_err(net(false))?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
     let hello = ClientHello::v1 {
         ticket: job.ticket.clone(),

@@ -58,12 +58,18 @@ jobs:
           $ret = "$env:RUNNER_TEMP\ret"
           New-Item -ItemType Directory -Force $data, $ret | Out-Null
           netsh advfirewall firewall add rule name="toss-cli" dir=in action=allow program="$PWD\target\release\toss-cli.exe" enable=yes profile=any | Out-Null
-          $env:RUST_LOG = "info,toss_core=debug"
+          $env:RUST_LOG = "info,toss_core=debug,iroh=info"
           $p = Start-Process -FilePath "target\release\toss-cli.exe" `
             -ArgumentList @("--data-dir", $data, "--name", "ci-host", "host", "--root", "RAW=$env:RUNNER_TEMP\root", "--return", $ret) `
             -RedirectStandardOutput "$env:RUNNER_TEMP\host.log" -RedirectStandardError "$env:RUNNER_TEMP\host.err" -PassThru -NoNewWindow
-          Start-Sleep -Seconds 8
-          Get-Content "$env:RUNNER_TEMP\host.log"
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 3
+            if (Select-String -Path "$env:RUNNER_TEMP\host.err" -Pattern "home relay connected" -SimpleMatch -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
+          }
+          Write-Host "---- host.log ----"; Get-Content "$env:RUNNER_TEMP\host.log"
+          Write-Host "---- host.err ----"; Get-Content "$env:RUNNER_TEMP\host.err"
+          if (-not $ok) { throw "host never connected to its home relay within 90 s" }
           $ticket = (& target\release\toss-cli.exe --data-dir $data ticket --job e2e --root RAW --path job1 --get --put --days 1 2>$null | Select-Object -First 1)
           if (-not $ticket.StartsWith("toss1")) { throw "no ticket: $ticket" }
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\ticket" | Out-Null
@@ -80,7 +86,7 @@ jobs:
         shell: pwsh
         run: |
           $log = "$env:RUNNER_TEMP\host.log"
-          $deadline = (Get-Date).AddMinutes(25)
+          $deadline = (Get-Date).AddMinutes(22)
           while ((Get-Date) -lt $deadline) {
             $done = (Select-String -Path $log -Pattern " done " -SimpleMatch -ErrorAction SilentlyContinue | Measure-Object).Count
             $err = Select-String -Path $log -Pattern " error " -SimpleMatch -ErrorAction SilentlyContinue
@@ -89,7 +95,7 @@ jobs:
             Start-Sleep -Seconds 10
           }
           Write-Host "---- host.log ----"; Get-Content $log
-          Write-Host "---- host.err (tail) ----"; Get-Content "$env:RUNNER_TEMP\host.err" -Tail 40
+          Write-Host "---- host.err (tail) ----"; Get-Content "$env:RUNNER_TEMP\host.err" -Tail 120
           if ($done -lt 2) { throw "client did not finish get+put within 25 min (done lines: $done)" }
       - name: Verify returned files byte-for-byte
         shell: pwsh
@@ -133,14 +139,14 @@ jobs:
           echo "ticket: $(cut -c1-24 "$RUNNER_TEMP/ticket/ticket.txt")… ($(wc -c < "$RUNNER_TEMP/ticket/ticket.txt") chars)"
       - name: Get the job folder from the host
         env:
-          RUST_LOG: info,toss_core=debug
+          RUST_LOG: info,toss_core=debug,iroh=info
         run: |
           T=$(cat "$RUNNER_TEMP/ticket/ticket.txt")
           mkdir -p "$RUNNER_TEMP/dl"
           start=$(date +%s)
-          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client get "$T" --dest "$RUNNER_TEMP/dl" 2> "$RUNNER_TEMP/get.err"
+          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client --max-wait 600 get "$T" --dest "$RUNNER_TEMP/dl" 2>&1 | tee "$RUNNER_TEMP/get.err"
+          test "${PIPESTATUS[0]}" -eq 0
           end=$(date +%s)
-          echo "---- get.err (progress) ----"; tail -n 40 "$RUNNER_TEMP/get.err"
           echo "get took $((end-start)) s"
           grep -oE "(Direct|Relay|Mixed|Unknown)" "$RUNNER_TEMP/get.err" | sort | uniq -c
       - name: Verify received files byte-for-byte
@@ -151,13 +157,13 @@ jobs:
           echo "OK: $(wc -l < "$RUNNER_TEMP/client-sums.txt") files received identical (get verified)"
       - name: Put the folder back to the host
         env:
-          RUST_LOG: info,toss_core=debug
+          RUST_LOG: info,toss_core=debug,iroh=info
         run: |
           T=$(cat "$RUNNER_TEMP/ticket/ticket.txt")
           start=$(date +%s)
-          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client put "$T" "$RUNNER_TEMP/dl/e2e" 2> "$RUNNER_TEMP/put.err"
+          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client --max-wait 600 put "$T" "$RUNNER_TEMP/dl/e2e" 2>&1 | tee "$RUNNER_TEMP/put.err"
+          test "${PIPESTATUS[0]}" -eq 0
           end=$(date +%s)
-          echo "---- put.err (progress) ----"; tail -n 40 "$RUNNER_TEMP/put.err"
           echo "put took $((end-start)) s"
       - name: Upload client logs
         if: always()
