@@ -1,4 +1,4 @@
-import { ReactNode, useEffect } from "react";
+import { ReactNode, useEffect, useId } from "react";
 import { AnimatePresence, motion, useDragControls, useReducedMotion } from "motion/react";
 import { IconWeight, TOSS_ICONS, TossIcon, TossIconName } from "./icons";
 
@@ -178,4 +178,70 @@ export function Badge({ children, tone = "mute" }: { children: ReactNode; tone?:
     mute: "bg-line/10 text-mute", ok: "bg-ok/15 text-ok", warn: "bg-warn/15 text-warn", accent: "bg-accent/15 text-accent", bad: "bg-bad/15 text-bad",
   }[tone];
   return <span className={`inline-flex items-center h-5 px-2 rounded-full text-[11px] font-semibold tracking-wide ${c}`}>{children}</span>;
+}
+
+/** Two-or-three way switch with a sliding pill (same spring as the tab bar). */
+export function Segmented<T extends string | number>({ value, options, onChange, label }: {
+  value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label?: string;
+}) {
+  const reduce = useReducedMotion();
+  const id = useId();
+  return (
+    <div role="radiogroup" aria-label={label} className="relative shrink-0 inline-flex rounded-full p-0.5 hair bg-line/[0.05]">
+      {options.map((o) => {
+        const on = o.value === value;
+        return (
+          <button
+            key={String(o.value)} role="radio" aria-checked={on} onClick={() => onChange(o.value)}
+            className={`relative h-7 min-w-[52px] px-3 rounded-full text-xs font-medium transition-colors duration-500 ease-aura active:scale-95 ${on ? "text-accent-ink" : "text-mute hover:text-ink"}`}
+          >
+            {on && (
+              <motion.span
+                layoutId={`seg-${id}`} className="absolute inset-0 rounded-full bg-accent"
+                style={{ boxShadow: "inset 0 1px 0 rgb(255 255 255 / 0.28), 0 6px 16px -8px rgb(var(--accent) / 0.8)" }}
+                transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 32, mass: 0.8 }}
+              />
+            )}
+            <span className="relative">{o.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** "Nâng cao"-style disclosure: the caret turns, the panel grows open (instant with reduced motion). */
+export function Disclosure({ title, open, onToggle, children, aside }: { title: string; open: boolean; onToggle: () => void; children: ReactNode; aside?: ReactNode }) {
+  const reduce = useReducedMotion();
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        {aside ?? <span />}
+        <button
+          type="button" aria-expanded={open} onClick={onToggle}
+          className="inline-flex items-center gap-1 h-8 pl-3 pr-1.5 rounded-full text-sm text-mute hover:text-ink transition-colors duration-500 ease-aura active:scale-95"
+        >
+          {title}
+          <motion.span animate={{ rotate: open ? 180 : 0 }} transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 24 }} className="grid">
+            <Icon name="chevron" className="w-4 h-4" weight="bold" />
+          </motion.span>
+        </button>
+      </div>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="panel" className="overflow-hidden"
+            initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }} animate={reduce ? { opacity: 1 } : { height: "auto", opacity: 1 }}
+            exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }} transition={{ duration: reduce ? 0 : 0.5, ease: EASE }}
+          >{children}</motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** Small status dot (ok / bad / warn / mute) with the same glow as the remote-host dot. */
+export function Dot({ tone }: { tone: "ok" | "bad" | "warn" | "mute" }) {
+  const c = { ok: "bg-ok shadow-[0_0_8px_rgb(var(--ok)/0.8)]", bad: "bg-bad", warn: "bg-warn", mute: "bg-mute/60" }[tone];
+  return <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${c}`} aria-hidden />;
 }

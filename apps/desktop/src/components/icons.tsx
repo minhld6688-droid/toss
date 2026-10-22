@@ -49,6 +49,12 @@ export const TOSS_ICONS = {
   // "go" is a toss: rises in an arc and lands up-right
   go: [S("M5.5 18.5C6.3 11.6 10 7.6 17.5 7"), S("M13.8 3.9 17.6 7l-3.3 3.6")],
   // out of the box, on an arc
+  // disclosure caret: a soft arc, not a corner
+  chevron: [S("M6.2 9.6c2 2.5 3.7 4 5.8 5.4 2.1-1.4 3.8-2.9 5.8-5.4")],
+  // the link between two machines: two arcs and the spark where they meet
+  signal: [S("M4.8 9.4a10 10 0 0 1 14.4 0"), S("M7.9 12.6a5.7 5.7 0 0 1 8.2 0"), DOT(12, 16.6, 1.6)],
+  // a note: ring, stem, spark on top
+  info: [RING(12, 12, 8.4), S("M12 11v5.2"), DOT(12, 7.9, 1.1)],
   share: [S("M8.2 11H6.6A1.6 1.6 0 0 0 5 12.6v5.8A1.6 1.6 0 0 0 6.6 20h10.8a1.6 1.6 0 0 0 1.6-1.6v-1.3"), S("M10 15.2C10.4 9.8 13.4 6.6 19 6"), S("M15.6 3 19.1 6l-3 3.5"), DOT(10, 15.4, 1.4)],
 } satisfies Record<string, Part[]>;
 

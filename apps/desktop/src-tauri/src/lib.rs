@@ -4,7 +4,9 @@ mod commands;
 pub mod config;
 mod core;
 mod ctxmenu;
+mod firewall;
 mod ipc;
+mod logs;
 mod services;
 mod settings;
 mod shell;
@@ -17,9 +19,8 @@ use tauri_plugin_autostart::MacosLauncher;
 use crate::{config::HIDDEN_FLAG, core::Core, shell::Shell};
 
 pub fn run() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,iroh=warn,quinn=warn"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // stderr + `<data_dir>/logs/toss.log` (the "Xuất log" button zips that folder).
+    logs::init(&settings::data_dir().join("logs"));
 
     let core = Arc::new(Core::new());
     let start_hidden = std::env::args().any(|a| a == HIDDEN_FLAG);
@@ -83,6 +84,11 @@ pub fn run() {
             commands::remove_quick_share,
             commands::set_context_menu,
             commands::set_auto_receive,
+            commands::get_diagnostics,
+            commands::add_firewall_rule,
+            commands::test_connect,
+            commands::set_net,
+            commands::export_logs,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

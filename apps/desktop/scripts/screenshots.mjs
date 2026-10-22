@@ -46,6 +46,24 @@ for (const scheme of ["light", "dark"]) {
   // settings
   await page.getByRole("button", { name: "Cài đặt" }).click();
   await shot(page, `03-settings${sfx}.png`);
+
+  // v0.4 diagnostics: Settings → Kết nối (relay case: symmetric NAT, no port mapping, firewall missing), then the connect test
+  await page.getByText("Khả năng nối trực tiếp").waitFor();
+  await page.getByRole("heading", { name: "Kết nối", exact: true }).evaluate((el) => el.scrollIntoView({ block: "start" }));
+  await shot(page, `11-settings-connection${sfx}.png`);
+  await page.getByRole("button", { name: /Thử nối tới máy tổng/ }).click();
+  await page.getByText(/nối sau/).waitFor({ timeout: 8000 });
+  await page.evaluate(() => document.querySelector("main").scrollBy(0, 330));
+  await shot(page, `11-settings-connection-test${sfx}.png`);
+  if (scheme === "light") {
+    await page.getByRole("button", { name: "Nâng cao" }).click();
+    await page.waitForTimeout(700);
+    await page.evaluate(() => document.querySelector("main").scrollBy(0, 190));
+    await shot(page, "11-settings-connection-advanced.png");
+    await page.getByRole("button", { name: "Nâng cao" }).click();
+    await page.waitForTimeout(600);
+  }
+  await page.evaluate(() => document.querySelector("main").scrollTo(0, 0));
   if (scheme === "light") {
     // create a link and show it
     await page.getByPlaceholder("VD: 12A3 - RAW").first().fill("12A3 - RAW");
@@ -86,6 +104,14 @@ for (const scheme of ["light", "dark"]) {
     await page.goto(base + "?wizard=1");
     await page.getByText("Tên máy của bạn").waitFor();
     await shot(page, "07-wizard.png");
+    // host machine whose firewall blocks UDP: one extra step before "Xong rồi"
+    await page.goto(base + "?wizard=1&host=1");
+    await page.getByText("Tên máy của bạn").waitFor();
+    await page.getByRole("button", { name: "Tiếp tục" }).click();
+    await page.getByText("Thư mục nhận file").waitFor();
+    await page.getByRole("button", { name: "Tiếp tục" }).click();
+    await page.getByRole("button", { name: /Cho phép qua firewall/ }).waitFor();
+    await shot(page, "07-wizard-firewall.png");
   }
   await ctx.close();
 }

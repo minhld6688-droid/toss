@@ -8,7 +8,10 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, OnceLock, Weak,
+    },
     time::Duration,
 };
 
@@ -19,13 +22,13 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_notification::NotificationExt as _;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use toss_core::{
-    wire::Op, CtlClient, HostConfig as CoreHost, Node, NodeConfig, Root as CoreRoot, Ticket,
-    TicketSpec as CoreSpec,
+    net::DEFAULT_HOST_PORT, wire::Op, ConnectReport, CtlClient, HostConfig as CoreHost, NetConfig,
+    Node, NodeConfig, Root as CoreRoot, Ticket, TicketSpec as CoreSpec,
 };
 
 use crate::{
-    config,
-    ipc::{AppState, HostConfig, JobLast, JobRecord, Root, TicketInfo, TicketSpec},
+    config, firewall, logs,
+    ipc::{AppState, HostConfig, JobLast, JobRecord, NetDiagUi, Root, TicketInfo, TicketSpec},
     settings::{data_dir, QuickShare, Settings},
 };
 
@@ -42,6 +45,9 @@ pub const NO_ADMIN: &str = "no_admin_ticket: Chưa có máy tổng từ xa";
 /// on a drive that is not mounted yet) tries again.
 const HOST_RETRY: Duration = Duration::from_secs(30);
 
+/// How often a deferred node restart (network settings saved during a transfer) is retried.
+const RESTART_RETRY: Duration = Duration::from_secs(15);
+
 pub struct Core {
     data_dir: PathBuf,
     app: OnceLock<AppHandle>,
@@ -54,6 +60,8 @@ pub struct Core {
     remote_tickets: StdMutex<HashMap<[u8; 16], String>>,
     /// Serializes host-config changes (user `set_host`, quick share add/remove).
     host_lock: Mutex<()>,
+    /// The fixed UDP port the last start asked for but could not bind (fell back to random).
+    port_fallback: StdMutex<Option<u16>>,
 }
 
 impl Core {
@@ -72,6 +80,7 @@ impl Core {
             ctl: Mutex::new(None),
             remote_tickets: StdMutex::new(HashMap::new()),
             host_lock: Mutex::new(()),
+            port_fallback: StdMutex::new(None),
         }
     }
 
@@ -136,20 +145,20 @@ impl Core {
     }
 
     async fn start_node(&self) -> Result<Arc<Node>> {
-        let (name, host) = {
+        let (name, host, net) = {
             let s = self.settings.lock().unwrap_or_else(|p| p.into_inner());
             // User roots + quick-share roots (missing folders are tolerated here and
             // picked up by the retry once their drive is mounted).
-            (s.device_name.clone(), effective_host(&s, false))
+            (s.device_name.clone(), effective_host(&s, false), s.net.clone())
         };
         std::fs::create_dir_all(&self.data_dir).context("tạo thư mục dữ liệu")?;
         let cfg = NodeConfig {
             data_dir: self.data_dir.clone(),
             device_name: name,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
-            net: Default::default(),
+            net,
         };
-        let port = host.as_ref().and_then(|h| h.bind_port);
+        let port = host_port(host.as_ref());
         let start = |port| {
             let cfg = cfg.clone();
             async move {
@@ -160,11 +169,16 @@ impl Core {
             }
         };
         let node = match start(port).await {
-            Ok(n) => n,
+            Ok(n) => {
+                *self.port_fallback.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                n
+            }
             // A taken port must not leave the app without a network: fall back to a random one.
             Err(e) if port.is_some() => {
                 tracing::error!("cổng UDP {port:?} không dùng được ({e:#}); dùng cổng ngẫu nhiên");
-                start(None).await?
+                let n = start(None).await?;
+                *self.port_fallback.lock().unwrap_or_else(|p| p.into_inner()) = port;
+                n
             }
             Err(e) => return Err(e),
         };
@@ -234,17 +248,23 @@ impl Core {
     /// Restart the node so a new device name takes effect. Skipped while transfers are active
     /// (the name is then applied at next launch).
     async fn restart_for_rename(&self) -> Result<()> {
+        self.restart_node().await.map(|_| ())
+    }
+
+    /// Restarts the node with the current settings (device name, host port, `net`). Deferred
+    /// (`Ok(false)`) while transfers are active; `Ok(true)` once restarted.
+    async fn restart_node(&self) -> Result<bool> {
         let _g = self.start_lock.lock().await;
         let Some(cur) = self.node.read().await.clone() else {
-            return Ok(());
+            return Ok(true); // not running: the next start reads the settings
         };
         if cur
             .transfers()
             .iter()
             .any(|t| is_active(&serde_json::to_value(t).unwrap_or(Value::Null)))
         {
-            tracing::info!("device name saved; node restart deferred (transfers active)");
-            return Ok(());
+            tracing::info!("settings saved; node restart deferred (transfers active)");
+            return Ok(false);
         }
         drop(cur);
         let old = self.node.write().await.take();
@@ -257,7 +277,32 @@ impl Core {
         }
         let n = self.start_node().await?;
         *self.node.write().await = Some(n);
-        Ok(())
+        Ok(true)
+    }
+
+    /// After a deferred restart (transfers were active): checks every `RESTART_RETRY` and
+    /// restarts once the node is idle. One watcher at a time.
+    fn spawn_restart_when_idle(&self) {
+        static WATCHING: AtomicBool = AtomicBool::new(false);
+        let Some(app) = self.app.get().cloned() else {
+            return;
+        };
+        if WATCHING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            let core = app.state::<Arc<Core>>().inner().clone();
+            loop {
+                tokio::time::sleep(RESTART_RETRY).await;
+                match core.restart_node().await {
+                    Ok(false) => continue,
+                    Ok(true) => tracing::info!("node restarted with the new network settings"),
+                    Err(e) => tracing::error!("node restart failed: {e:#}"),
+                }
+                break;
+            }
+            WATCHING.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Pauses client transfers (keeping `.part` files) and closes the endpoint.
@@ -333,6 +378,7 @@ impl Core {
             first_run: s.first_run,
             context_menu: s.context_menu,
             auto_receive: s.auto_receive,
+            net: s.net.clone(),
         })
     }
 
@@ -406,7 +452,7 @@ impl Core {
             Some(h) => node.set_host(Some(to_core_host(h, false)?)).await?,
             None => node.set_host(None).await?,
         }
-        let want_port = config.as_ref().and_then(|h| h.bind_port);
+        let want_port = host_port(config.as_ref());
         self.update_settings(|s| {
             // Still "auto" only while the user has not added roots of their own.
             s.host_auto = s.host_auto && config.as_ref().is_some_and(|h| h.roots.is_empty());
@@ -414,7 +460,11 @@ impl Core {
         })?;
         // The UDP port is bound when the node starts: restart to apply a new one
         // (deferred to the next launch while transfers are running).
-        if want_port != node.bind_port() {
+        // (A port that was taken at startup stays random until the user changes it.)
+        let fell_back = want_port.is_some()
+            && node.bind_port().is_none()
+            && *self.port_fallback.lock().unwrap_or_else(|p| p.into_inner()) == want_port;
+        if want_port.is_some() && want_port != node.bind_port() && !fell_back {
             drop(node);
             self.restart_for_rename().await?;
         }
@@ -456,7 +506,7 @@ impl Core {
                         .to_string_lossy()
                         .into_owned(),
                     max_parallel_jobs: 2,
-                    bind_port: None,
+                    bind_port: Some(DEFAULT_HOST_PORT),
                 });
                 s.host_auto = true;
             }
@@ -855,6 +905,90 @@ impl Core {
         self.with_ctl(|c| async move { c.revoke(id).await }).await
     }
 
+    // ---- v0.4 diagnostics ---------------------------------------------------------------------
+    pub fn log_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+
+    /// Core snapshot + firewall (cached, checked off the runtime) + log folder. When host mode
+    /// wanted a fixed UDP port the node could not bind, that goes first in `reasons`.
+    pub async fn diagnostics(&self) -> Result<NetDiagUi> {
+        let node = self.node().await?;
+        let (diag, firewall) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(10), node.diagnostics()),
+            firewall::state()
+        );
+        let mut diag = diag.map_err(|_| anyhow!("Đo mạng quá lâu, thử lại sau"))?;
+        let wanted = host_port(effective_host(&self.settings(), false).as_ref());
+        if let Some(p) = wanted.filter(|p| diag.bind_port != Some(*p)) {
+            diag.reasons.insert(
+                0,
+                format!("Cổng UDP {p} đang bị chương trình khác dùng — Toss phải dùng cổng ngẫu nhiên nên khó mở cổng trên router"),
+            );
+        }
+        Ok(NetDiagUi {
+            diag,
+            firewall,
+            log_dir: self.log_dir().to_string_lossy().into_owned(),
+        })
+    }
+
+    /// Dials the host of `ticket` (no job started). An empty `ticket` means the stored admin
+    /// ticket, which the UI never sees.
+    pub async fn test_connect(&self, ticket: String) -> Result<ConnectReport> {
+        let text = match ticket.trim() {
+            "" => self
+                .settings()
+                .admin_ticket
+                .ok_or_else(|| anyhow!("Chưa có máy tổng — dán một link của máy tổng để thử"))?,
+            t => t.to_string(),
+        };
+        let t = Ticket::from_str(&text).map_err(|e| anyhow!("không đọc được link ({e})"))?;
+        let node = self.node().await?;
+        tokio::time::timeout(Duration::from_secs(30), node.test_connect(&t))
+            .await
+            .map_err(|_| anyhow!("Thử nối quá lâu, máy tổng không phản hồi"))
+    }
+
+    /// Saves `net` and applies it by restarting the node (deferred, and retried until idle,
+    /// while a transfer is running).
+    pub async fn set_net(&self, net: NetConfig) -> Result<()> {
+        let net = clean_net(net)?;
+        let changed = self.update_settings(|s| {
+            let changed = s.net != net;
+            s.net = net;
+            changed
+        })?;
+        if changed && !self.restart_node().await? {
+            self.spawn_restart_when_idle();
+        }
+        Ok(())
+    }
+
+    /// `~/Desktop/toss-logs-<stamp>.zip`: logs, redacted settings and a diagnostics snapshot.
+    pub async fn export_logs(&self) -> Result<String> {
+        let mut extra: Vec<(&str, Vec<u8>)> = Vec::new();
+        if let Ok(Ok(d)) = tokio::time::timeout(Duration::from_secs(4), self.diagnostics()).await {
+            extra.push(("diagnostics.json", serde_json::to_vec_pretty(&d)?));
+        }
+        extra.push((
+            "about.txt",
+            format!(
+                "Toss {}\n{} {}\n",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )
+            .into_bytes(),
+        ));
+        let dir = self.data_dir.clone();
+        let dest = dirs::desktop_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let out = tokio::task::spawn_blocking(move || logs::export_zip(&dir, &extra, &dest)).await??;
+        Ok(out.to_string_lossy().into_owned())
+    }
+
     // ---- misc -------------------------------------------------------------------------------
     fn info(&self, t: &Ticket) -> TicketInfo {
         ticket_info(t, &self.settings().page_host())
@@ -941,6 +1075,36 @@ fn clean_name(n: &str) -> Result<String> {
         bail!("Tên máy không được để trống");
     }
     Ok(n)
+}
+
+/// UDP port host mode runs on: the configured one, else the default 41820 (None = host mode off).
+fn host_port(h: Option<&HostConfig>) -> Option<u16> {
+    h.map(|h| h.bind_port.filter(|p| *p != 0).unwrap_or(DEFAULT_HOST_PORT))
+}
+
+/// Validates what the UI sent for `set_net`: relay URLs (trimmed, http(s), no duplicates)
+/// and tuning bounds, so a typo cannot stop the node from starting.
+fn clean_net(mut net: NetConfig) -> Result<NetConfig> {
+    let mut urls: Vec<String> = Vec::new();
+    for u in net.relay_urls.drain(..) {
+        let u = u.trim().trim_end_matches('/').to_string();
+        if u.is_empty() || urls.contains(&u) {
+            continue;
+        }
+        let rest = u
+            .strip_prefix("https://")
+            .or_else(|| u.strip_prefix("http://"))
+            .ok_or_else(|| anyhow!("Địa chỉ relay phải bắt đầu bằng https:// (vd. https://relay.example.vn)"))?;
+        if rest.is_empty() || rest.contains(char::is_whitespace) || (!rest.contains('.') && !rest.starts_with("localhost")) {
+            bail!("Địa chỉ relay “{u}” không hợp lệ");
+        }
+        urls.push(u);
+    }
+    net.relay_urls = urls;
+    let t = &mut net.tuning;
+    t.streams = t.streams.clamp(1, 32);
+    t.streams_high_rtt = t.streams_high_rtt.clamp(t.streams, 64);
+    Ok(net)
 }
 
 fn valid_alias(a: &str) -> bool {
@@ -1227,6 +1391,41 @@ mod tests {
         assert!(!valid_alias(""));
         assert!(!valid_alias("có dấu"));
         assert!(!valid_alias(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn host_port_defaults_to_41820() {
+        assert_eq!(host_port(None), None, "host mode off: no fixed port");
+        let mut h = HostConfig::default();
+        assert_eq!(host_port(Some(&h)), Some(DEFAULT_HOST_PORT));
+        h.bind_port = Some(0);
+        assert_eq!(host_port(Some(&h)), Some(DEFAULT_HOST_PORT));
+        h.bind_port = Some(50000);
+        assert_eq!(host_port(Some(&h)), Some(50000));
+    }
+
+    #[test]
+    fn set_net_validation() {
+        let mut n = NetConfig {
+            relay_urls: vec![
+                " https://relay.example.vn/ ".into(),
+                "https://relay.example.vn".into(),
+                "".into(),
+            ],
+            ..NetConfig::default()
+        };
+        n.tuning.streams = 99;
+        n.tuning.streams_high_rtt = 4;
+        let c = clean_net(n).unwrap();
+        assert_eq!(c.relay_urls, ["https://relay.example.vn"], "trimmed, de-duplicated");
+        assert_eq!((c.tuning.streams, c.tuning.streams_high_rtt), (32, 32));
+        for bad in ["relay.example.vn", "ftp://x.vn", "https://", "https://no spaces.vn"] {
+            let n = NetConfig {
+                relay_urls: vec![bad.into()],
+                ..NetConfig::default()
+            };
+            assert!(clean_net(n).is_err(), "{bad}");
+        }
     }
 
     #[test]

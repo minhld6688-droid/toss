@@ -22,6 +22,7 @@ function statusLine(t: TransferState): string {
 
 function Item({ t, i }: { t: TransferState; i: number }) {
   const toast = useStore((s) => s.toast);
+  const openDiagnostics = useStore((s) => s.openDiagnostics);
   const call = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { toast(errorMessage(e), "error"); } };
   const frac = t.bytes_total > 0 ? t.bytes_done / t.bytes_total : t.status === "done" ? 1 : 0;
   const active = t.status === "connecting" || t.status === "running" || t.status === "paused";
@@ -54,9 +55,15 @@ function Item({ t, i }: { t: TransferState; i: number }) {
             {isHostSide ? `${t.op === "get" ? "Gửi cho" : "Nhận từ"} ${t.peer}` : t.op === "get" ? `Nhận từ ${t.peer}` : `Trả cho ${t.peer}`}
           </div>
         </div>
-        <div className="flex gap-1 shrink-0">
-          {isHostSide && <Badge tone="warn">Máy tổng</Badge>}
-          {pl && <Badge tone={t.path === "direct" ? "ok" : "mute"}>{pl}</Badge>}
+        <div className="flex flex-col items-end gap-0.5 shrink-0">
+          <div className="flex items-center gap-1">
+            {isHostSide && <Badge tone="warn">Máy tổng</Badge>}
+            {pl && <Badge tone={t.path === "direct" ? "ok" : "mute"}>{pl}</Badge>}
+            {pl && t.rtt_ms != null && <span className="mono text-[11px] text-mute" title="Độ trễ (RTT) của đường đang dùng">{t.rtt_ms} ms</span>}
+          </div>
+          {t.path === "relay" && (
+            <button className="text-[11px] leading-4 text-accent underline underline-offset-2 decoration-accent/40 hover:decoration-accent rounded-sm" onClick={openDiagnostics}>Vì sao?</button>
+          )}
         </div>
       </div>
 

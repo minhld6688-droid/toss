@@ -13,7 +13,8 @@ use tauri_plugin_opener::OpenerExt as _;
 
 use crate::{
     core::{self, Core},
-    ipc::{AppState, HostConfig, JobRecord, TicketInfo, TicketSpec},
+    firewall,
+    ipc::{AppState, HostConfig, JobRecord, NetDiagUi, TicketInfo, TicketSpec},
     settings::QuickShare,
     shell::Shell,
 };
@@ -257,6 +258,35 @@ pub async fn remote_revoke(core: C<'_>, id: String) -> Res<()> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn has_admin_ticket(core: C<'_>) -> Res<bool> {
     Ok(core.has_admin_ticket())
+}
+
+// ---- v0.4 diagnostics / network ---------------------------------------------------------------------
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_diagnostics(core: C<'_>) -> Res<NetDiagUi> {
+    Ok(core.diagnostics().await?)
+}
+
+/// Windows: one UAC prompt; macOS: admin password prompt; Linux: nothing to do.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn add_firewall_rule() -> Res<()> {
+    tokio::task::spawn_blocking(firewall::add_rule).await??;
+    Ok(())
+}
+
+/// An empty `ticket` tests the stored admin ticket's host (the UI never holds that ticket).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn test_connect(core: C<'_>, ticket: String) -> Res<toss_core::ConnectReport> {
+    Ok(core.test_connect(ticket).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_net(core: C<'_>, net: toss_core::NetConfig) -> Res<()> {
+    Ok(core.set_net(net).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn export_logs(core: C<'_>) -> Res<String> {
+    Ok(core.export_logs().await?)
 }
 
 // ---- misc ------------------------------------------------------------------------------------------------------

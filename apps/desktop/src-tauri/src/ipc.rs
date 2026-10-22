@@ -33,6 +33,18 @@ pub struct AppState {
     pub context_menu: bool,
     /// v0.3: clicked `get` links start downloading immediately.
     pub auto_receive: bool,
+    /// v0.4: network settings (own relay, mDNS, port mapping, tuning).
+    pub net: toss_core::NetConfig,
+}
+
+/// v0.4 `get_diagnostics`: the core snapshot plus what only the shell can see.
+#[derive(Serialize, Clone, Debug)]
+pub struct NetDiagUi {
+    #[serde(flatten)]
+    pub diag: toss_core::NetDiag,
+    pub firewall: crate::firewall::FirewallState,
+    /// Folder holding `toss.log` (shown to the user, opened by "Xuất log").
+    pub log_dir: String,
 }
 
 #[derive(Serialize, Clone, Debug)]

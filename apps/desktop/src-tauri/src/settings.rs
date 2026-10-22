@@ -30,6 +30,8 @@ pub struct Settings {
     /// Host mode was turned on by a quick share (not by the user): it is turned off
     /// again when the last quick share is removed.
     pub host_auto: bool,
+    /// v0.4: network settings (own relay, mDNS, port mapping, tuning). Old files load with defaults.
+    pub net: toss_core::NetConfig,
 }
 
 /// One quick-shared folder (ipc.ts `list_quick_shares`).
@@ -58,6 +60,7 @@ impl Default for Settings {
             auto_receive: true,
             quick_shares: Vec::new(),
             host_auto: false,
+            net: toss_core::NetConfig::default(),
         }
     }
 }
@@ -177,6 +180,23 @@ mod tests {
         assert!(s.context_menu, "context menu defaults to on");
         assert!(s.auto_receive, "auto receive defaults to on");
         assert!(s.quick_shares.is_empty() && !s.host_auto);
+        assert_eq!(s.net, toss_core::NetConfig::default(), "pre-0.4 files get the default net config");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn net_round_trips_and_partial_net_fills_defaults() {
+        let dir = tmp("net");
+        let mut s = Settings::default();
+        s.net.relay_urls = vec!["https://relay.example.vn".into()];
+        s.net.mdns = false;
+        s.net.tuning.streams = 16;
+        s.net.tuning.congestion = toss_core::net::Congestion::Cubic;
+        s.save(&dir).unwrap();
+        assert_eq!(Settings::load(&dir).net, s.net);
+        fs::write(Settings::path(&dir), r#"{"device_name":"May","net":{"portmap":false}}"#).unwrap();
+        let back = Settings::load(&dir);
+        assert!(!back.net.portmap && back.net.mdns && back.net.relay_urls.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }
