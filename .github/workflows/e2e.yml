@@ -1,0 +1,170 @@
+name: e2e
+
+# Real-network end-to-end test: a Windows runner acts as the studio host, a macOS
+# runner acts as the editor. They find each other through iroh's public discovery
+# and relays (two different Azure VMs behind NAT), transfer a 200 MB job folder
+# host -> client (get), then client -> host (put), and verify every byte.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["crates/**", ".github/workflows/e2e.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: host (windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-host
+      - name: Build toss-cli
+        run: cargo build --release -p toss-cli
+      - name: Create test data (30 files incl. 200 MB, with checksums)
+        shell: pwsh
+        run: |
+          $root = "$env:RUNNER_TEMP\root\job1"
+          New-Item -ItemType Directory -Force "$root\sub\deep" | Out-Null
+          $rng = [System.Random]::new(7)
+          for ($i = 1; $i -le 28; $i++) {
+            $size = $rng.Next(1024, 2MB)
+            $bytes = New-Object byte[] $size; $rng.NextBytes($bytes)
+            $dir = if ($i % 3 -eq 0) { "$root\sub\deep" } elseif ($i % 2 -eq 0) { "$root\sub" } else { $root }
+            [IO.File]::WriteAllBytes("$dir\file_$i.bin", $bytes)
+          }
+          $big = New-Object byte[] (200MB); $rng.NextBytes($big)
+          [IO.File]::WriteAllBytes("$root\big_200mb.raw", $big)
+          "hello toss" | Set-Content -NoNewline "$root\note.txt"
+          Get-ChildItem -Recurse -File $root | ForEach-Object {
+            $rel = $_.FullName.Substring($root.Length + 1).Replace('\','/')
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
+          } | Sort-Object | Set-Content "$env:RUNNER_TEMP\host-sums.txt"
+          Get-Content "$env:RUNNER_TEMP\host-sums.txt" | Select-Object -First 5
+      - name: Start host and issue ticket
+        shell: pwsh
+        run: |
+          $data = "$env:RUNNER_TEMP\hostdata"
+          $ret = "$env:RUNNER_TEMP\ret"
+          New-Item -ItemType Directory -Force $data, $ret | Out-Null
+          netsh advfirewall firewall add rule name="toss-cli" dir=in action=allow program="$PWD\target\release\toss-cli.exe" enable=yes profile=any | Out-Null
+          $env:RUST_LOG = "info,toss_core=debug"
+          $p = Start-Process -FilePath "target\release\toss-cli.exe" `
+            -ArgumentList @("--data-dir", $data, "--name", "ci-host", "host", "--root", "RAW=$env:RUNNER_TEMP\root", "--return", $ret) `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\host.log" -RedirectStandardError "$env:RUNNER_TEMP\host.err" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 8
+          Get-Content "$env:RUNNER_TEMP\host.log"
+          $ticket = (& target\release\toss-cli.exe --data-dir $data ticket --job e2e --root RAW --path job1 --get --put --days 1 2>$null | Select-Object -First 1)
+          if (-not $ticket.StartsWith("toss1")) { throw "no ticket: $ticket" }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\ticket" | Out-Null
+          $ticket | Set-Content -NoNewline "$env:RUNNER_TEMP\ticket\ticket.txt"
+          Copy-Item "$env:RUNNER_TEMP\host-sums.txt" "$env:RUNNER_TEMP\ticket\host-sums.txt"
+          "ticket length $($ticket.Length), host pid $($p.Id)"
+      - name: Publish ticket for the client job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticket
+          path: ${{ runner.temp }}/ticket
+          retention-days: 1
+      - name: Wait for the client to get and put
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\host.log"
+          $deadline = (Get-Date).AddMinutes(25)
+          while ((Get-Date) -lt $deadline) {
+            $done = (Select-String -Path $log -Pattern " done " -SimpleMatch -ErrorAction SilentlyContinue | Measure-Object).Count
+            $err = Select-String -Path $log -Pattern " error " -SimpleMatch -ErrorAction SilentlyContinue
+            if ($err) { Write-Host "host saw errors:"; $err | ForEach-Object { $_.Line } }
+            if ($done -ge 2) { break }
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "---- host.log ----"; Get-Content $log
+          Write-Host "---- host.err (tail) ----"; Get-Content "$env:RUNNER_TEMP\host.err" -Tail 40
+          if ($done -lt 2) { throw "client did not finish get+put within 25 min (done lines: $done)" }
+      - name: Verify returned files byte-for-byte
+        shell: pwsh
+        run: |
+          $back = "$env:RUNNER_TEMP\ret\e2e\e2e"
+          if (-not (Test-Path $back)) { Get-ChildItem -Recurse "$env:RUNNER_TEMP\ret" | Select-Object FullName; throw "return folder $back missing" }
+          $sums = Get-ChildItem -Recurse -File $back | ForEach-Object {
+            $rel = $_.FullName.Substring($back.Length + 1).Replace('\','/')
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
+          } | Sort-Object
+          $expected = Get-Content "$env:RUNNER_TEMP\host-sums.txt"
+          $diff = Compare-Object $expected $sums
+          if ($diff) { $diff | Format-Table | Out-String | Write-Host; throw "returned files differ from the originals" }
+          "OK: $($sums.Count) files returned identical (put verified)"
+      - name: Stop host
+        if: always()
+        shell: pwsh
+        run: Get-Process toss-cli -ErrorAction SilentlyContinue | Stop-Process -Force
+
+  client:
+    name: client (macos)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-client
+      - name: Build toss-cli
+        run: cargo build --release -p toss-cli
+      - name: Wait for the host's ticket
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 90); do
+            if gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n ticket -D "$RUNNER_TEMP/ticket" 2>/dev/null; then break; fi
+            sleep 10
+          done
+          test -s "$RUNNER_TEMP/ticket/ticket.txt" || { echo "ticket never appeared"; exit 1; }
+          echo "ticket: $(cut -c1-24 "$RUNNER_TEMP/ticket/ticket.txt")… ($(wc -c < "$RUNNER_TEMP/ticket/ticket.txt") chars)"
+      - name: Get the job folder from the host
+        env:
+          RUST_LOG: info,toss_core=debug
+        run: |
+          T=$(cat "$RUNNER_TEMP/ticket/ticket.txt")
+          mkdir -p "$RUNNER_TEMP/dl"
+          start=$(date +%s)
+          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client get "$T" --dest "$RUNNER_TEMP/dl" 2> "$RUNNER_TEMP/get.err"
+          end=$(date +%s)
+          echo "---- get.err (progress) ----"; tail -n 40 "$RUNNER_TEMP/get.err"
+          echo "get took $((end-start)) s"
+          grep -oE "(Direct|Relay|Mixed|Unknown)" "$RUNNER_TEMP/get.err" | sort | uniq -c
+      - name: Verify received files byte-for-byte
+        run: |
+          cd "$RUNNER_TEMP/dl/e2e"
+          find . -type f | sed 's|^\./||' | sort | while read f; do echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  $f"; done > "$RUNNER_TEMP/client-sums.txt"
+          if ! diff <(sort "$RUNNER_TEMP/ticket/host-sums.txt") <(sort "$RUNNER_TEMP/client-sums.txt"); then echo "received files differ"; exit 1; fi
+          echo "OK: $(wc -l < "$RUNNER_TEMP/client-sums.txt") files received identical (get verified)"
+      - name: Put the folder back to the host
+        env:
+          RUST_LOG: info,toss_core=debug
+        run: |
+          T=$(cat "$RUNNER_TEMP/ticket/ticket.txt")
+          start=$(date +%s)
+          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client put "$T" "$RUNNER_TEMP/dl/e2e" 2> "$RUNNER_TEMP/put.err"
+          end=$(date +%s)
+          echo "---- put.err (progress) ----"; tail -n 40 "$RUNNER_TEMP/put.err"
+          echo "put took $((end-start)) s"
+      - name: Upload client logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-logs
+          path: |
+            ${{ runner.temp }}/get.err
+            ${{ runner.temp }}/put.err
+          retention-days: 3
