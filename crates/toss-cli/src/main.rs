@@ -476,7 +476,7 @@ fn print_jobs(jobs: &[JobRecord]) {
 
 async fn run_host(cfg: NodeConfig, hc: HostConfig) -> Result<()> {
     let data_dir = cfg.data_dir.clone();
-    let node = Node::start_with_port(cfg, hc.bind_port).await?;
+    let node = Node::start_host(cfg, hc.bind_port).await?;
     node.set_host(Some(hc.clone())).await?;
     let mut hf = HostFile {
         cfg: hc.clone(),
