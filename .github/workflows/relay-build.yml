@@ -31,6 +31,7 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
     steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build iroh-relay
         run: |
@@ -42,19 +43,44 @@ jobs:
           (cd dist && sha256sum iroh-relay-linux-x86_64 | tee iroh-relay-linux-x86_64.sha256)
           ./dist/iroh-relay-linux-x86_64 --version
           ./dist/iroh-relay-linux-x86_64 --help | head -20
-      - name: Smoke test (dev mode, plain HTTP)
+      - name: Smoke test with the real config template (allow-list, manual cert, high ports)
         run: |
           set -euo pipefail
-          ./dist/iroh-relay-linux-x86_64 --dev > relay-dev.log 2>&1 &
+          T="$RUNNER_TEMP/rt"; mkdir -p "$T/etc"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/default.key" -out "$T/default.crt" \
+            -days 1 -subj /CN=localhost -addext subjectAltName=DNS:localhost
+          # a valid endpoint id = hex of a real ed25519 public key
+          openssl genpkey -algorithm ed25519 -out "$T/id.pem"
+          id=$(openssl pkey -in "$T/id.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          echo "test endpoint id: $id"
+          printf 'RELAY_DOMAIN=relay.example.vn\nCONTACT_EMAIL=ci@example.com\n' > "$T/etc/relay.env"
+          echo "$id  # ci" > "$T/etc/allowed.txt"
+          TOSS_RELAY_CONF_DIR="$T/etc" TOSS_RELAY_TEMPLATE="$PWD/hub/relay/relay.toml.in" \
+            hub/relay/update-allowed.sh --no-restart
+          # Only what a non-root CI box needs differs from production: ports, and a manual cert
+          # instead of Let's Encrypt (no public DNS here). Everything else is the shipped template.
+          sed -i \
+            -e 's|^http_bind_addr = .*|http_bind_addr = "127.0.0.1:8080"|' \
+            -e 's|^https_bind_addr = .*|https_bind_addr = "127.0.0.1:8443"|' \
+            -e 's|^quic_bind_addr = .*|quic_bind_addr = "127.0.0.1:17842"|' \
+            -e 's|^metrics_bind_addr = .*|metrics_bind_addr = "127.0.0.1:19090"|' \
+            -e 's|^cert_mode = .*|cert_mode = "Manual"|' \
+            -e "s|^cert_dir = .*|cert_dir = \"$T\"|" \
+            "$T/etc/relay.toml"
+          cat "$T/etc/relay.toml"
+          ./dist/iroh-relay-linux-x86_64 --config-path "$T/etc/relay.toml" > "$T/relay.log" 2>&1 &
           pid=$!
           ok=0
-          for _ in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:3340/healthz >/dev/null 2>&1; then ok=1; break; fi
+          for _ in $(seq 1 30); do
+            if curl -fsSk https://127.0.0.1:8443/healthz >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
-          kill "$pid" 2>/dev/null || true
-          cat relay-dev.log || true
-          test "$ok" = 1
+          cat "$T/relay.log" || true
+          if [ "$ok" != 1 ]; then kill "$pid" 2>/dev/null || true; echo "::error::relay did not start with the shipped config"; exit 1; fi
+          curl -fsSk -o /dev/null -w 'generate_204 -> %{http_code}\n' https://127.0.0.1:8443/generate_204
+          curl -fsS http://127.0.0.1:19090/metrics | head -5
+          ss -ulnH | grep ':17842' || { kill "$pid"; echo "::error::QUIC address discovery port not listening"; exit 1; }
+          kill "$pid"
       - uses: actions/upload-artifact@v4
         with:
           name: iroh-relay-linux-x86_64
