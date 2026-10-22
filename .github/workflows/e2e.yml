@@ -163,7 +163,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/dl/e2e"
           find . -type f | sed 's|^\./||' | sort | while read f; do echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  $f"; done > "$RUNNER_TEMP/client-sums.txt"
-          if ! diff <(sort "$RUNNER_TEMP/ticket/host-sums.txt") <(sort "$RUNNER_TEMP/client-sums.txt"); then echo "received files differ"; exit 1; fi
+          if ! diff <(tr -d '\r' < "$RUNNER_TEMP/ticket/host-sums.txt" | sort) <(sort "$RUNNER_TEMP/client-sums.txt"); then echo "received files differ"; exit 1; fi
           echo "OK: $(wc -l < "$RUNNER_TEMP/client-sums.txt") files received identical (get verified)"
       - name: Put the folder back to the host
         env:
