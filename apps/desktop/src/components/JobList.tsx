@@ -24,7 +24,7 @@ export function JobList({ load, revoke, reloadKey }: { load: () => Promise<JobRe
         <button className="btn btn-ghost" onClick={() => void reload()}><Icon name="refresh" />Làm mới</button>
       </div>
       {jobs.length === 0 && <div className="text-sm text-mute">Chưa có job nào.</div>}
-      <ul className="divide-y divide-line">
+      <ul className="divide-y divide-line/10">
         {jobs.map((j) => {
           const exp = fmtExpiry(j.exp);
           const dead = j.revoked || exp.expired;
@@ -32,8 +32,8 @@ export function JobList({ load, revoke, reloadKey }: { load: () => Promise<JobRe
             <li key={j.id} className="py-2">
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className={`truncate text-base ${dead ? "text-mute line-through" : ""}`}>{j.job}</div>
-                  <div className="text-xs text-mute truncate">{j.root}/{j.path}</div>
+                  <div className={`truncate text-base font-medium ${dead ? "text-mute line-through" : ""}`}>{j.job}</div>
+                  <div className="text-xs text-mute truncate mono">{j.root}/{j.path}</div>
                 </div>
                 <div className="flex gap-1 shrink-0">
                   {j.get && <Badge tone="accent">Nhận</Badge>}
@@ -49,7 +49,7 @@ export function JobList({ load, revoke, reloadKey }: { load: () => Promise<JobRe
                 </div>
                 <div className="flex gap-1 shrink-0">
                   {j.ticket && !dead && (
-                    <button className="btn btn-ghost" title="Sao chép link" onClick={() => void api.copy_text({ text: `https://${pageHost}/#${j.ticket}` }).then(() => toast("Đã chép link"))}>
+                    <button className="btn btn-icon btn-ghost" title="Sao chép link" onClick={() => void api.copy_text({ text: `https://${pageHost}/#${j.ticket}` }).then(() => toast("Đã chép link"))}>
                       <Icon name="copy" />
                     </button>
                   )}

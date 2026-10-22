@@ -3,7 +3,7 @@ import type { HostConfig, HostStatus, TicketInfo } from "../lib/ipc-types";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { shortId } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Icon, Row, Section, Toggle } from "../components/ui";
+import { Icon, Nest, Row, Section, Toggle } from "../components/ui";
 import { LinkMaker, LinkBackend } from "../components/LinkMaker";
 import { JobList } from "../components/JobList";
 import { QrLink } from "../components/QrLink";
@@ -39,7 +39,7 @@ function DeviceSection() {
         <div>
           <label className="label">Thư mục nhận file</label>
           <div className="flex gap-2">
-            <div className="input flex items-center font-mono text-xs truncate selectable" title={app.dest_dir}>{app.dest_dir}</div>
+            <div className="input flex items-center mono text-xs truncate selectable" title={app.dest_dir}>{app.dest_dir}</div>
             <button className="btn shrink-0" onClick={() => guard(async () => {
               const p = await api.pick_folder({ title: "Chọn thư mục nhận file" });
               if (p) { await api.set_dest_dir({ path: p }); patch({ dest_dir: p }); }
@@ -50,7 +50,7 @@ function DeviceSection() {
           <Toggle on={app.autostart} label="Tự khởi động" onChange={(on) => guard(async () => { await api.set_autostart({ on }); patch({ autostart: on }); })} />
         </Row>
         <div className="text-xs text-mute flex items-center justify-between">
-          <span>ID máy: <span className="font-mono selectable">{shortId(app.endpoint_id, 12)}</span></span>
+          <span>ID máy: <span className="mono selectable">{shortId(app.endpoint_id, 12)}</span></span>
           <span>Toss {app.version}{isMock ? " · MOCK" : ""}</span>
         </div>
       </div>
@@ -113,12 +113,12 @@ function HostEditor() {
                     className={`input ${r.alias && !ALIAS_RE.test(r.alias) ? "border-bad" : ""}`} placeholder="Alias" value={r.alias}
                     onChange={(e) => setDraft({ ...draft, roots: draft.roots.map((x, j) => (j === i ? { ...x, alias: e.target.value } : x)) })}
                   />
-                  <div className="input flex items-center font-mono text-xs truncate" title={r.path}>{r.path || <span className="text-mute">Chưa chọn</span>}</div>
-                  <button className="btn" title="Chọn thư mục" onClick={async () => {
+                  <div className="input flex items-center mono text-xs truncate" title={r.path}>{r.path || <span className="text-mute">Chưa chọn</span>}</div>
+                  <button className="btn btn-icon" title="Chọn thư mục" onClick={async () => {
                     const p = await pick(`Thư mục cho “${r.alias || "gốc"}”`);
                     if (p) setDraft({ ...draft, roots: draft.roots.map((x, j) => (j === i ? { ...x, path: p, alias: x.alias || suggestAlias(p) } : x)) });
                   }}><Icon name="folder" /></button>
-                  <button className="btn btn-ghost btn-danger" title="Xoá" onClick={() => setDraft({ ...draft, roots: draft.roots.filter((_, j) => j !== i) })}><Icon name="x" /></button>
+                  <button className="btn btn-icon btn-ghost btn-danger" title="Xoá" onClick={() => setDraft({ ...draft, roots: draft.roots.filter((_, j) => j !== i) })}><Icon name="x" /></button>
                 </div>
               ))}
               <button className="btn" onClick={async () => {
@@ -131,16 +131,16 @@ function HostEditor() {
           <div>
             <label className="label">Thư mục trả về (file editor gửi lên)</label>
             <div className="flex gap-2">
-              <div className="input flex items-center font-mono text-xs truncate" title={draft.return_root}>{draft.return_root || "Chưa chọn"}</div>
+              <div className="input flex items-center mono text-xs truncate" title={draft.return_root}>{draft.return_root || "Chưa chọn"}</div>
               <button className="btn shrink-0" onClick={async () => { const p = await pick("Thư mục trả về"); if (p) setDraft({ ...draft, return_root: p }); }}><Icon name="folder" />Đổi…</button>
             </div>
           </div>
 
           <Row title="Số job chạy song song" hint="Quá số này, editor sẽ phải chờ">
             <div className="flex items-center gap-2">
-              <button className="btn" onClick={() => setDraft({ ...draft, max_parallel_jobs: Math.max(1, draft.max_parallel_jobs - 1) })}>−</button>
-              <span className="w-5 text-center tabular-nums">{draft.max_parallel_jobs}</span>
-              <button className="btn" onClick={() => setDraft({ ...draft, max_parallel_jobs: Math.min(16, draft.max_parallel_jobs + 1) })}>+</button>
+              <button className="btn btn-icon" onClick={() => setDraft({ ...draft, max_parallel_jobs: Math.max(1, draft.max_parallel_jobs - 1) })}>−</button>
+              <span className="w-6 text-center mono">{draft.max_parallel_jobs}</span>
+              <button className="btn btn-icon" onClick={() => setDraft({ ...draft, max_parallel_jobs: Math.min(16, draft.max_parallel_jobs + 1) })}>+</button>
             </div>
           </Row>
 
@@ -194,7 +194,7 @@ function LocalHostTools() {
           </select>
           <button className="btn btn-primary" onClick={async () => {
             try { setAdmin(await api.create_admin_ticket({ days: adminDays })); } catch (e) { toast(errorMessage(e), "error"); }
-          }}><Icon name="shield" />Tạo link admin</button>
+          }}><Icon name="shield" />Tạo link admin<Nest /></button>
         </div>
         {admin && <div className="mt-3"><QrLink info={admin} caption="Dán link này vào mục “Máy tổng từ xa” trên máy kia" /></div>}
       </Section>
@@ -230,16 +230,16 @@ function RemotePanel() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded border border-line bg-bg p-2 text-sm flex items-center justify-between gap-2">
+      <div className="rounded-[14px] hair bg-line/[0.04] px-3 py-2.5 text-sm flex items-center justify-between gap-2">
         {loading ? <span className="text-mute">Đang kết nối máy tổng…</span> : status ? (
           <div className="min-w-0">
-            <div className="flex items-center gap-2"><span className="inline-block w-2 h-2 rounded-full bg-ok" /><span className="font-medium truncate">{status.device}</span><span className="text-xs text-mute">v{status.version}</span></div>
+            <div className="flex items-center gap-2"><span className="inline-block w-2 h-2 rounded-full bg-ok shadow-[0_0_8px_rgb(var(--ok)/0.8)]" /><span className="font-medium truncate">{status.device}</span><span className="text-xs text-mute">v{status.version}</span></div>
             <div className="text-xs text-mute">{status.active} đang chạy · {status.queued} chờ · online {Math.floor(status.uptime_s / 3600)} giờ</div>
           </div>
         ) : (
           <div className="min-w-0"><div className="flex items-center gap-2"><span className="inline-block w-2 h-2 rounded-full bg-bad" /><span>Không kết nối được</span></div><div className="text-xs text-bad truncate">{err}</div></div>
         )}
-        <button className="btn shrink-0" onClick={() => void loadStatus()}><Icon name="refresh" /></button>
+        <button className="btn btn-icon shrink-0" onClick={() => void loadStatus()}><Icon name="refresh" /></button>
       </div>
 
       {status && (
@@ -291,8 +291,8 @@ function RemoteSection() {
       {has ? <RemotePanel /> : (
         <div className="space-y-2">
           <p className="text-sm text-mute">Dán link admin do máy tổng tạo để xem folder và tạo link nhận/trả file từ xa{app.host ? " (máy này đang là máy tổng — thường không cần)" : ""}.</p>
-          <textarea className="input h-16 py-1 font-mono text-xs resize-none" placeholder="Dán link admin (toss1…)" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
-          <button className="btn btn-primary w-full" disabled={busy || !text.trim()} onClick={connect}>Kết nối máy tổng</button>
+          <textarea className="input h-20 py-2 mono text-xs resize-none" placeholder="Dán link admin (toss1…)" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
+          <button className="btn btn-primary w-full" disabled={busy || !text.trim()} onClick={connect}>Kết nối máy tổng<Nest /></button>
         </div>
       )}
     </Section>
@@ -305,7 +305,7 @@ export function Settings() {
   if (!app) return null;
   return (
     <div className="p-4">
-      <h1 className="text-xl font-semibold mb-3">Cài đặt</h1>
+      <h1 className="text-2xl font-semibold tracking-tight mb-4">Cài đặt</h1>
       <DeviceSection />
       <HostEditor />
       {app.host && <LocalHostTools />}

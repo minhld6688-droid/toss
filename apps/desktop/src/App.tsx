@@ -6,9 +6,9 @@ import { Transfers } from "./screens/Transfers";
 import { Settings } from "./screens/Settings";
 import { TicketSheet } from "./components/TicketSheet";
 import { Wizard } from "./components/Wizard";
-import { Icon } from "./components/ui";
+import { AnimatePresence, Icon } from "./components/ui";
 
-const TABS: { id: Screen; label: string; icon: string }[] = [
+const TABS: { id: Screen; label: string; icon: "home" | "transfer" | "settings" }[] = [
   { id: "home", label: "Trang chính", icon: "home" },
   { id: "transfers", label: "Chuyển file", icon: "transfer" },
   { id: "settings", label: "Cài đặt", icon: "settings" },
@@ -58,41 +58,57 @@ export default function App() {
 
   const active = Object.values(transfers).filter((t) => t.status === "running" || t.status === "connecting" || t.status === "paused").length;
 
-  if (!app) return <div className="h-full grid place-items-center text-mute text-sm">Đang khởi động…</div>;
+  if (!app) return (
+    <div className="relative h-full grid place-items-center text-mute text-sm">
+      <div className="aura" /><div className="grain" />
+      <span className="relative">Đang khởi động…</span>
+    </div>
+  );
 
   return (
-    <div className="h-full flex flex-col">
-      {isMock && <div className="text-center text-[10px] leading-4 bg-warn/20 text-warn">MOCK — dữ liệu giả lập</div>}
-      <main className="flex-1 overflow-y-auto">
+    <div className="relative h-full flex flex-col">
+      <div className="aura" /><div className="grain" />
+      {isMock && <div className="relative z-10 text-center text-[10px] leading-4 tracking-wide bg-warn/15 text-warn">MOCK — dữ liệu giả lập</div>}
+      <main className="relative z-10 flex-1 overflow-y-auto pb-20">
         {screen === "home" && <Home />}
         {screen === "transfers" && <Transfers />}
         {screen === "settings" && <Settings />}
       </main>
 
-      <nav className="grid grid-cols-3 border-t border-line bg-card shrink-0">
-        {TABS.map((t) => (
-          <button key={t.id} onClick={() => setScreen(t.id)} className={`relative flex flex-col items-center gap-0.5 py-2 text-xs ${screen === t.id ? "text-accent" : "text-mute hover:text-ink"}`}>
-            <Icon name={t.icon} className="w-5 h-5" />
-            {t.label}
-            {t.id === "transfers" && active > 0 && (
-              <span className="absolute top-1 left-1/2 ml-2 min-w-[16px] h-4 px-1 rounded-full bg-accent text-accent-ink text-[10px] leading-4 text-center">{active}</span>
-            )}
-          </button>
-        ))}
+      <nav className="fixed bottom-3 left-0 right-0 z-20 flex justify-center pointer-events-none">
+        <div className="glass pointer-events-auto rounded-full p-1 flex gap-0.5">
+          {TABS.map((t) => {
+            const on = screen === t.id;
+            return (
+              <button
+                key={t.id} onClick={() => setScreen(t.id)}
+                className={`relative flex items-center gap-1.5 h-10 px-3.5 rounded-full text-xs font-medium transition-[background-color,color,transform] duration-500 ease-aura active:scale-95 ${on ? "bg-accent text-accent-ink" : "text-mute hover:text-ink hover:bg-line/10"}`}
+                style={on ? { boxShadow: "inset 0 1px 0 rgb(255 255 255 / 0.28), 0 8px 24px -10px rgb(var(--accent) / 0.8)" } : undefined}
+              >
+                <Icon name={t.icon} className="w-[18px] h-[18px]" weight={on ? "bold" : "regular"} />
+                <span className={on ? "" : "sr-only"}>{t.label}</span>
+                {t.id === "transfers" && active > 0 && (
+                  <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] leading-[18px] text-center font-semibold ${on ? "bg-accent-ink/20 text-accent-ink" : "bg-accent text-accent-ink"}`}>{active}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
-      <TicketSheet />
+      <AnimatePresence>{sheet && <TicketSheet key="sheet" info={sheet} />}</AnimatePresence>
       {app.first_run && <Wizard />}
 
       {dropHover && !sheet && (
-        <div className="fixed inset-0 z-20 pointer-events-none border-4 border-dashed border-accent bg-accent/10 grid place-items-center">
-          <div className="card px-4 py-2 text-base font-medium">Thả để trả file</div>
+        <div className="fixed inset-0 z-20 pointer-events-none grid place-items-center bg-accent/10">
+          <div className="absolute inset-3 rounded-[24px] border-2 border-dashed border-accent/70" />
+          <div className="glass rounded-full px-5 py-2.5 text-base font-medium">Thả để trả file</div>
         </div>
       )}
 
-      <div className="fixed left-0 right-0 bottom-16 z-50 flex flex-col items-center gap-2 pointer-events-none px-4">
+      <div className="fixed left-0 right-0 bottom-20 z-50 flex flex-col items-center gap-2 pointer-events-none px-4">
         {toasts.map((t) => (
-          <div key={t.id} className={`card px-3 py-2 text-sm shadow-lg max-w-full ${t.kind === "error" ? "border-bad text-bad" : ""}`}>{t.text}</div>
+          <div key={t.id} className={`glass rise rounded-full px-4 py-2 text-sm max-w-full ${t.kind === "error" ? "text-bad" : ""}`}>{t.text}</div>
         ))}
       </div>
     </div>

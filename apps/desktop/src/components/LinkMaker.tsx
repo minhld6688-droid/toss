@@ -3,7 +3,7 @@ import type { DirEntry, TicketInfo, TicketSpec } from "../lib/ipc-types";
 import { errorMessage } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { QrLink } from "./QrLink";
-import { Icon } from "./ui";
+import { Icon, Nest } from "./ui";
 
 export interface LinkBackend {
   roots: string[];
@@ -91,15 +91,15 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
         <div>
           <label className="label">Đường dẫn</label>
           <div className="flex gap-2">
-            <input className="input font-mono" value={path} placeholder="(gốc)" onChange={(e) => setPath(e.target.value.replace(/\\/g, "/"))} />
+            <input className="input mono" value={path} placeholder="(gốc)" onChange={(e) => setPath(e.target.value.replace(/\\/g, "/"))} />
             <button className="btn shrink-0" onClick={() => setBrowse((b) => !b)}><Icon name="folder" />Duyệt</button>
           </div>
         </div>
       </div>
 
       {browse && (
-        <div className="rounded border border-line bg-bg">
-          <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-line text-xs">
+        <div className="rounded-[14px] hair bg-line/[0.04] overflow-hidden">
+          <div className="flex flex-wrap items-center gap-1 px-2.5 py-2 border-b border-line/10 text-xs">
             <button className="text-accent hover:underline" onClick={() => choosePath("")}>{root}</button>
             {crumbs.map((c, i) => (
               <span key={i} className="flex items-center gap-1">
@@ -112,14 +112,14 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
             {entries === null && <div className="p-2 text-xs text-mute">Đang tải…</div>}
             {entries && dirs.length === 0 && <div className="p-2 text-xs text-mute">Không có thư mục con{fileCount ? ` · ${fileCount} file` : ""}</div>}
             {dirs.map((d) => (
-              <button key={d.name} className="w-full text-left px-2 py-1.5 text-sm flex items-center gap-2 hover:bg-line/50"
+              <button key={d.name} className="w-full text-left px-2.5 py-2 text-sm flex items-center gap-2 hover:bg-line/[0.07] transition-colors duration-300"
                 onClick={() => choosePath(crumbs.concat(d.name).join("/"))}>
                 <Icon name="folder" className="w-4 h-4 text-mute" />{d.name}
               </button>
             ))}
             {entries && dirs.length > 0 && fileCount > 0 && <div className="px-2 py-1 text-xs text-mute">+ {fileCount} file</div>}
           </div>
-          <div className="px-2 py-1.5 border-t border-line flex justify-end">
+          <div className="px-2.5 py-2 border-t border-line/10 flex justify-end">
             <button className="btn btn-primary" onClick={() => setBrowse(false)}>Chọn thư mục này</button>
           </div>
         </div>
@@ -134,7 +134,7 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
       {put && (
         <div>
           <label className="label">Thư mục trả về (trong thư mục trả, để trống = tên job)</label>
-          <input className="input font-mono" value={ret} placeholder={job || "tên job"} onChange={(e) => setRet(e.target.value.replace(/\\/g, "/"))} />
+          <input className="input mono" value={ret} placeholder={job || "tên job"} onChange={(e) => setRet(e.target.value.replace(/\\/g, "/"))} />
         </div>
       )}
 
@@ -146,7 +146,7 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
       </div>
 
       <button className="btn btn-primary btn-lg w-full" disabled={busy} onClick={create}>
-        <Icon name="link" />{busy ? "Đang tạo…" : "Tạo link"}
+        <Icon name="link" weight="bold" />{busy ? "Đang tạo…" : "Tạo link"}<Nest />
       </button>
 
       {result && <QrLink info={result} caption={`Link cho “${result.job}” — gửi cho editor hoặc quét QR`} />}

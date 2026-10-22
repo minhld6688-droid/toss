@@ -99,7 +99,7 @@ const state: AppState = {
   device_name: "MacBook của Minh",
   dest_dir: "/Users/minh/Toss",
   host: hostOn ? structuredClone(demoHost) : null,
-  page_host: "toss-link.vercel.app",
+  page_host: "minhld6688-droid.github.io/toss",
   autostart: true,
   first_run: wizard,
 };

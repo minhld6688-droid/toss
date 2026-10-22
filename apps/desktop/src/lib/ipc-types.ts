@@ -17,7 +17,7 @@ export interface AppState {
   device_name: string;
   dest_dir: string;             // where "get" lands, default ~/Toss
   host: HostConfig | null;      // null = host mode off
-  page_host: string;            // e.g. "toss-link.vercel.app" (links use https://<page_host>/#<ticket>)
+  page_host: string;            // e.g. "minhld6688-droid.github.io/toss" (links use https://<page_host>/#<ticket>)
   autostart: boolean;
   first_run: boolean;           // true until setup finished
 }

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { extractTicket } from "../lib/ticket";
 import { fmtExpiry } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Badge, Icon } from "../components/ui";
+import { Badge, Icon, Nest } from "../components/ui";
 import { isMock } from "../lib/ipc";
 
 export function Home() {
@@ -45,17 +45,20 @@ export function Home() {
 
   return (
     <div className="p-4 pb-2">
-      <div
-        className={`rounded-xl border-2 border-dashed px-4 py-7 text-center transition-colors ${dropHover ? "border-accent bg-accent/10" : "border-line bg-card"}`}
-        onDragOver={isMock ? (e) => e.preventDefault() : undefined}
-        onDrop={isMock ? (e) => { e.preventDefault(); toast("Dán link trước, rồi kéo folder vào để trả"); } : undefined}
-      >
-        <div className="mx-auto w-11 h-11 rounded-full bg-accent/10 text-accent grid place-items-center mb-3">
-          <Icon name="link" className="w-5 h-5" />
+      <div className={`shell rise transition-colors duration-500 ease-aura ${dropHover ? "bg-accent/10" : ""}`}>
+        <div
+          className={`core relative overflow-hidden px-4 py-7 text-center transition-colors duration-500 ease-aura ${dropHover ? "border-accent/60" : ""}`}
+          onDragOver={isMock ? (e) => e.preventDefault() : undefined}
+          onDrop={isMock ? (e) => { e.preventDefault(); toast("Dán link trước, rồi kéo folder vào để trả"); } : undefined}
+        >
+          <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-72 h-48 rounded-full bg-accent/20 blur-3xl" />
+          <div className="relative mx-auto w-14 h-14 rounded-full grid place-items-center mb-3 bg-accent/12 text-accent" style={{ boxShadow: "inset 0 1px 0 rgb(255 255 255 / 0.2), 0 0 0 6px rgb(var(--accent) / 0.06)" }}>
+            <Icon name="link" className="w-6 h-6" />
+          </div>
+          <div className="relative text-lg font-semibold tracking-tight">Dán link hoặc kéo folder vào đây</div>
+          <div className="relative text-sm text-mute mt-1 mb-4">Link nhận hoặc trả file từ máy tổng</div>
+          <button className="relative btn btn-primary" onClick={pasteFromClipboard}>Dán từ clipboard<Nest name="copy" /></button>
         </div>
-        <div className="text-lg font-semibold">Dán link hoặc kéo folder vào đây</div>
-        <div className="text-sm text-mute mt-1 mb-3">Link nhận hoặc trả file từ máy tổng</div>
-        <button className="btn btn-primary" onClick={pasteFromClipboard}>Dán từ clipboard</button>
       </div>
 
       <div className="mt-3">
@@ -75,19 +78,19 @@ export function Home() {
         />
       </div>
 
-      <div className="mt-5">
+      <div className="mt-6">
         <h2 className="h-section">Gần đây</h2>
         {recents.length === 0 ? (
           <div className="text-sm text-mute px-1">Chưa có job nào. Link bạn mở sẽ hiện ở đây.</div>
         ) : (
-          <ul className="card divide-y divide-line overflow-hidden">
+          <ul className="card divide-y divide-line/10 overflow-hidden rise">
             {recents.map((r) => {
               const exp = fmtExpiry(r.exp);
               return (
                 <li key={r.ticket}>
-                  <button className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2" onClick={() => void openTicket(r.ticket)}>
+                  <button className="w-full text-left px-3.5 py-2.5 hover:bg-line/[0.06] transition-colors duration-500 ease-aura flex items-center gap-2" onClick={() => void openTicket(r.ticket)}>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-base">{r.job}</div>
+                      <div className="truncate text-base font-medium">{r.job}</div>
                       <div className={`text-xs ${exp.expired ? "text-bad" : "text-mute"}`}>{exp.text}</div>
                     </div>
                     {r.get && <Badge tone="accent">Nhận</Badge>}

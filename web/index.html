@@ -8,55 +8,52 @@
 <meta name="robots" content="noindex">
 <title>Toss</title>
 <meta name="description" content="Toss: chuyển file trực tiếp giữa máy tổng và editor, không qua server.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a36'/%3E%3Cpath d='M9 21l14-10-4 14-3-6z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306717f'/%3E%3Cpath d='M9 21l14-10-4 14-3-6z' fill='%23fff'/%3E%3C/svg%3E">
 <style>
+/* Toss aura system (mirrors the desktop app): one teal accent, ambient orbs, glass card.
+   Radius: card 24px / inner 18px / input 12px / pill full. Motion: cubic-bezier(.32,.72,0,1). */
 :root {
-  --bg: #f6f3ee;
-  --surface: #ffffff;
-  --text: #1c1a17;
-  --muted: #6b655c;
-  --line: #e2ddd3;
-  --accent: #ff5a36;
-  --accent-text: #ffffff;
-  --accent-soft: #ffe9e3;
-  --ok: #1f8a4c;
-  --warn-bg: #fff4d6;
-  --warn-text: #7a5b00;
+  --bg: #eef0f5; --bg-2: #e3e6ee;
+  --surface: rgba(255,255,255,.86);
+  --text: #141821; --muted: #5e6678;
+  --line: rgba(15,23,42,.10);
+  --accent: #06717f; --accent-text: #ffffff; --accent-soft: rgba(6,113,127,.12);
+  --aura-1: rgba(29,191,212,.26); --aura-2: rgba(110,92,220,.22);
+  --ok: #178654; --warn-bg: #fff4d6; --warn-text: #7a5b00;
+  --ease: cubic-bezier(.32,.72,0,1);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #14120f;
-    --surface: #1e1b17;
-    --text: #f3efe8;
-    --muted: #a39b8f;
-    --line: #35302a;
-    --accent: #ff6b49;
-    --accent-text: #1a0d08;
-    --accent-soft: #3a211a;
-    --ok: #4cc782;
-    --warn-bg: #3a2f10;
-    --warn-text: #f1d37a;
+    --bg: #07070a; --bg-2: #0e0f14;
+    --surface: rgba(17,18,24,.74);
+    --text: #eceef3; --muted: #9298a6;
+    --line: rgba(255,255,255,.10);
+    --accent: #48d6e8; --accent-text: #070a0e; --accent-soft: rgba(72,214,232,.14);
+    --aura-1: rgba(56,206,226,.30); --aura-2: rgba(118,96,236,.26);
+    --ok: #4cce8e; --warn-bg: #3a2f10; --warn-text: #f1d37a;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #14120f; --surface: #1e1b17; --text: #f3efe8; --muted: #a39b8f; --line: #35302a;
-  --accent: #ff6b49; --accent-text: #1a0d08; --accent-soft: #3a211a; --ok: #4cc782;
-  --warn-bg: #3a2f10; --warn-text: #f1d37a;
+  --bg: #07070a; --bg-2: #0e0f14; --surface: rgba(17,18,24,.74); --text: #eceef3; --muted: #9298a6;
+  --line: rgba(255,255,255,.10); --accent: #48d6e8; --accent-text: #070a0e; --accent-soft: rgba(72,214,232,.14);
+  --aura-1: rgba(56,206,226,.30); --aura-2: rgba(118,96,236,.26); --ok: #4cce8e; --warn-bg: #3a2f10; --warn-text: #f1d37a;
 }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body {
-  margin: 0;
-  min-height: 100vh;
-  min-height: 100dvh;
-  background: var(--bg);
-  color: var(--text);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+  margin: 0; min-height: 100vh; min-height: 100dvh;
+  background: var(--bg); color: var(--text);
+  font: 16px/1.5 "Plus Jakarta Sans", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  display: flex; flex-direction: column; align-items: center;
   padding: 24px 16px 32px;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(60% 50% at 18% 8%, var(--aura-1) 0%, transparent 62%),
+    radial-gradient(55% 45% at 88% 92%, var(--aura-2) 0%, transparent 60%),
+    linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 55%);
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
@@ -68,9 +65,12 @@ main { width: 100%; max-width: 480px; }
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 20px;
+  border-radius: 24px;
   padding: 28px 24px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 24px 60px -30px rgba(0,0,0,.45);
+  backdrop-filter: blur(22px) saturate(160%); -webkit-backdrop-filter: blur(22px) saturate(160%);
 }
+@media (prefers-reduced-transparency: reduce) { .card { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--bg-2); } }
 h1 { font-size: 24px; line-height: 1.25; margin: 0 0 8px; letter-spacing: -0.02em; }
 p { margin: 0 0 16px; }
 .muted { color: var(--muted); }
@@ -79,38 +79,35 @@ p { margin: 0 0 16px; }
 
 .btn {
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  width: 100%;
-  min-height: 48px;
-  padding: 12px 18px;
-  border-radius: 14px;
+  width: 100%; min-height: 48px; padding: 12px 18px;
+  border-radius: 999px;
   border: 1px solid var(--line);
-  background: var(--surface);
+  background: rgba(127,127,127,.06);
   color: var(--text);
   font: inherit; font-weight: 600;
-  text-decoration: none;
-  cursor: pointer;
-  transition: transform .06s ease, border-color .15s ease, background .15s ease;
+  text-decoration: none; cursor: pointer;
+  transition: transform .5s var(--ease), border-color .4s var(--ease), background .4s var(--ease);
 }
 .btn:hover { border-color: var(--muted); }
-.btn:active { transform: scale(.985); }
+.btn:active { transform: scale(.97); }
 .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .btn.primary {
   min-height: 60px; font-size: 18px;
   background: var(--accent); color: var(--accent-text); border-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 14px 36px -16px var(--accent);
 }
-.btn.primary:hover { filter: brightness(1.05); }
+.btn.primary:hover { filter: brightness(1.06); }
 .btn.suggested { border-color: var(--accent); background: var(--accent-soft); }
 .stack { display: grid; gap: 10px; margin: 16px 0; }
 
 .status { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .spinner {
-  width: 22px; height: 22px; flex: none;
-  border-radius: 50%;
+  width: 22px; height: 22px; flex: none; border-radius: 50%;
   border: 3px solid var(--line); border-top-color: var(--accent);
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } .btn { transition: none; } }
 
 .hint { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
 
@@ -125,9 +122,9 @@ ol.steps li::before {
 }
 .divider { height: 1px; background: var(--line); margin: 22px 0; border: 0; }
 .ticket-line {
-  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 13px/1.4 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--muted); word-break: break-all;
-  background: var(--bg); border: 1px dashed var(--line); border-radius: 10px;
+  background: rgba(127,127,127,.06); border: 1px dashed var(--line); border-radius: 12px;
   padding: 8px 10px; margin: 0 0 12px;
 }
 .note { background: var(--warn-bg); color: var(--warn-text); border-radius: 12px; padding: 10px 14px; font-size: 14px; margin: 0 0 16px; }
@@ -138,7 +135,7 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
 </head>
 <body>
 <div class="brand" aria-label="Toss">
-  <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#ff5a36"/><path d="M9 21l14-10-4 14-3-6z" fill="#fff"/></svg>
+  <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#06717f"/><path d="M9 21l14-10-4 14-3-6z" fill="#fff"/></svg>
   <span>Toss</span>
 </div>
 

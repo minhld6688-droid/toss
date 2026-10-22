@@ -2,31 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------------------------------------------------------------------------
+   Toss visual system: "aura" (Ethereal Glass in dark, Soft Structuralism in light).
+   One accent (cyan-teal) locked across the app. The violet orb is ambient only.
+   Radius scale (the only one used): shell 24px / card 20px / core 16px / input 12px / pill full.
+   Motion: --ease (0.32, 0.72, 0, 1). Blur only on fixed layers (nav, sheets, overlays).
+   --------------------------------------------------------------------------- */
 :root {
-  --bg: 244 245 247;
+  /* light: silver / white, cool neutrals */
+  --bg: 240 242 246;
+  --bg-2: 229 232 238;
   --card: 255 255 255;
-  --line: 228 231 236;
-  --ink: 23 27 35;
-  --mute: 107 115 128;
-  --accent: 47 109 240;
+  --line: 15 23 42;          /* used at low alpha for hairlines */
+  --ink: 20 24 33;
+  --mute: 96 104 120;
+  --accent: 6 113 127;       /* teal, 5.0:1 on white */
   --accent-ink: 255 255 255;
-  --ok: 27 148 82;
-  --bad: 213 58 58;
-  --warn: 190 120 15;
+  --aura-1: 29 191 212;      /* teal orb */
+  --aura-2: 110 92 220;      /* violet orb, ambient only */
+  --ok: 23 134 84;
+  --bad: 200 48 58;
+  --warn: 171 101 8;
+  --orb-alpha: 0.22;
+  --grain-alpha: 0.035;
+  --glass-alpha: 0.86;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: 17 18 21;
-    --card: 27 29 34;
-    --line: 45 48 56;
-    --ink: 232 234 239;
-    --mute: 142 150 163;
-    --accent: 66 128 245;
-    --accent-ink: 255 255 255;
-    --ok: 62 187 120;
-    --bad: 240 100 100;
-    --warn: 225 165 60;
+    --bg: 7 7 10;            /* OLED near-black, never pure */
+    --bg-2: 14 15 20;
+    --card: 17 18 24;
+    --line: 255 255 255;
+    --ink: 236 238 243;
+    --mute: 146 152 166;
+    --accent: 72 214 232;    /* bright teal, 10:1 on near-black */
+    --accent-ink: 7 10 14;
+    --aura-1: 56 206 226;
+    --aura-2: 118 96 236;
+    --ok: 76 206 142;
+    --bad: 246 108 116;
+    --warn: 238 180 76;
+    --orb-alpha: 0.28;
+    --grain-alpha: 0.05;
+    --glass-alpha: 0.74;
     color-scheme: dark;
   }
 }
@@ -39,27 +59,114 @@ body {
   -webkit-font-smoothing: antialiased;
   user-select: none;
   -webkit-user-select: none;
+  font-feature-settings: "ss01", "cv11";
 }
 input, textarea, .selectable { user-select: text; -webkit-user-select: text; }
 button { font: inherit; }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: rgb(var(--line)); border-radius: 8px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: rgb(var(--line) / 0.18); border-radius: 8px; }
+
+/* Ambient layers: fixed, pointer-events-none, never on scrolling containers. */
+.aura {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
+  background:
+    radial-gradient(60% 50% at 18% 8%, rgb(var(--aura-1) / var(--orb-alpha)) 0%, transparent 62%),
+    radial-gradient(55% 45% at 88% 92%, rgb(var(--aura-2) / calc(var(--orb-alpha) * 0.8)) 0%, transparent 60%),
+    linear-gradient(180deg, rgb(var(--bg-2)) 0%, rgb(var(--bg)) 55%);
+}
+.grain {
+  position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: var(--grain-alpha); mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.9'/></svg>");
+}
 
 @layer components {
-  .card { @apply bg-card border border-line rounded-lg; }
+  /* hairline + glass surfaces */
+  .hair { border: 1px solid rgb(var(--line) / 0.10); }
+  .shell {
+    @apply rounded-[24px] p-1.5;
+    background: rgb(var(--line) / 0.045);
+    border: 1px solid rgb(var(--line) / 0.08);
+  }
+  .core {
+    @apply rounded-[18px] bg-card;
+    border: 1px solid rgb(var(--line) / 0.08);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.10), 0 12px 40px -24px rgb(var(--aura-2) / 0.35);
+  }
+  .card {
+    @apply rounded-[20px] bg-card;
+    border: 1px solid rgb(var(--line) / 0.08);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08);
+  }
+  .glass {
+    background: rgb(var(--card) / var(--glass-alpha));
+    backdrop-filter: blur(22px) saturate(160%);
+    -webkit-backdrop-filter: blur(22px) saturate(160%);
+    border: 1px solid rgb(var(--line) / 0.10);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.12), 0 20px 50px -24px rgb(0 0 0 / 0.5);
+  }
+
   .btn {
-    @apply inline-flex items-center justify-center gap-2 h-8 px-3 rounded text-sm font-medium border border-line bg-card text-ink
-      transition-colors select-none cursor-pointer disabled:opacity-50 disabled:cursor-default hover:bg-bg;
+    @apply inline-flex items-center justify-center gap-2 h-9 px-4 rounded-full text-sm font-medium text-ink select-none cursor-pointer
+      disabled:opacity-40 disabled:cursor-default;
+    background: rgb(var(--line) / 0.06);
+    border: 1px solid rgb(var(--line) / 0.10);
+    transition: transform 500ms var(--ease), background-color 400ms var(--ease), border-color 400ms var(--ease), opacity 300ms var(--ease);
   }
-  .btn-primary { @apply bg-accent text-accent-ink border-accent hover:bg-accent hover:brightness-110; }
-  .btn-lg { @apply h-10 px-4 text-base; }
-  .btn-ghost { @apply border-transparent bg-transparent hover:bg-line/60; }
+  .btn:hover:not(:disabled) { background: rgb(var(--line) / 0.11); border-color: rgb(var(--line) / 0.18); }
+  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn-primary {
+    @apply text-accent-ink;
+    background: rgb(var(--accent));
+    border-color: transparent;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25), 0 10px 30px -14px rgb(var(--accent) / 0.7);
+  }
+  .btn-primary:hover:not(:disabled) { background: rgb(var(--accent)); filter: brightness(1.06); border-color: transparent; }
+  .btn-lg { @apply h-12 px-5 text-base; }
+  .btn-ghost { background: transparent; border-color: transparent; }
+  .btn-ghost:hover:not(:disabled) { background: rgb(var(--line) / 0.08); border-color: transparent; }
   .btn-danger { @apply text-bad; }
-  .input {
-    @apply w-full h-8 px-2 rounded border border-line bg-bg text-ink text-sm outline-none placeholder:text-mute
-      focus:border-accent focus:ring-1 focus:ring-accent;
+  .btn-icon { @apply w-9 px-0; }
+  /* button-in-button trailing icon */
+  .nest {
+    @apply inline-grid place-items-center w-7 h-7 rounded-full -mr-2 shrink-0;
+    background: rgb(0 0 0 / 0.14);
+    transition: transform 500ms var(--ease);
   }
-  .label { @apply text-xs text-mute mb-1 block; }
-  .h-section { @apply text-xs font-semibold uppercase tracking-wide text-mute px-1 mb-2; }
-  .chip { @apply inline-flex items-center h-5 px-2 rounded-full text-xs font-medium bg-line/70 text-mute; }
+  .btn:hover:not(:disabled) .nest { transform: translate(2px, -1px) scale(1.05); }
+  .btn:not(.btn-primary) .nest { background: rgb(var(--line) / 0.08); }
+
+  .input {
+    @apply w-full h-10 px-3 rounded-[12px] bg-transparent text-ink text-sm outline-none placeholder:text-mute;
+    border: 1px solid rgb(var(--line) / 0.14);
+    background: rgb(var(--line) / 0.04);
+    transition: border-color 400ms var(--ease), box-shadow 400ms var(--ease);
+  }
+  .input:focus { border-color: rgb(var(--accent) / 0.7); box-shadow: 0 0 0 3px rgb(var(--accent) / 0.18); }
+  select.input { appearance: none; -webkit-appearance: none; padding-right: 28px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat; background-position: right 10px center; }
+  input[type="checkbox"] { accent-color: rgb(var(--accent)); width: 16px; height: 16px; border-radius: 4px; }
+
+  .label { @apply text-xs text-mute mb-1.5 block; }
+  .h-section { @apply text-[11px] font-semibold uppercase tracking-[0.18em] text-mute px-1 mb-2; }
+  .chip { @apply inline-flex items-center h-5 px-2 rounded-full text-xs font-medium text-mute; background: rgb(var(--line) / 0.08); }
+  .mono { @apply font-mono tabular-nums; }
+
+  /* entry animation for lists / cards */
+  .rise { animation: rise 700ms var(--ease) both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); filter: blur(4px); } to { opacity: 1; transform: none; filter: blur(0); } }
+  .sheen { position: relative; overflow: hidden; }
+  .sheen::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(110deg, transparent 30%, rgb(255 255 255 / 0.35) 50%, transparent 70%);
+    transform: translateX(-120%);
+    animation: sheen 2.4s var(--ease) infinite;
+  }
+  @keyframes sheen { to { transform: translateX(120%); } }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise { animation: none; }
+  .sheen::after { animation: none; display: none; }
+  *, *::before, *::after { transition-duration: 0.01ms !important; }
 }
