@@ -51,52 +51,66 @@ jobs:
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
           } | Sort-Object | Set-Content "$env:RUNNER_TEMP\host-sums.txt"
           Get-Content "$env:RUNNER_TEMP\host-sums.txt" | Select-Object -First 5
-      - name: Start host and issue ticket
+      - name: Learn relay/addresses and issue the ticket
         shell: pwsh
         run: |
           $data = "$env:RUNNER_TEMP\hostdata"
           $ret = "$env:RUNNER_TEMP\ret"
           New-Item -ItemType Directory -Force $data, $ret | Out-Null
           netsh advfirewall firewall add rule name="toss-cli" dir=in action=allow program="$PWD\target\release\toss-cli.exe" enable=yes profile=any | Out-Null
+          netsh advfirewall firewall add rule name="toss-udp" dir=in action=allow protocol=UDP localport=41641 profile=any | Out-Null
           $env:RUST_LOG = "info,toss_core=debug,iroh=info"
+          # A short-lived host run learns this machine's relay + direct addresses (saved in cli-host.json).
           $p = Start-Process -FilePath "target\release\toss-cli.exe" `
-            -ArgumentList @("--data-dir", $data, "--name", "ci-host", "host", "--root", "RAW=$env:RUNNER_TEMP\root", "--return", $ret) `
-            -RedirectStandardOutput "$env:RUNNER_TEMP\host.log" -RedirectStandardError "$env:RUNNER_TEMP\host.err" -PassThru -NoNewWindow
+            -ArgumentList @("--data-dir", $data, "--name", "ci-host", "host", "--port", "41641", "--root", "RAW=$env:RUNNER_TEMP\root", "--return", $ret) `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\prime.log" -RedirectStandardError "$env:RUNNER_TEMP\prime.err" -PassThru -NoNewWindow
           $ok = $false
           for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 3
-            if (Select-String -Path "$env:RUNNER_TEMP\host.err" -Pattern "home relay connected" -SimpleMatch -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
+            if (Select-String -Path "$env:RUNNER_TEMP\prime.err" -Pattern "home relay connected" -SimpleMatch -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
           }
-          Write-Host "---- host.log ----"; Get-Content "$env:RUNNER_TEMP\host.log"
-          Write-Host "---- host.err ----"; Get-Content "$env:RUNNER_TEMP\host.err"
-          if (-not $ok) { throw "host never connected to its home relay within 90 s" }
-          $ticket = (& target\release\toss-cli.exe --data-dir $data ticket --job e2e --root RAW --path job1 --get --put --days 1 2>$null | Select-Object -First 1)
+          Start-Sleep -Seconds 3
+          Stop-Process -Id $p.Id -Force
+          Write-Host "---- prime.log ----"; Get-Content "$env:RUNNER_TEMP\prime.log"
+          if (-not $ok) { Get-Content "$env:RUNNER_TEMP\prime.err"; throw "host never connected to its home relay within 90 s" }
+          $ticket = (& target\release\toss-cli.exe --data-dir $data ticket --job e2e --root RAW --path job1 --get --put --days 1 2>"$env:RUNNER_TEMP\ticket.err" | Select-Object -First 1)
+          Get-Content "$env:RUNNER_TEMP\ticket.err"
           if (-not $ticket.StartsWith("toss1")) { throw "no ticket: $ticket" }
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\ticket" | Out-Null
           $ticket | Set-Content -NoNewline "$env:RUNNER_TEMP\ticket\ticket.txt"
           Copy-Item "$env:RUNNER_TEMP\host-sums.txt" "$env:RUNNER_TEMP\ticket\host-sums.txt"
-          "ticket length $($ticket.Length), host pid $($p.Id)"
+          "ticket length $($ticket.Length)"
       - name: Publish ticket for the client job
         uses: actions/upload-artifact@v4
         with:
           name: ticket
           path: ${{ runner.temp }}/ticket
           retention-days: 1
-      - name: Wait for the client to get and put
+      - name: Run host and wait for the client to get and put
         shell: pwsh
         run: |
+          # The host must live in the SAME step as the wait loop: the Windows runner kills
+          # background processes when a step ends.
+          $data = "$env:RUNNER_TEMP\hostdata"
+          $ret = "$env:RUNNER_TEMP\ret"
           $log = "$env:RUNNER_TEMP\host.log"
+          $env:RUST_LOG = "info,toss_core=debug,iroh=info"
+          $p = Start-Process -FilePath "target\release\toss-cli.exe" `
+            -ArgumentList @("--data-dir", $data, "--name", "ci-host", "host", "--port", "41641", "--root", "RAW=$env:RUNNER_TEMP\root", "--return", $ret) `
+            -RedirectStandardOutput $log -RedirectStandardError "$env:RUNNER_TEMP\host.err" -PassThru -NoNewWindow
           $deadline = (Get-Date).AddMinutes(22)
+          $done = 0
           while ((Get-Date) -lt $deadline) {
+            if ($p.HasExited) { break }
             $done = (Select-String -Path $log -Pattern " done " -SimpleMatch -ErrorAction SilentlyContinue | Measure-Object).Count
-            $err = Select-String -Path $log -Pattern " error " -SimpleMatch -ErrorAction SilentlyContinue
-            if ($err) { Write-Host "host saw errors:"; $err | ForEach-Object { $_.Line } }
             if ($done -ge 2) { break }
             Start-Sleep -Seconds 10
           }
+          Start-Sleep -Seconds 3
           Write-Host "---- host.log ----"; Get-Content $log
           Write-Host "---- host.err (tail) ----"; Get-Content "$env:RUNNER_TEMP\host.err" -Tail 120
-          if ($done -lt 2) { throw "client did not finish get+put within 25 min (done lines: $done)" }
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          if ($done -lt 2) { throw "client did not finish get+put within 22 min (done lines: $done)" }
       - name: Verify returned files byte-for-byte
         shell: pwsh
         run: |
@@ -110,10 +124,6 @@ jobs:
           $diff = Compare-Object $expected $sums
           if ($diff) { $diff | Format-Table | Out-String | Write-Host; throw "returned files differ from the originals" }
           "OK: $($sums.Count) files returned identical (put verified)"
-      - name: Stop host
-        if: always()
-        shell: pwsh
-        run: Get-Process toss-cli -ErrorAction SilentlyContinue | Stop-Process -Force
 
   client:
     name: client (macos)
