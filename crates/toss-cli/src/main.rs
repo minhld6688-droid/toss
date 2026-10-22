@@ -16,7 +16,8 @@ use toss_core::{
         load_or_create_secret_key,
     },
     transfer::Status,
-    HostAddr, HostConfig, JobRecord, Node, NodeConfig, Root, Ticket, TicketSpec, TransferEvent,
+    HostAddr, HostConfig, JobRecord, NetConfig, Node, NodeConfig, Root, Ticket, TicketSpec,
+    TransferEvent,
 };
 
 /// Host config saved by `toss-cli host` so `toss-cli ticket` can validate specs,
@@ -51,6 +52,15 @@ struct Cli {
     /// retrying as the app does (busy: 1 h, offline: 24 h).
     #[arg(long, global = true, default_value_t = 0, value_name = "SECS")]
     max_wait: u64,
+    /// Own relay server URL, tried before n0's relays (repeatable).
+    #[arg(long = "relay", global = true, value_name = "URL")]
+    relays: Vec<String>,
+    /// Disable mDNS same-LAN discovery.
+    #[arg(long, global = true)]
+    no_mdns: bool,
+    /// Disable UPnP / NAT-PMP / PCP port mapping.
+    #[arg(long, global = true)]
+    no_portmap: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -109,6 +119,15 @@ enum Cmd {
         admin: String,
         #[command(subcommand)]
         cmd: CtlCmd,
+    },
+    /// Network diagnostics as JSON (relay, NAT, port mapping, likelihood of
+    /// direct connections). Uses a throwaway identity on a random port, so it
+    /// can run next to a running host. With --ticket, also dials that host and
+    /// adds a "connect" report (path, RTT, reason).
+    Diag {
+        /// Ticket of the host to test (toss1…, toss://t/…, or web link).
+        #[arg(long)]
+        ticket: Option<String>,
     },
 }
 
@@ -231,7 +250,12 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
         device_name: name.clone(),
         app_version: toss_core::VERSION.to_string(),
-        net: Default::default(),
+        net: NetConfig {
+            relay_urls: cli.relays.clone(),
+            mdns: !cli.no_mdns,
+            portmap: !cli.no_portmap,
+            ..Default::default()
+        },
     };
     match &cli.cmd {
         Cmd::Id => {
@@ -321,8 +345,47 @@ async fn main() -> Result<()> {
             node.shutdown().await;
             res?;
         }
+        Cmd::Diag { ticket } => {
+            let ticket = ticket.as_deref().map(parse_ticket).transpose()?;
+            run_diag(cfg, ticket).await?;
+        }
     }
     Ok(())
+}
+
+/// `toss-cli diag`: prints `NetDiag` as JSON (+ `"connect": ConnectReport`
+/// with `--ticket`). Runs on a temporary data dir: starting an endpoint with
+/// this machine's key next to a running host would publish a competing
+/// pkarr record for it.
+async fn run_diag(cfg: NodeConfig, ticket: Option<Ticket>) -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("toss-diag-{}", std::process::id()));
+    let node = Node::start(NodeConfig {
+        data_dir: tmp.clone(),
+        ..cfg
+    })
+    .await?;
+    let res = async {
+        node.wait_online(Duration::from_secs(10)).await;
+        node.wait_net_report(Duration::from_secs(10)).await;
+        // Give the port mapping a few seconds to answer.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut diag = node.diagnostics().await;
+        while diag.portmap.status == "probing" && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            diag = node.diagnostics().await;
+        }
+        let mut out = serde_json::to_value(&diag)?;
+        if let Some(t) = ticket {
+            let rep = node.test_connect(&t).await;
+            out["connect"] = serde_json::to_value(&rep)?;
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        anyhow::Ok(())
+    }
+    .await;
+    node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&tmp);
+    res
 }
 
 fn load_host_file(data_dir: &Path) -> Result<HostFile> {
