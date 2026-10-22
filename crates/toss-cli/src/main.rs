@@ -1,6 +1,8 @@
 //! `toss-cli` — thin command line front-end for `toss-core`, for tests on two
 //! real machines. See `contracts/core-api.md`.
 
+mod bench;
+
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -110,6 +112,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CtlCmd,
     },
+    /// Loopback benchmark: two nodes in this process, one get; prints JSON.
+    Bench(bench::BenchArgs),
 }
 
 #[derive(Args, Debug)]
@@ -321,6 +325,7 @@ async fn main() -> Result<()> {
             node.shutdown().await;
             res?;
         }
+        Cmd::Bench(args) => bench::run(args).await?,
     }
     Ok(())
 }

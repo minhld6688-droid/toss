@@ -6304,6 +6304,7 @@ dependencies = [
  "dirs 6.0.0",
  "gethostname",
  "hex",
+ "iroh",
  "serde",
  "serde_json",
  "tokio",
