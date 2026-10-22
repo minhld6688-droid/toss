@@ -19,7 +19,9 @@ export interface AppState {
   host: HostConfig | null;      // null = host mode off
   page_host: string;            // e.g. "toss-link.vercel.app" (links use https://<page_host>/#<ticket>)
   autostart: boolean;
-  first_run: boolean;           // true until setup finished
+  first_run: boolean;
+  context_menu: boolean;        // "Tạo link Toss" registered in the OS right-click menu (v0.3)
+  auto_receive: boolean;        // v0.3: a clicked link with `get` starts downloading immediately (default true)           // true until setup finished
 }
 
 export interface Root { alias: string; path: string }
@@ -62,6 +64,15 @@ export interface Commands {
   set_device_name(args: { name: string }): Promise<void>;
   set_dest_dir(args: { path: string }): Promise<void>;
   set_autostart(args: { on: boolean }): Promise<void>;
+  // v0.3 quick share (right-click → "Tạo link Toss"). Any machine can share: the folder becomes a
+  // quick-share root (alias "qs-<8hex>", persisted), host mode is turned on if it was off (return root
+  // defaults to <dest_dir>/Tra-ve), and a get ticket (job = folder name, `days`, optional put) is created
+  // and COPIED TO THE CLIPBOARD by the shell. The UI shows the result (link + QR) in the Share view.
+  share_folder(args: { path: string; days: number; put: boolean }): Promise<TicketInfo>;
+  list_quick_shares(): Promise<{ alias: string; path: string; job_id: string | null }[]>;
+  remove_quick_share(args: { alias: string }): Promise<void>;    // revokes its ticket(s) and drops the root
+  set_context_menu(args: { on: boolean }): Promise<void>;        // Windows: HKCU\Software\Classes\Directory\shell\Toss (+ Background); macOS: ~/Library/Services/Tạo link Toss.workflow
+  set_auto_receive(args: { on: boolean }): Promise<void>;
   pick_folder(args: { title: string }): Promise<string | null>;   // native dialog
   open_path(args: { path: string }): Promise<void>;                // reveal in Finder/Explorer
 
@@ -102,6 +113,7 @@ export type Events = {
   "transfer:event": TransferEvent;        // every core event, see below
   "deep-link": { ticket: string };        // app opened via toss://t/<ticket> or file drop of a .toss file
   "drop": { paths: string[] };            // OS drag & drop onto the window
+  "share": { path: string };               // v0.3: app launched / forwarded with `--share <folder>` (right-click menu) → UI opens the Share view and calls share_folder
   "host:status": HostStatus;
 };
 
@@ -115,6 +127,9 @@ export type TransferEvent =
   | { type: "host_status"; device: string; version: string; roots: string[]; active: number; queued: number; uptime_s: number };
 
 // ---- UI behaviour the shell relies on ------------------------------------
+// - v0.3: On "deep-link" with ticket.get and auto_receive=true → call start_get at once, show the window,
+//   switch to the Chuyển file screen (the transfer card is the "popup"); a ticket whose job folder is already
+//   complete shows the sheet instead (Mở folder / Tải lại). auto_receive=false → old behaviour below.
 // - On "deep-link": if ticket.get → show a confirm sheet (job name, host, size unknown)
 //   with one button "Nhận" → start_get. If only ticket.put → open the drop target for that job.
 // - On "drop" while a put-capable ticket is selected → start_put.
