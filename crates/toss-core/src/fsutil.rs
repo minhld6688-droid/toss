@@ -6,11 +6,15 @@ use std::{
     fs::{File, Metadata},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::SystemTime,
 };
 
 use anyhow::{Context, Result};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 use crate::paths::{sanitize_rel, RelPath};
 
@@ -166,22 +170,85 @@ pub fn hash_prefix(path: &Path, len: u64) -> Result<blake3::Hasher> {
 /// (size, mtime, blake3) of a hashed file.
 type CachedHash = (u64, SystemTime, [u8; 32]);
 
-/// Cache of file hashes keyed by path, validated by size + mtime.
+/// Files hashed at once when building a manifest or prehashing a job.
+pub const HASH_THREADS: usize = 4;
+
+/// Signals the end of one in-flight hash to threads waiting for the same file.
+#[derive(Debug, Default)]
+struct InFlight {
+    done: Mutex<bool>,
+    cv: Condvar,
+}
+
+/// Cache of file hashes keyed by path, validated by size + mtime. Two threads
+/// asking for the same uncached file (a prehash and a manifest build) hash it
+/// once: the second waits for the first.
 #[derive(Debug, Default)]
 pub struct HashCache {
     map: Mutex<HashMap<PathBuf, CachedHash>>,
+    inflight: Mutex<HashMap<PathBuf, Arc<InFlight>>>,
+}
+
+/// Removes an in-flight marker (also on error/panic) and wakes waiters.
+struct InFlightGuard<'a> {
+    cache: &'a HashCache,
+    path: &'a Path,
+    entry: Arc<InFlight>,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.cache.inflight.lock().remove(self.path);
+        *self.entry.done.lock() = true;
+        self.entry.cv.notify_all();
+    }
 }
 
 impl HashCache {
+    fn cached(&self, path: &Path, meta: &Metadata) -> Option<[u8; 32]> {
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        match self.map.lock().get(path) {
+            Some((s, m, h)) if *s == meta.len() && *m == mtime => Some(*h),
+            _ => None,
+        }
+    }
+
     /// Hash of `path`, from cache when size and mtime are unchanged.
     pub fn hash(&self, path: &Path) -> Result<[u8; 32]> {
-        let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        if let Some((s, m, h)) = self.map.lock().get(path) {
-            if *s == meta.len() && *m == mtime {
-                return Ok(*h);
+        loop {
+            let meta =
+                std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+            if let Some(h) = self.cached(path, &meta) {
+                return Ok(h);
             }
+            let other = {
+                let mut inflight = self.inflight.lock();
+                match inflight.get(path) {
+                    Some(e) => e.clone(),
+                    None => {
+                        let e = Arc::new(InFlight::default());
+                        inflight.insert(path.to_path_buf(), e.clone());
+                        drop(inflight);
+                        let _guard = InFlightGuard {
+                            cache: self,
+                            path,
+                            entry: e,
+                        };
+                        return self.hash_now(path, &meta);
+                    }
+                }
+            };
+            let mut done = other.done.lock();
+            while !*done {
+                other.cv.wait(&mut done);
+            }
+            // Re-check the cache; if the other thread could not cache it (file
+            // changed, error), the next round hashes it here.
         }
+    }
+
+    fn hash_now(&self, path: &Path, meta: &Metadata) -> Result<[u8; 32]> {
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let h = hash_file(path)?;
         // Re-stat: only cache if the file did not change while hashing.
         if let Ok(meta2) = std::fs::metadata(path) {
@@ -194,6 +261,31 @@ impl HashCache {
         Ok(h)
     }
 
+    /// Hashes `paths` with up to `threads` files at once; results in input order.
+    pub fn hash_many(&self, paths: &[PathBuf], threads: usize) -> Vec<Result<[u8; 32]>> {
+        let threads = threads.clamp(1, paths.len().max(1));
+        if threads == 1 {
+            return paths.iter().map(|p| self.hash(p)).collect();
+        }
+        let next = AtomicUsize::new(0);
+        let out: Mutex<Vec<Option<Result<[u8; 32]>>>> =
+            Mutex::new((0..paths.len()).map(|_| None).collect());
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(p) = paths.get(i) else { break };
+                    let r = self.hash(p);
+                    out.lock()[i] = Some(r);
+                });
+            }
+        });
+        out.into_inner()
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("hash worker failed"))))
+            .collect()
+    }
+
     /// Records a freshly verified file.
     pub fn insert(&self, path: &Path, hash: [u8; 32]) {
         if let Ok(meta) = std::fs::metadata(path) {
@@ -201,6 +293,62 @@ impl HashCache {
             self.map
                 .lock()
                 .insert(path.to_path_buf(), (meta.len(), mtime, hash));
+        }
+    }
+}
+
+/// Folders being prehashed right now (one prehash per folder at a time).
+static PREHASHING: std::sync::LazyLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Hashes every file under `src` into `cache` on a background thread
+/// ([`HASH_THREADS`] files at once), so that the manifest of a get is ready
+/// (nearly) at once when the client connects. Skipped while `src` is already
+/// being prehashed. Returns the thread handle (`None` when skipped).
+pub fn spawn_prehash(cache: Arc<HashCache>, src: PathBuf) -> Option<std::thread::JoinHandle<()>> {
+    if !PREHASHING.lock().insert(src.clone()) {
+        return None;
+    }
+    struct Unmark(PathBuf);
+    impl Drop for Unmark {
+        fn drop(&mut self) {
+            PREHASHING.lock().remove(&self.0);
+        }
+    }
+    let unmark = Unmark(src.clone());
+    let spawned = std::thread::Builder::new()
+        .name("toss-prehash".into())
+        .spawn(move || {
+            let _unmark = unmark;
+            let started = std::time::Instant::now();
+            let files = match walk(&src, &RelPath::default()) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::info!("prehash {}: {e:#}", src.display());
+                    return;
+                }
+            };
+            let bytes: u64 = files.iter().map(|f| f.size).sum();
+            let paths: Vec<PathBuf> = files.into_iter().map(|f| f.abs).collect();
+            let failed = cache
+                .hash_many(&paths, HASH_THREADS)
+                .iter()
+                .filter(|r| r.is_err())
+                .count();
+            tracing::info!(
+                files = paths.len(),
+                bytes,
+                failed,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "prehashed {}",
+                src.display()
+            );
+        });
+    match spawned {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!("prehash thread: {e}");
+            None
         }
     }
 }
@@ -223,6 +371,37 @@ mod tests {
         assert_eq!(numbered_name("a.tar.gz", 3), "a.tar (3).gz");
         assert_eq!(numbered_name("name", 2), "name (2)");
         assert_eq!(numbered_name(".hidden", 2), ".hidden (2)");
+    }
+
+    #[test]
+    fn hash_many_and_prehash() {
+        let d = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for i in 0..9u8 {
+            let p = d.path().join(format!("f{i}"));
+            std::fs::write(&p, vec![i; 1000 + i as usize]).unwrap();
+            paths.push(p);
+        }
+        let cache = HashCache::default();
+        let hs = cache.hash_many(&paths, HASH_THREADS);
+        for (p, h) in paths.iter().zip(hs) {
+            let want = *blake3::hash(&std::fs::read(p).unwrap()).as_bytes();
+            assert_eq!(h.unwrap(), want);
+        }
+        // Concurrent callers for the same file agree (and hash it once).
+        let dup = vec![paths[0].clone(); 8];
+        let fresh = HashCache::default();
+        let hs = fresh.hash_many(&dup, 4);
+        assert!(hs
+            .iter()
+            .all(|h| h.as_ref().unwrap() == hs[0].as_ref().unwrap()));
+        assert!(fresh.inflight.lock().is_empty());
+        let cache2 = Arc::new(HashCache::default());
+        spawn_prehash(cache2.clone(), d.path().to_path_buf())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(cache2.map.lock().len(), 9);
     }
 
     #[test]

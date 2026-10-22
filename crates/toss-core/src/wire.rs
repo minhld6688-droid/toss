@@ -305,6 +305,35 @@ pub async fn read_stream_header<R: AsyncRead + Unpin>(r: &mut R) -> Result<(u32,
     Ok((u32::from_le_bytes(i), u64::from_le_bytes(o)))
 }
 
+/// Length of an xfer/2 segment header.
+pub const SEG_HEADER_LEN: usize = 20;
+
+/// xfer/2 segment header: `u32 LE index`, `u64 LE offset`, `u64 LE len`;
+/// `len` bytes of file data follow. A data stream carries one or more
+/// segments back to back and ends with the stream (contracts/speed-v0.4.md §4.3).
+pub fn encode_segment_header(index: u32, offset: u64, len: u64) -> [u8; SEG_HEADER_LEN] {
+    let mut h = [0u8; SEG_HEADER_LEN];
+    h[..4].copy_from_slice(&index.to_le_bytes());
+    h[4..12].copy_from_slice(&offset.to_le_bytes());
+    h[12..].copy_from_slice(&len.to_le_bytes());
+    h
+}
+
+/// Decodes an xfer/2 segment header into `(index, offset, len)`.
+pub fn decode_segment_header(h: &[u8; SEG_HEADER_LEN]) -> (u32, u64, u64) {
+    let mut i = [0u8; 4];
+    i.copy_from_slice(&h[..4]);
+    let mut o = [0u8; 8];
+    o.copy_from_slice(&h[4..12]);
+    let mut l = [0u8; 8];
+    l.copy_from_slice(&h[12..]);
+    (
+        u32::from_le_bytes(i),
+        u64::from_le_bytes(o),
+        u64::from_le_bytes(l),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +431,10 @@ mod tests {
         assert!(read_msg::<_, Manifest>(&mut short.as_slice())
             .await
             .is_err());
+
+        let s = encode_segment_header(3, 1 << 33, 5);
+        assert_eq!(&s[..4], &[3, 0, 0, 0]);
+        assert_eq!(decode_segment_header(&s), (3, 1 << 33, 5));
 
         let h = encode_stream_header(7, 1 << 40);
         assert_eq!(
