@@ -26,3 +26,24 @@ pub fn random_id() -> [u8; 16] {
 pub fn random_suffix() -> String {
     hex::encode(rand::random::<[u8; 2]>())
 }
+
+/// Peer-supplied free text (device names, messages) made safe to log, persist
+/// and show: control characters removed, at most `max_chars` characters.
+pub fn clean_text(s: &str, max_chars: usize) -> String {
+    s.chars()
+        .filter(|c| !c.is_control())
+        .take(max_chars)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_text_strips_and_caps() {
+        assert_eq!(clean_text("a\nb\u{1b}[31mc", 10), "ab[31mc");
+        assert_eq!(clean_text(&"x".repeat(500), 64).len(), 64);
+        assert_eq!(clean_text("Máy ảnh", 3), "Máy");
+    }
+}

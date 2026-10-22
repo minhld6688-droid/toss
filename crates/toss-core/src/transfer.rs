@@ -355,8 +355,18 @@ impl Tracker {
         });
     }
 
+    /// True once cancelled: a cancelled transfer never changes state again
+    /// (a session ending with an error after the cancel must not turn it into
+    /// `Error` or emit a second final event).
+    fn is_cancelled(&self) -> bool {
+        self.status() == Status::Cancelled
+    }
+
     /// Called after the manifest/want exchange of a session.
     pub fn begin_session(&self, files: u32, bytes: u64, to_do_files: u32, to_do_bytes: u64) {
+        if self.is_cancelled() {
+            return;
+        }
         let done_bytes = bytes.saturating_sub(to_do_bytes);
         let done_files = files.saturating_sub(to_do_files);
         self.bytes_done.store(done_bytes, Ordering::Relaxed);
@@ -386,10 +396,9 @@ impl Tracker {
 
     /// Undo bytes of a file that failed verification.
     pub fn sub_bytes(&self, n: u64) {
-        let _ = self
-            .bytes_done
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(n))
+        self.bytes_done
+            .update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                v.saturating_sub(n)
             });
     }
 
@@ -464,9 +473,15 @@ impl Tracker {
 
     /// Final Progress + Done.
     pub fn finish_done(&self, path: ConnPath) {
+        if self.is_cancelled() {
+            return;
+        }
         self.tick(path);
         let mut ev = None;
         self.update(|s| {
+            if s.status == Status::Cancelled {
+                return;
+            }
             s.status = Status::Done;
             s.error = None;
             s.eta_s = Some(0);
@@ -485,7 +500,12 @@ impl Tracker {
 
     /// Emits an Error event; `retry_in_s` = Some keeps status Connecting.
     pub fn error(&self, code: ErrorCode, msg: String, retry_in_s: Option<u64>) {
+        let mut changed = false;
         self.update(|s| {
+            if s.status == Status::Cancelled {
+                return;
+            }
+            changed = true;
             s.status = match (code, retry_in_s) {
                 (_, Some(_)) => Status::Connecting,
                 (ErrorCode::Cancelled, None) => Status::Cancelled,
@@ -495,6 +515,9 @@ impl Tracker {
             s.speed_bps = 0;
             s.eta_s = None;
         });
+        if !changed {
+            return;
+        }
         self.emit(TransferEvent::Error {
             id: self.id.clone(),
             code,
@@ -504,17 +527,88 @@ impl Tracker {
     }
 
     pub fn paused(&self) {
+        let mut changed = false;
         self.update(|s| {
+            if s.status == Status::Cancelled {
+                return;
+            }
+            changed = true;
             s.status = Status::Paused;
             s.speed_bps = 0;
             s.eta_s = None;
         });
+        if !changed {
+            return;
+        }
         self.emit(TransferEvent::Paused {
             id: self.id.clone(),
         });
     }
 
     pub fn set_status(&self, st: Status) {
-        self.update(|s| s.status = st);
+        self.update(|s| {
+            if s.status != Status::Cancelled {
+                s.status = st;
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracker() -> (Arc<Tracker>, broadcast::Receiver<TransferEvent>) {
+        let (tx, rx) = broadcast::channel(16);
+        let t = Tracker::new(
+            "id".into(),
+            "job".into(),
+            wire::Op::Get,
+            Side::Host,
+            "peer".into(),
+            None,
+            tx,
+        );
+        (t, rx)
+    }
+
+    #[test]
+    fn cancelled_is_terminal() {
+        let (t, mut rx) = tracker();
+        t.begin_session(2, 10, 2, 10);
+        t.error(ErrorCode::Cancelled, "cancelled".into(), None);
+        // The session then fails because its connection was closed.
+        t.error(ErrorCode::HostOffline, "connection lost".into(), None);
+        t.finish_done(ConnPath::Direct);
+        t.paused();
+        t.set_status(Status::Connecting);
+        assert_eq!(t.status(), Status::Cancelled);
+        let mut finals = 0;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                TransferEvent::Error { code, .. } => {
+                    assert_eq!(code, ErrorCode::Cancelled);
+                    finals += 1;
+                }
+                TransferEvent::Done { .. } | TransferEvent::Paused { .. } => {
+                    panic!("event after cancel: {ev:?}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(finals, 1);
+    }
+
+    #[test]
+    fn eta_and_speed_without_progress() {
+        let (t, _rx) = tracker();
+        t.begin_session(1, 100, 1, 100);
+        t.tick(ConnPath::Direct);
+        let s = t.snapshot();
+        assert_eq!(s.speed_bps, 0);
+        assert_eq!(s.eta_s, None);
+        t.add_bytes(100);
+        t.tick(ConnPath::Direct);
+        assert_eq!(t.snapshot().eta_s, Some(0));
     }
 }

@@ -24,6 +24,12 @@ mod client;
 mod host;
 mod xfer;
 
+/// Test hooks (not part of the contract).
+#[doc(hidden)]
+pub mod testing {
+    pub use crate::xfer::set_timeouts;
+}
+
 pub use ctl::CtlClient;
 pub use jobs::{JobEvent, JobRecord};
 pub use node::{HostConfig, Node, NodeConfig, Root};

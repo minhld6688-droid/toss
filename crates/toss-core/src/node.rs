@@ -67,6 +67,13 @@ pub struct HostConfig {
     /// Concurrent uni streams per transfer (default 4).
     #[serde(default = "default_streams")]
     pub max_parallel_streams: u32,
+    /// Fixed UDP port to bind (IPv4 and IPv6), e.g. for a port forward on the
+    /// studio router. `None` = random port. The endpoint is bound when the node
+    /// starts, so this only takes effect through [`Node::start_with_port`]:
+    /// changing it on a running node (via [`Node::set_host`]) is stored but
+    /// needs a node restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_port: Option<u16>,
 }
 
 fn default_jobs() -> u32 {
@@ -84,6 +91,7 @@ impl HostConfig {
             return_root,
             max_parallel_jobs: default_jobs(),
             max_parallel_streams: default_streams(),
+            bind_port: None,
         }
     }
 }
@@ -245,6 +253,10 @@ pub(crate) struct Inner {
     pub started: Instant,
     pub active: AtomicU32,
     pub busy_seen: Mutex<HashMap<EndpointId, Instant>>,
+    /// Targets of running puts (see `host::PutReservations`).
+    pub put_reserved: host::PutReservations,
+    /// Fixed UDP port the endpoint was bound to (None = random).
+    pub bind_port: Option<u16>,
 }
 
 impl Inner {
@@ -304,20 +316,46 @@ pub struct Node {
 
 impl Node {
     /// Creates the data dir, loads/creates the key, binds the iroh endpoint
-    /// (n0 preset: DNS/pkarr discovery + default relays) and starts accepting.
+    /// (n0 preset: DNS/pkarr discovery + default relays) on a random UDP port
+    /// and starts accepting.
     pub async fn start(cfg: NodeConfig) -> Result<Node> {
+        Node::start_with_port(cfg, None).await
+    }
+
+    /// Like [`Node::start`], binding UDP `port` (IPv4 `0.0.0.0:port`, plus
+    /// `[::]:port` when IPv6 is available) instead of a random one; meant for
+    /// hosts ([`HostConfig::bind_port`]). Fails if the IPv4 port is taken.
+    pub async fn start_with_port(cfg: NodeConfig, port: Option<u16>) -> Result<Node> {
         std::fs::create_dir_all(&cfg.data_dir)
             .with_context(|| format!("create data dir {}", cfg.data_dir.display()))?;
         let secret = load_or_create_secret_key(&cfg.data_dir)?;
         let lookup = MemoryLookup::new();
-        let endpoint = Endpoint::builder(presets::N0)
+        let mut builder = Endpoint::builder(presets::N0)
             .secret_key(secret.clone())
             .address_lookup(lookup.clone())
-            .alpns(vec![])
-            .bind()
-            .await
-            .map_err(|e| anyhow!(e))
-            .context("bind iroh endpoint")?;
+            .alpns(vec![]);
+        if let Some(port) = port {
+            use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+            builder = builder
+                .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+                .map_err(|e| anyhow!(e))
+                .context("bind address")?
+                .bind_addr_with_opts(
+                    SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0),
+                    iroh::endpoint::BindOpts::default().set_is_required(false),
+                )
+                .map_err(|e| anyhow!(e))
+                .context("bind address")?;
+        }
+        let endpoint =
+            builder
+                .bind()
+                .await
+                .map_err(|e| anyhow!(e))
+                .with_context(|| match port {
+                    Some(p) => format!("bind iroh endpoint on UDP port {p}"),
+                    None => "bind iroh endpoint".to_string(),
+                })?;
         tracing::info!(id = %endpoint.id(), "toss node started");
         let (events, _) = broadcast::channel(1024);
         let inner = Arc::new(Inner {
@@ -334,6 +372,8 @@ impl Node {
             started: Instant::now(),
             active: AtomicU32::new(0),
             busy_seen: Mutex::new(HashMap::new()),
+            put_reserved: Default::default(),
+            bind_port: port,
         });
         tokio::spawn(accept_loop(endpoint, Arc::downgrade(&inner)));
         Ok(Node { inner })
@@ -360,10 +400,23 @@ impl Node {
         self.inner.lookup.add_endpoint_info(addr);
     }
 
+    /// The fixed UDP port this node was started with (`None` = random).
+    pub fn bind_port(&self) -> Option<u16> {
+        self.inner.bind_port
+    }
+
     /// Turn host mode on (accept xfer + ctl) or off (None). Idempotent; replaces config.
+    /// `cfg.bind_port` is not applied here (see [`HostConfig::bind_port`]).
     pub async fn set_host(&self, cfg: Option<HostConfig>) -> Result<()> {
         match cfg {
             Some(cfg) => {
+                if cfg.bind_port.is_some() && cfg.bind_port != self.inner.bind_port {
+                    tracing::warn!(
+                        "bind port {:?} takes effect after a restart (bound: {:?})",
+                        cfg.bind_port,
+                        self.inner.bind_port
+                    );
+                }
                 let rt = tokio::task::spawn_blocking(move || HostRuntime::new(cfg)).await??;
                 *self.inner.host.write() = Some(rt);
                 self.inner

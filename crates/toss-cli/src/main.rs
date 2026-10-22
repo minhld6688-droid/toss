@@ -52,6 +52,10 @@ enum Cmd {
         /// Max parallel streams per transfer.
         #[arg(long, default_value_t = 4)]
         max_streams: u32,
+        /// Fixed UDP port to listen on (e.g. for a router port forward).
+        /// Default: a random port.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Create a ticket on this host (uses the config of the last `host` run).
     Ticket(TicketArgs),
@@ -217,10 +221,12 @@ async fn main() -> Result<()> {
             return_root,
             max_jobs,
             max_streams,
+            port,
         } => {
             let mut hc = HostConfig::new(roots.clone(), return_root.clone());
             hc.max_parallel_jobs = *max_jobs;
             hc.max_parallel_streams = *max_streams;
+            hc.bind_port = *port;
             run_host(cfg, hc).await?;
         }
         Cmd::Ticket(args) => {
@@ -324,14 +330,17 @@ fn print_jobs(jobs: &[JobRecord]) {
 
 async fn run_host(cfg: NodeConfig, hc: HostConfig) -> Result<()> {
     let data_dir = cfg.data_dir.clone();
-    let node = Node::start(cfg).await?;
+    let node = Node::start_with_port(cfg, hc.bind_port).await?;
     node.set_host(Some(hc.clone())).await?;
     std::fs::write(data_dir.join(HOST_FILE), serde_json::to_vec_pretty(&hc)?)
         .context("save host config")?;
     println!(
-        "host {} ({}) ready; Ctrl-C to stop",
+        "host {} ({}) ready{}; Ctrl-C to stop",
         node.endpoint_id(),
-        node.device_name()
+        node.device_name(),
+        hc.bind_port
+            .map(|p| format!(" on UDP port {p}"))
+            .unwrap_or_default()
     );
     let mut rx = node.subscribe();
     loop {
@@ -424,7 +433,12 @@ async fn finish_transfer(node: Node, t: toss_core::Transfer) -> Result<()> {
                 bail!("interrupted");
             }
             ev = rx.recv() => {
-                let Ok(ev) = ev else { continue };
+                let ev = match ev {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // No more events (cannot happen while the node lives): just wait.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break (&mut wait).await,
+                };
                 match &ev {
                     TransferEvent::Progress { id, bytes_done, bytes_total, files_done, files_total, speed_bps, eta_s, path } if *id == t.id => {
                         if last_print.elapsed() >= Duration::from_secs(1) {

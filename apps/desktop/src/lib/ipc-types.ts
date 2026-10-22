@@ -23,7 +23,7 @@ export interface AppState {
 }
 
 export interface Root { alias: string; path: string }
-export interface HostConfig { roots: Root[]; return_root: string; max_parallel_jobs: number }
+export interface HostConfig { roots: Root[]; return_root: string; max_parallel_jobs: number; bind_port?: number | null }
 
 export interface TicketInfo {        // decoded, never verified on the client
   ticket: string;                    // "toss1..."

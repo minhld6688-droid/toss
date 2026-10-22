@@ -13,6 +13,10 @@ pub struct HostConfig {
     pub roots: Vec<Root>,
     pub return_root: String,
     pub max_parallel_jobs: u32,
+    /// Additive (CHANGES.md): fixed UDP port; absent/null = random. Applied when
+    /// the node (re)starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_port: Option<u16>,
 }
 
 #[derive(Serialize, Clone, Debug)]

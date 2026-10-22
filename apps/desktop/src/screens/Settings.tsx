@@ -144,6 +144,20 @@ function HostEditor() {
             </div>
           </Row>
 
+          <Row title="Cổng UDP cố định" hint="Tuỳ chọn, để port-forward trên router. Đổi cổng cần mở lại Toss">
+            <input
+              className="input w-24 text-right mono"
+              inputMode="numeric"
+              placeholder="tự động"
+              value={draft.bind_port ?? ""}
+              onChange={(e) => {
+                const v = e.target.value.replace(/\D/g, "");
+                const n = v === "" ? null : Math.min(65535, Math.max(1024, Number(v)));
+                setDraft({ ...draft, bind_port: n });
+              }}
+            />
+          </Row>
+
           <button className="btn btn-primary w-full" disabled={!dirty} onClick={save}>{dirty ? "Lưu cấu hình" : "Đã lưu"}</button>
         </div>
       )}

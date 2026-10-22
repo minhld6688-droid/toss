@@ -7,11 +7,16 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::sync::Mutex;
 
 use crate::{
-    host::{issue_ticket, verify_common},
+    host::{issue_ticket, verify_common, MAX_DEVICE},
     jobs::JobRecord,
     node::{list_dir, Inner},
     ticket::{Ticket, TicketSpec},
-    wire::{read_msg, write_msg, CtlRequest, CtlResponse, DenyReason, DirEntry, HostStatus},
+    util::clean_text,
+    wire::{
+        read_msg, read_msg_max, write_msg, CtlRequest, CtlResponse, DenyReason, DirEntry,
+        HostStatus, MAX_HELLO,
+    },
+    xfer::pre_auth_timeout,
     ALPN_CTL,
 };
 
@@ -139,6 +144,17 @@ impl CtlClient {
         }
     }
 
+    /// The ticket of a job stored on the host (re-signed by the host, identical
+    /// to the one handed out at creation), e.g. to offer "copy link" for jobs
+    /// listed with [`CtlClient::list_jobs`]. Fails for admin tickets, unknown
+    /// ids, and on hosts older than this request.
+    pub async fn job_ticket(&self, id: [u8; 16]) -> Result<Ticket> {
+        match self.request(CtlRequest::JobTicket { id }).await? {
+            CtlResponse::Ticket(t) => Ok(t),
+            other => bail!("unexpected response {other:?}"),
+        }
+    }
+
     /// Closes the connection.
     pub async fn close(&self) {
         if let Some((conn, mut send, _)) = self.conn.lock().await.take() {
@@ -157,10 +173,14 @@ pub(crate) async fn handle_ctl(inner: Arc<Inner>, conn: Connection) {
 }
 
 async fn serve_ctl(inner: &Arc<Inner>, conn: &Connection) -> Result<()> {
-    let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(30), conn.accept_bi())
-        .await
-        .context("auth timeout")??;
-    let first: CtlRequest = read_msg(&mut recv).await?;
+    // The whole unauthenticated phase is bounded in time and size.
+    let (mut send, mut recv, first) = tokio::time::timeout(pre_auth_timeout(), async {
+        let (send, mut recv) = conn.accept_bi().await?;
+        let first: CtlRequest = read_msg_max(&mut recv, MAX_HELLO).await?;
+        anyhow::Ok((send, recv, first))
+    })
+    .await
+    .context("auth timeout")??;
     let CtlRequest::Auth { ticket, device } = first else {
         write_msg(
             &mut send,
@@ -171,6 +191,7 @@ async fn serve_ctl(inner: &Arc<Inner>, conn: &Connection) -> Result<()> {
         .await?;
         bail!("first request was not Auth");
     };
+    let device = clean_text(&device, MAX_DEVICE);
     let verdict = verify_common(inner, &ticket).and_then(|()| {
         ticket
             .body
@@ -197,7 +218,8 @@ async fn serve_ctl(inner: &Arc<Inner>, conn: &Connection) -> Result<()> {
             Ok(r) => r,
             Err(_) => return Ok(()), // client went away
         };
-        // Revocation of the admin ticket takes effect immediately.
+        // Revocation of the admin ticket takes effect immediately (an
+        // unreadable revocation list counts as revoked).
         if inner.jobs.is_revoked(&ticket.body.id) || ticket.is_expired() {
             write_msg(
                 &mut send,
@@ -250,6 +272,22 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
             CtlRequest::Revoke { id } => {
                 inner.jobs.revoke(id)?;
                 CtlResponse::Ok
+            }
+            CtlRequest::JobTicket { id } => {
+                let host = *inner.endpoint.id().as_bytes();
+                match inner.jobs.body(id, host) {
+                    // Never hand out admin tickets: a holder could keep control
+                    // after its own admin ticket is revoked.
+                    Some(body) if !body.admin => {
+                        CtlResponse::Ticket(Ticket::sign(body, &inner.secret))
+                    }
+                    Some(_) => CtlResponse::Denied {
+                        reason: DenyReason::NotAllowed,
+                    },
+                    None => CtlResponse::Denied {
+                        reason: DenyReason::Other("unknown job".into()),
+                    },
+                }
             }
         })
     })

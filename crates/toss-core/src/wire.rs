@@ -15,6 +15,12 @@ use crate::ticket::{Ticket, TicketSpec};
 /// Maximum size of one framed control message.
 pub const MAX_MSG: usize = 4 * 1024 * 1024;
 
+/// Maximum size of the first message of a connection ([`ClientHello`] or
+/// [`CtlRequest::Auth`]), read before the peer is authenticated. A ticket is
+/// ~250 bytes; this leaves ample room for names while keeping what an
+/// unauthenticated peer can make the host buffer small.
+pub const MAX_HELLO: usize = 64 * 1024;
+
 /// First message of a `toss/xfer/1` connection.
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -171,6 +177,13 @@ pub enum CtlRequest {
         /// Ticket id.
         id: [u8; 16],
     },
+    /// The (deterministically re-signed) ticket of a stored job, answered with
+    /// [`CtlResponse::Ticket`]. Admin tickets are never handed out this way.
+    /// Appended last so the postcard indices of the variants above stay stable.
+    JobTicket {
+        /// Ticket id.
+        id: [u8; 16],
+    },
 }
 
 /// `toss/ctl/1` response.
@@ -240,18 +253,36 @@ pub async fn write_msg<W: AsyncWrite + Unpin, T: Serialize>(w: &mut W, msg: &T) 
     Ok(())
 }
 
-/// Reads one framed message.
+/// Reads one framed message (at most [`MAX_MSG`] bytes).
 pub async fn read_msg<R: AsyncRead + Unpin, T: DeserializeOwned>(r: &mut R) -> Result<T> {
+    read_msg_max(r, MAX_MSG).await
+}
+
+/// Reads one framed message of at most `max` bytes (capped at [`MAX_MSG`]).
+///
+/// The buffer grows with the bytes actually received, so a peer announcing a
+/// large length without sending it cannot make us allocate it.
+pub async fn read_msg_max<R: AsyncRead + Unpin, T: DeserializeOwned>(
+    r: &mut R,
+    max: usize,
+) -> Result<T> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len)
         .await
         .context("read message length")?;
     let len = u32::from_le_bytes(len) as usize;
-    if len > MAX_MSG {
+    if len > max.min(MAX_MSG) {
         bail!("message too large ({len} bytes)");
     }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await.context("read message body")?;
+    let mut buf = Vec::with_capacity(len.min(64 * 1024));
+    let n = (&mut *r)
+        .take(len as u64)
+        .read_to_end(&mut buf)
+        .await
+        .context("read message body")?;
+    if n != len {
+        bail!("message truncated ({n} of {len} bytes)");
+    }
     postcard::from_bytes(&buf).context("decode message")
 }
 
@@ -278,6 +309,74 @@ pub async fn read_stream_header<R: AsyncRead + Unpin>(r: &mut R) -> Result<(u32,
 mod tests {
     use super::*;
 
+    /// A reader that announces `MAX_MSG` bytes and then delivers them slowly:
+    /// the receive buffer must grow with the data, not be allocated upfront.
+    struct Trickle {
+        header: [u8; 4],
+        pos: usize,
+        body_left: usize,
+        max_buf_seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AsyncRead for Trickle {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            // The caller's free space tells how much it pre-allocated.
+            self.max_buf_seen
+                .fetch_max(buf.remaining(), std::sync::atomic::Ordering::Relaxed);
+            if self.pos < 4 {
+                let n = (4 - self.pos).min(buf.remaining());
+                let start = self.pos;
+                buf.put_slice(&self.header[start..start + n]);
+                self.pos += n;
+            } else if self.body_left > 0 {
+                let n = 100.min(self.body_left).min(buf.remaining());
+                buf.put_slice(&vec![0u8; n]);
+                self.body_left -= n;
+            }
+            // else: EOF (peer went away before sending the announced body)
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn announced_length_is_not_preallocated() {
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut r = Trickle {
+            header: (MAX_MSG as u32).to_le_bytes(),
+            pos: 0,
+            body_left: 1000,
+            max_buf_seen: seen.clone(),
+        };
+        let err = read_msg::<_, Manifest>(&mut r).await.unwrap_err();
+        assert!(format!("{err:#}").contains("truncated"), "{err:#}");
+        let max = seen.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(max < 1024 * 1024, "reader saw a {max}-byte buffer");
+    }
+
+    #[tokio::test]
+    async fn hello_cap() {
+        let mut buf = Vec::new();
+        write_msg(&mut buf, &"x".repeat(MAX_HELLO)).await.unwrap();
+        assert!(read_msg_max::<_, String>(&mut buf.as_slice(), MAX_HELLO)
+            .await
+            .is_err());
+        assert!(read_msg::<_, String>(&mut buf.as_slice()).await.is_ok());
+    }
+
+    #[test]
+    fn ctl_variant_indices_are_stable() {
+        // postcard encodes the variant index first; JobTicket must stay last.
+        let enc = |r: &CtlRequest| postcard::to_allocvec(r).unwrap()[0];
+        assert_eq!(enc(&CtlRequest::Status), 1);
+        assert_eq!(enc(&CtlRequest::ListJobs), 4);
+        assert_eq!(enc(&CtlRequest::Revoke { id: [0; 16] }), 5);
+        assert_eq!(enc(&CtlRequest::JobTicket { id: [0; 16] }), 6);
+    }
+
     #[tokio::test]
     async fn framing_roundtrip() {
         let m = Manifest {
@@ -296,6 +395,13 @@ mod tests {
         let mut big = Vec::new();
         big.extend_from_slice(&((MAX_MSG as u32) + 1).to_le_bytes());
         assert!(read_msg::<_, Manifest>(&mut big.as_slice()).await.is_err());
+
+        // Truncated body is an error, not a short decode.
+        let mut short = buf.clone();
+        short.truncate(buf.len() - 1);
+        assert!(read_msg::<_, Manifest>(&mut short.as_slice())
+            .await
+            .is_err());
 
         let h = encode_stream_header(7, 1 << 40);
         assert_eq!(

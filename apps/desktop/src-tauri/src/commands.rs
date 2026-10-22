@@ -62,15 +62,25 @@ pub async fn set_autostart(core: C<'_>, on: bool) -> Res<()> {
 
 /// Native folder dialog. `None` = cancelled.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn pick_folder(app: AppHandle, window: WebviewWindow, title: String) -> Res<Option<String>> {
+pub async fn pick_folder(
+    app: AppHandle,
+    window: WebviewWindow,
+    title: String,
+) -> Res<Option<String>> {
     let picked = tokio::task::spawn_blocking(move || {
-        app.dialog().file().set_title(title).set_parent(&window).blocking_pick_folder()
+        app.dialog()
+            .file()
+            .set_title(title)
+            .set_parent(&window)
+            .blocking_pick_folder()
     })
     .await?;
     match picked {
         None => Ok(None),
         Some(p) => {
-            let path = p.into_path().map_err(|e| anyhow::anyhow!("đường dẫn không hợp lệ: {e}"))?;
+            let path = p
+                .into_path()
+                .map_err(|e| anyhow::anyhow!("đường dẫn không hợp lệ: {e}"))?;
             Ok(Some(path.to_string_lossy().into_owned()))
         }
     }
@@ -82,7 +92,9 @@ pub async fn open_path(app: AppHandle, path: String) -> Res<()> {
     if !Path::new(&path).exists() {
         return Err(CmdError(format!("Không tìm thấy {path}")));
     }
-    app.opener().open_path(path, None::<&str>).map_err(|e| CmdError(format!("Không mở được thư mục: {e}")))
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| CmdError(format!("Không mở được thư mục: {e}")))
 }
 
 // ---- host mode ----------------------------------------------------------------------------------
@@ -207,7 +219,9 @@ pub async fn qr_svg(text: String) -> Res<String> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn copy_text(app: AppHandle, text: String) -> Res<()> {
-    app.clipboard().write_text(text).map_err(|e| CmdError(format!("Không chép được vào clipboard: {e}")))
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| CmdError(format!("Không chép được vào clipboard: {e}")))
 }
 
 /// Additive (not in ipc.ts): the UI has registered its listeners; flush queued deep links.

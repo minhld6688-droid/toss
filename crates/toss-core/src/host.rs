@@ -18,13 +18,18 @@ use crate::{
     paths::{check_inside, resolve_rel, sanitize_component, sanitize_rel, RelPath},
     ticket::{self, Ticket, TicketError, TicketSpec, MAX_JOB_LEN},
     transfer::{conn_path, ErrorCode, Side, Tracker},
-    util::{now_unix, random_id, random_suffix},
+    util::{clean_text, now_unix, random_id, random_suffix},
     wire::{
-        read_msg, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello, Manifest, Op,
-        Want, WantItem,
+        read_msg, read_msg_max, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello,
+        Manifest, Op, Want, WantItem, MAX_HELLO,
     },
-    xfer::{self, net, RecvItem, SendItem, SessErr},
+    xfer::{self, net, timed, RecvItem, SendItem, SessErr},
 };
+
+/// Longest peer device name / app version kept (logs, jobs.json, UI).
+pub(crate) const MAX_DEVICE: usize = 64;
+/// Longest peer-supplied `Done.msg` kept in `jobs.json`.
+const MAX_PEER_MSG: usize = 2000;
 
 /// Signs a job ticket after validating the spec against the host config.
 pub(crate) fn issue_ticket(
@@ -71,10 +76,17 @@ pub(crate) fn verify_common(inner: &Inner, t: &Ticket) -> Result<(), DenyReason>
         Err(TicketError::Expired) => return Err(DenyReason::Expired),
         Err(_) => return Err(DenyReason::BadSignature),
     }
-    if inner.jobs.is_revoked(&t.body.id) {
-        return Err(DenyReason::Revoked);
+    match inner.jobs.revocation(&t.body.id) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(DenyReason::Revoked),
+        // Fail closed: an unreadable revocation list must not un-revoke tickets.
+        Err(e) => {
+            tracing::error!("{e:#}");
+            Err(DenyReason::Other(
+                "host revocation list is unreadable".into(),
+            ))
+        }
     }
-    Ok(())
 }
 
 /// Where a verified xfer ticket points.
@@ -142,7 +154,7 @@ impl Drop for Slot {
 fn try_acquire(inner: &Arc<Inner>, max: u32) -> Option<Slot> {
     let ok = inner
         .active
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |a| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |a| {
             (a < max).then_some(a + 1)
         })
         .is_ok();
@@ -161,9 +173,9 @@ async fn deny(conn: &Connection, send: &mut iroh::endpoint::SendStream, reason: 
 /// Handles one incoming `toss/xfer/1` connection.
 pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
     let remote = conn.remote_id();
-    let hello = tokio::time::timeout(Duration::from_secs(30), async {
+    let hello = tokio::time::timeout(xfer::pre_auth_timeout(), async {
         let (send, mut recv) = conn.accept_bi().await?;
-        let hello: ClientHello = read_msg(&mut recv).await?;
+        let hello: ClientHello = read_msg_max(&mut recv, MAX_HELLO).await?;
         anyhow::Ok((send, recv, hello))
     })
     .await;
@@ -185,6 +197,8 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
         op,
         app_version,
     } = hello;
+    let device = clean_text(&device, MAX_DEVICE);
+    let app_version = clean_text(&app_version, MAX_DEVICE);
     let Some(rt) = inner.host_runtime() else {
         deny(&conn, &mut send, DenyReason::NotAllowed).await;
         return;
@@ -269,7 +283,7 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
                 files: done.files,
                 bytes: done.bytes,
                 ok: done.ok,
-                msg: done.msg.clone(),
+                msg: clean_text(&done.msg, MAX_PEER_MSG),
             }
         }
         Err(e) => {
@@ -316,7 +330,12 @@ async fn host_get(
             .map_err(|e| SessErr::Other(e.into()))?
             .map_err(SessErr::Io)?;
     write_msg(send, &manifest).await.map_err(net(true))?;
-    let want: Want = read_msg(recv).await.map_err(net(true))?;
+    let want: Want = timed(
+        "waiting for the file list",
+        xfer::WANT_TIMEOUT,
+        read_msg(recv),
+    )
+    .await?;
 
     let mut items = Vec::with_capacity(want.items.len());
     let mut seen = HashSet::new();
@@ -344,7 +363,7 @@ async fn host_get(
         to_do,
     );
     xfer::send_files(conn, items, rt.cfg.max_parallel_streams as usize, tracker).await?;
-    let done: Done = read_msg(recv).await.map_err(net(true))?;
+    let done: Done = timed("waiting for Done", xfer::stall_timeout(), read_msg(recv)).await?;
     tracing::info!(files = done.files, bytes = done.bytes, ok = done.ok, msg = %done.msg, "client done");
     let _ = send.finish();
     conn.close(0u32.into(), b"done");
@@ -397,16 +416,29 @@ async fn host_put(
     resolved: &Resolved,
     tracker: &Arc<Tracker>,
 ) -> Result<Done, SessErr> {
-    let manifest: Manifest = read_msg(recv).await.map_err(net(true))?;
+    let manifest: Manifest = timed(
+        "waiting for the file list",
+        xfer::stall_timeout(),
+        read_msg(recv),
+    )
+    .await?;
+    xfer::check_manifest(&manifest).map_err(SessErr::Other)?;
     let ret_dir = resolved.ret_dir.clone();
     let return_root_c = resolved.return_root_c.clone();
     let hashes = inner.hashes.clone();
+    let reserved = inner.put_reserved.clone();
     let m2 = manifest.clone();
-    let plan =
-        tokio::task::spawn_blocking(move || plan_put(&return_root_c, &ret_dir, &m2, &hashes))
-            .await
-            .map_err(|e| SessErr::Other(e.into()))?
-            .map_err(SessErr::Io)?;
+    let plan = tokio::task::spawn_blocking(move || {
+        plan_put(&return_root_c, &ret_dir, &m2, &hashes, &reserved)
+    })
+    .await
+    .map_err(|e| SessErr::Other(e.into()))?
+    .map_err(SessErr::Io)?;
+    // Released when this session ends, however it ends.
+    let _reservation = Reservation {
+        set: inner.put_reserved.clone(),
+        keys: plan.reserved.clone(),
+    };
     write_msg(send, &plan.want).await.map_err(net(true))?;
     tracker.begin_session(
         manifest.files.len() as u32,
@@ -449,15 +481,77 @@ struct PutPlan {
     to_do_bytes: u64,
     renames: Vec<String>,
     skipped: Vec<String>,
+    /// Keys of the final paths reserved in `Inner::put_reserved`.
+    reserved: Vec<String>,
+}
+
+/// Final paths that running puts are writing (`<final>` and `<final>.part`),
+/// shared by all put sessions of a host so that two concurrent uploads of the
+/// same name never share a `.part` file or replace each other's result.
+pub(crate) type PutReservations = Arc<parking_lot::Mutex<HashSet<String>>>;
+
+/// Case-folded key (the return root may be on a case-insensitive filesystem).
+fn reservation_key(p: &std::path::Path) -> String {
+    p.to_string_lossy().to_lowercase()
+}
+
+/// Releases a put session's reservations on drop.
+struct Reservation {
+    set: PutReservations,
+    keys: Vec<String>,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let mut set = self.set.lock();
+        for k in &self.keys {
+            set.remove(k);
+        }
+    }
 }
 
 /// Decides, for every incoming file, its final name under `ret_dir` (never
-/// overwriting a different complete file) and the resume offset.
+/// overwriting a different complete file, never sharing a target with another
+/// running put) and the resume offset. Chosen targets are added to `reserved`
+/// and listed in `PutPlan::reserved`; the caller must release them.
 fn plan_put(
     return_root_c: &std::path::Path,
     ret_dir: &std::path::Path,
     manifest: &Manifest,
     hashes: &HashCache,
+    reserved: &PutReservations,
+) -> Result<PutPlan> {
+    let mut keys = Vec::new();
+    let res = plan_put_inner(
+        return_root_c,
+        ret_dir,
+        manifest,
+        hashes,
+        reserved,
+        &mut keys,
+    );
+    match res {
+        Ok(mut plan) => {
+            plan.reserved = keys;
+            Ok(plan)
+        }
+        Err(e) => {
+            drop(Reservation {
+                set: reserved.clone(),
+                keys,
+            });
+            Err(e)
+        }
+    }
+}
+
+fn plan_put_inner(
+    return_root_c: &std::path::Path,
+    ret_dir: &std::path::Path,
+    manifest: &Manifest,
+    hashes: &HashCache,
+    reserved: &PutReservations,
+    keys: &mut Vec<String>,
 ) -> Result<PutPlan> {
     std::fs::create_dir_all(ret_dir).with_context(|| format!("create {}", ret_dir.display()))?;
     check_inside(return_root_c, ret_dir)?;
@@ -469,6 +563,7 @@ fn plan_put(
         to_do_bytes: 0,
         renames: Vec::new(),
         skipped: Vec::new(),
+        reserved: Vec::new(),
     };
     let mut taken: HashSet<String> = HashSet::new();
     for (i, e) in manifest.files.iter().enumerate() {
@@ -496,6 +591,11 @@ fn plan_put(
             if check_inside(&base_c, &path).is_err() {
                 break;
             }
+            let rkey = reservation_key(&path);
+            if reserved.lock().contains(&rkey) {
+                // Another running put is writing this name right now.
+                continue;
+            }
             match std::fs::symlink_metadata(&path) {
                 Ok(m) => {
                     if m.is_file() && m.len() == e.size && hashes.hash(&path)? == e.hash {
@@ -506,6 +606,11 @@ fn plan_put(
                     }
                 }
                 Err(_) => {
+                    // Reserve atomically (a concurrent plan may have just taken it).
+                    if !reserved.lock().insert(rkey.clone()) {
+                        continue;
+                    }
+                    keys.push(rkey);
                     taken.insert(key);
                     chosen = Some(Some((cand, path)));
                     break;
@@ -530,7 +635,7 @@ fn plan_put(
         if cand != rel {
             plan.renames.push(format!("{} -> {}", rel, cand));
         }
-        plan.to_do_bytes += e.size - offset;
+        plan.to_do_bytes = plan.to_do_bytes.saturating_add(e.size - offset);
         plan.want.items.push(WantItem { index, offset });
         plan.items.insert(
             index,
@@ -540,6 +645,7 @@ fn plan_put(
                 part,
                 offset,
                 label: cand.as_str(),
+                no_clobber: true,
             },
         );
     }

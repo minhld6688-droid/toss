@@ -1,6 +1,9 @@
 //! Persisted app settings: `<data_dir>/settings.json`.
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +54,9 @@ pub fn data_dir() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join(config::DATA_DIR_NAME)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(config::DATA_DIR_NAME)
 }
 
 impl Settings {
@@ -85,6 +90,9 @@ impl Settings {
     }
 
     pub fn page_host(&self) -> String {
-        self.page_host.clone().filter(|h| !h.is_empty()).unwrap_or_else(|| config::DEFAULT_PAGE_HOST.to_string())
+        self.page_host
+            .clone()
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| config::DEFAULT_PAGE_HOST.to_string())
     }
 }

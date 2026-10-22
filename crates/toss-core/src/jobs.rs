@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +92,17 @@ impl JobStore {
     fn load_jobs(&self) -> Vec<StoredJob> {
         match std::fs::read(&self.jobs_path) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
-                tracing::warn!("jobs.json unreadable ({e}); starting empty");
+                // Keep the damaged file: the next save would otherwise wipe every record.
+                let bad = self
+                    .jobs_path
+                    .with_extension(format!("json.bad-{}", now_unix()));
+                tracing::error!(
+                    "jobs.json unreadable ({e}); moved to {} and starting empty",
+                    bad.display()
+                );
+                if let Err(e) = std::fs::rename(&self.jobs_path, &bad) {
+                    tracing::error!("could not move jobs.json aside: {e}");
+                }
                 Vec::new()
             }),
             Err(_) => Vec::new(),
@@ -103,21 +113,37 @@ impl JobStore {
         write_atomic(&self.jobs_path, &serde_json::to_vec_pretty(jobs)?)
     }
 
-    fn load_revoked(&self) -> BTreeSet<String> {
+    /// The revocation list. A missing file is an empty list; an unreadable or
+    /// damaged one is an error (callers fail closed: it must never silently
+    /// un-revoke tickets, nor be overwritten by the next `revoke`).
+    fn load_revoked(&self) -> Result<BTreeSet<String>> {
         match std::fs::read(&self.revoked_path) {
-            Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
-            Err(_) => BTreeSet::new(),
+            Ok(b) => serde_json::from_slice(&b).map_err(|e| {
+                anyhow!(
+                    "{} is damaged ({e}); fix or remove it (removing it un-revokes all tickets)",
+                    self.revoked_path.display()
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+            Err(e) => Err(anyhow!("read {}: {e}", self.revoked_path.display())),
         }
     }
 
-    /// All jobs, oldest first, with `revoked` reflecting `revoked.json`.
+    /// All jobs, oldest first, with `revoked` reflecting `revoked.json` (all
+    /// shown as revoked while that file is unreadable).
     pub fn list(&self) -> Vec<JobRecord> {
         let _g = self.lock.lock();
         let revoked = self.load_revoked();
+        if let Err(e) = &revoked {
+            tracing::error!("{e:#}");
+        }
         self.load_jobs()
             .into_iter()
             .map(|mut j| {
-                j.record.revoked |= revoked.contains(&hex::encode(j.record.id));
+                j.record.revoked |= match &revoked {
+                    Ok(r) => r.contains(&hex::encode(j.record.id)),
+                    Err(_) => true,
+                };
                 j.record
             })
             .collect()
@@ -182,7 +208,7 @@ impl JobStore {
     /// Adds `id` to `revoked.json` and marks the record.
     pub fn revoke(&self, id: [u8; 16]) -> Result<()> {
         let _g = self.lock.lock();
-        let mut revoked = self.load_revoked();
+        let mut revoked = self.load_revoked()?;
         revoked.insert(hex::encode(id));
         write_atomic(&self.revoked_path, &serde_json::to_vec_pretty(&revoked)?)
             .context("save revoked.json")?;
@@ -194,10 +220,19 @@ impl JobStore {
         Ok(())
     }
 
-    /// Is `id` in `revoked.json`?
+    /// Is `id` in `revoked.json`? True for every id while the file is
+    /// unreadable (fail closed); see [`JobStore::revocation`].
     pub fn is_revoked(&self, id: &[u8; 16]) -> bool {
+        self.revocation(id).unwrap_or_else(|e| {
+            tracing::error!("{e:#}");
+            true
+        })
+    }
+
+    /// Is `id` revoked? Errors when `revoked.json` exists but cannot be read.
+    pub fn revocation(&self, id: &[u8; 16]) -> Result<bool> {
         let _g = self.lock.lock();
-        self.load_revoked().contains(&hex::encode(id))
+        Ok(self.load_revoked()?.contains(&hex::encode(id)))
     }
 }
 
@@ -253,5 +288,45 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert!(list[0].revoked);
         assert_eq!(list[0].last.as_ref(), Some(&ev));
+    }
+
+    #[test]
+    fn damaged_revocation_list_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path());
+        store.revoke([1; 16]).unwrap();
+        assert!(!store.is_revoked(&[2; 16]));
+        // Truncated / hand-edited file.
+        std::fs::write(dir.path().join("revoked.json"), b"[\"0101").unwrap();
+        assert!(store.is_revoked(&[1; 16]));
+        assert!(
+            store.is_revoked(&[2; 16]),
+            "unreadable list must not un-revoke"
+        );
+        assert!(store.revocation(&[2; 16]).is_err());
+        // Revoking must not replace the damaged list with a one-entry list.
+        assert!(store.revoke([3; 16]).is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("revoked.json")).unwrap(),
+            b"[\"0101"
+        );
+    }
+
+    #[test]
+    fn damaged_jobs_file_is_kept_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path());
+        std::fs::write(dir.path().join("jobs.json"), b"{not json").unwrap();
+        let sk = iroh::SecretKey::generate();
+        let body = crate::ticket::admin_body(&sk.public(), 0, [4; 16]);
+        store.add(&body).unwrap();
+        assert_eq!(store.list().len(), 1);
+        let kept: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".bad-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "damaged jobs.json must be kept");
+        assert_eq!(std::fs::read(kept[0].path()).unwrap(), b"{not json");
     }
 }

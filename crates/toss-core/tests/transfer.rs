@@ -503,8 +503,14 @@ async fn remote_control() {
         .list_jobs()
         .iter()
         .any(|j| j.id == t.body.id && j.revoked));
-    // Re-signed ticket from the store is identical.
+    // Re-signed ticket from the store is identical, locally and over ctl.
     assert_eq!(s.host.job_ticket(t.body.id).unwrap(), t);
+    assert_eq!(ctl.job_ticket(t.body.id).await.unwrap(), t);
+    // Admin tickets are never handed out over ctl; unknown ids fail.
+    assert!(ctl.job_ticket(admin.body.id).await.is_err());
+    assert!(ctl.job_ticket([0xee; 16]).await.is_err());
+    // The session survives refused requests.
+    assert_eq!(ctl.status().await.unwrap().device, "host");
     // A job ticket cannot be used as admin ticket.
     let job = s.host.create_ticket(spec("j", "", "")).unwrap();
     assert!(s.client.ctl(job).await.is_err());
@@ -513,4 +519,45 @@ async fn remote_control() {
     assert!(ctl.status().await.is_err());
     s.client.shutdown().await;
     s.host.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_bind_port() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let port = std::net::UdpSocket::bind("0.0.0.0:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let cfg = |name: &str| NodeConfig {
+        data_dir: tmp.path().join(name),
+        device_name: name.into(),
+        app_version: "test".into(),
+    };
+    let n = Node::start_with_port(cfg("a"), Some(port)).await.unwrap();
+    assert_eq!(n.bind_port(), Some(port));
+    assert!(
+        n.endpoint()
+            .bound_sockets()
+            .iter()
+            .any(|s| s.is_ipv4() && s.port() == port),
+        "{:?}",
+        n.endpoint().bound_sockets()
+    );
+    // The port is really taken.
+    assert!(Node::start_with_port(cfg("b"), Some(port)).await.is_err());
+    // Default: random port.
+    let r = Node::start(cfg("c")).await.unwrap();
+    assert_eq!(r.bind_port(), None);
+    // HostConfig JSON stays compatible: bind_port is optional and omitted when unset.
+    let hc: HostConfig = serde_json::from_str(r#"{"roots":[],"return_root":"/x"}"#).unwrap();
+    assert_eq!(hc.bind_port, None);
+    assert!(!serde_json::to_string(&hc).unwrap().contains("bind_port"));
+    let mut hc2 = hc.clone();
+    hc2.bind_port = Some(port);
+    let back: HostConfig = serde_json::from_str(&serde_json::to_string(&hc2).unwrap()).unwrap();
+    assert_eq!(back.bind_port, Some(port));
+    n.shutdown().await;
+    r.shutdown().await;
 }

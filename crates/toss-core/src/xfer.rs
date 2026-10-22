@@ -4,9 +4,14 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
     io::SeekFrom,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -22,10 +27,73 @@ use crate::{
     fsutil::{hash_prefix, HashCache},
     paths::check_inside,
     transfer::Tracker,
-    wire::{encode_stream_header, read_stream_header, FileEntry},
+    wire::{encode_stream_header, read_stream_header, FileEntry, Manifest},
 };
 
 const CHUNK: usize = 256 * 1024;
+
+/// A peer that makes no progress for this long (no chunk read/written, no
+/// stream opened while none is running) is treated as gone. QUIC keep-alives
+/// keep an idle connection open forever, so without this a stalled or
+/// malicious peer would hold a host slot indefinitely.
+static STALL_MS: AtomicU64 = AtomicU64::new(120_000);
+/// Unauthenticated phase: from connection to the first message (hello / auth).
+static PRE_AUTH_MS: AtomicU64 = AtomicU64::new(15_000);
+/// Host waiting for the client's `Want` (the client may be hashing files it
+/// already has, which can take a while on a big resumed job).
+pub(crate) const WANT_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Current stall timeout.
+pub(crate) fn stall_timeout() -> Duration {
+    Duration::from_millis(STALL_MS.load(Ordering::Relaxed))
+}
+
+/// Current pre-auth timeout.
+pub(crate) fn pre_auth_timeout() -> Duration {
+    Duration::from_millis(PRE_AUTH_MS.load(Ordering::Relaxed))
+}
+
+/// Overrides the stall and pre-auth timeouts (process-wide; tests only).
+pub fn set_timeouts(stall: Duration, pre_auth: Duration) {
+    STALL_MS.store(stall.as_millis() as u64, Ordering::Relaxed);
+    PRE_AUTH_MS.store(pre_auth.as_millis() as u64, Ordering::Relaxed);
+}
+
+/// Runs a network step with the stall timeout; errors and timeouts are
+/// connection problems (`Offline`, so the client retries).
+pub(crate) async fn timed<T, E: Into<anyhow::Error>>(
+    what: &str,
+    limit: Duration,
+    fut: impl Future<Output = Result<T, E>>,
+) -> Result<T, SessErr> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(net(true)(e.into())),
+        Err(_) => Err(net(true)(anyhow!(
+            "{what}: no progress for {}s",
+            limit.as_secs()
+        ))),
+    }
+}
+
+/// Checks a manifest received from a peer: sizes must add up to `total`
+/// without overflow. Returns the total.
+pub(crate) fn check_manifest(m: &Manifest) -> Result<u64> {
+    let mut sum = 0u64;
+    for f in &m.files {
+        sum = sum
+            .checked_add(f.size)
+            .ok_or_else(|| anyhow!("manifest sizes overflow"))?;
+    }
+    if sum != m.total {
+        bail!(
+            "manifest total {} does not match the sum of its files ({sum})",
+            m.total
+        );
+    }
+    u32::try_from(m.files.len()).context("too many files in manifest")?;
+    Ok(sum)
+}
 
 /// Session-level failure, classified for the retry policy.
 #[derive(Debug)]
@@ -103,11 +171,14 @@ async fn send_one(conn: &Connection, item: SendItem, tracker: &Tracker) -> Resul
             .with_context(|| format!("seek {}", item.abs.display()))
             .map_err(SessErr::Io)?;
     }
-    let mut stream = conn.open_uni().await.map_err(|e| net(true)(e.into()))?;
-    stream
-        .write_all(&encode_stream_header(item.index, item.offset))
-        .await
-        .map_err(|e| net(true)(e.into()))?;
+    let stall = stall_timeout();
+    let mut stream = timed("open stream", stall, conn.open_uni()).await?;
+    timed(
+        "write",
+        stall,
+        stream.write_all(&encode_stream_header(item.index, item.offset)),
+    )
+    .await?;
     let mut left = item.size.saturating_sub(item.offset);
     let mut buf = vec![0u8; CHUNK];
     while left > 0 {
@@ -122,10 +193,7 @@ async fn send_one(conn: &Connection, item: SendItem, tracker: &Tracker) -> Resul
             tracing::warn!("{} shorter than announced", item.abs.display());
             break;
         }
-        stream
-            .write_all(&buf[..n])
-            .await
-            .map_err(|e| net(true)(e.into()))?;
+        timed("write", stall, stream.write_all(&buf[..n])).await?;
         tracker.add_bytes(n as u64);
         left -= n as u64;
     }
@@ -143,6 +211,10 @@ pub(crate) struct RecvItem {
     pub offset: u64,
     /// Display string for renames etc.
     pub label: String,
+    /// Host side of a put: never replace a file that appeared at `final_path`
+    /// while this one was being received (it is reported as a mismatch so the
+    /// client retries and the host picks a free name).
+    pub no_clobber: bool,
 }
 
 /// Outcome of [`receive_files`].
@@ -170,9 +242,18 @@ pub(crate) async fn receive_files(
     let mut accepted = 0usize;
     let mut summary = RecvSummary::default();
     loop {
+        // While files are being received their own reads time out; with none
+        // running, the sender must open the next stream within the stall timeout.
+        let idle = set.is_empty();
         tokio::select! {
-            r = conn.accept_uni(), if accepted < expected => {
-                let stream = r.map_err(|e| net(true)(e.into()))?;
+            r = async {
+                if idle {
+                    timed("waiting for next file", stall_timeout(), conn.accept_uni()).await
+                } else {
+                    conn.accept_uni().await.map_err(|e| net(true)(e.into()))
+                }
+            }, if accepted < expected => {
+                let stream = r?;
                 accepted += 1;
                 let items = items.clone();
                 let base_c = base_c.clone();
@@ -209,7 +290,8 @@ async fn recv_one(
     tracker: &Tracker,
     hashes: &HashCache,
 ) -> Result<RecvOne, SessErr> {
-    let (index, offset) = read_stream_header(&mut stream).await.map_err(net(true))?;
+    let stall = stall_timeout();
+    let (index, offset) = timed("read", stall, read_stream_header(&mut stream)).await?;
     let item = items
         .lock()
         .remove(&index)
@@ -262,10 +344,7 @@ async fn recv_one(
     let mut moved = 0u64;
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let n = stream
-            .read(&mut buf)
-            .await
-            .map_err(|e| net(true)(e.into()))?;
+        let n = timed("read", stall, stream.read(&mut buf)).await?;
         let Some(n) = n else { break };
         if n == 0 {
             continue;
@@ -295,6 +374,19 @@ async fn recv_one(
         tracker.sub_bytes(received);
         return Ok(RecvOne::Mismatch {
             label: item.label,
+            bytes: moved,
+        });
+    }
+    if item.no_clobber && tokio::fs::symlink_metadata(&item.final_path).await.is_ok() {
+        tracing::warn!(
+            "{} appeared while receiving {}; not replacing it",
+            item.final_path.display(),
+            item.label
+        );
+        let _ = tokio::fs::remove_file(&item.part).await;
+        tracker.sub_bytes(received);
+        return Ok(RecvOne::Mismatch {
+            label: format!("{} (target appeared during transfer)", item.label),
             bytes: moved,
         });
     }
@@ -340,4 +432,33 @@ pub(crate) fn resume_offset(
     }
     std::fs::remove_file(part).with_context(|| format!("remove {}", part.display()))?;
     Ok(Some(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_checks() {
+        let f = |size| FileEntry {
+            rel: "a".into(),
+            size,
+            hash: [0; 32],
+        };
+        let ok = Manifest {
+            files: vec![f(3), f(4)],
+            total: 7,
+        };
+        assert_eq!(check_manifest(&ok).unwrap(), 7);
+        let lie = Manifest {
+            files: vec![f(3), f(4)],
+            total: 1,
+        };
+        assert!(check_manifest(&lie).is_err());
+        let overflow = Manifest {
+            files: vec![f(u64::MAX), f(2)],
+            total: 1,
+        };
+        assert!(check_manifest(&overflow).is_err());
+    }
 }

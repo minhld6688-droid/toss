@@ -32,7 +32,10 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![HIDDEN_FLAG])))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![HIDDEN_FLAG]),
+        ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -155,9 +158,18 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Toss");
 
-    app.run(|app, event| match event {
+    app.run(move |app, event| match event {
         // Keep running in the tray when the last window is closed/hidden.
         RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
+        // Any real exit (tray "Thoát", OS logout/shutdown): pause transfers and close the
+        // endpoint so `.part` files are complete up to what was received. Idempotent.
+        RunEvent::Exit => {
+            let core = core.clone();
+            tauri::async_runtime::block_on(async move {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), core.shutdown()).await;
+            });
+        }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => shell::show_main(app),
         _ => {

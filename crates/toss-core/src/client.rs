@@ -18,13 +18,13 @@ use crate::{
     node::{ClientJob, Ctrl, EntryKind, Inner, Running},
     paths::{canonicalize, check_inside, sanitize_component, sanitize_rel},
     ticket::Ticket,
-    transfer::{conn_path, ConnPath, ErrorCode, Side, Tracker, Transfer},
+    transfer::{conn_path, ConnPath, ErrorCode, Side, Status, Tracker, Transfer},
     util::random_suffix,
     wire::{
         read_msg, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello, Manifest, Op,
         Want, WantItem,
     },
-    xfer::{self, net, RecvItem, SendItem, SessErr},
+    xfer::{self, net, timed, RecvItem, SendItem, SessErr},
     ALPN_XFER,
 };
 
@@ -97,18 +97,64 @@ pub(crate) async fn start(
         part_files: Default::default(),
         running: tokio::sync::Mutex::new(None),
     });
-    inner.register(tracker.clone(), EntryKind::Client(job.clone()));
+    // Two gets of the same job into the same folder would write the same
+    // `.part` files (and a cancel of one would delete the other's): a get
+    // that is already in progress is returned instead of starting a second.
+    let existing = {
+        let mut map = inner.transfers.lock();
+        let found = map.values().find_map(|e| match &e.kind {
+            EntryKind::Client(j)
+                if j.op == Op::Get
+                    && j.ticket.body.id == job.ticket.body.id
+                    && j.job_dir == job.job_dir
+                    && !e.tracker.status().is_final() =>
+            {
+                Some((j.clone(), e.tracker.clone()))
+            }
+            _ => None,
+        });
+        if found.is_none() {
+            let seq = inner.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            map.insert(
+                id.clone(),
+                crate::node::Entry {
+                    seq,
+                    tracker: tracker.clone(),
+                    kind: EntryKind::Client(job.clone()),
+                },
+            );
+        }
+        found
+    };
+    if let Some((j, t)) = existing {
+        if t.status() == Status::Paused {
+            resume(inner, j, t.clone()).await?;
+        }
+        return Ok(Transfer {
+            id: t.id.clone(),
+            rx: t.subscribe_state(),
+        });
+    }
     tracker.started();
     let rx = tracker.subscribe_state();
-    spawn(inner, job, tracker).await;
+    {
+        let mut running = job.running.lock().await;
+        spawn_locked(&mut running, inner, job.clone(), tracker);
+    }
     Ok(Transfer { id, rx })
 }
 
-async fn spawn(inner: &Arc<Inner>, job: Arc<ClientJob>, tracker: Arc<Tracker>) {
-    let mut running = job.running.lock().await;
+/// Starts the worker task; the caller holds `job.running`'s lock, so checking
+/// for a running task and starting one is atomic (no two workers per job).
+fn spawn_locked(
+    running: &mut Option<Running>,
+    inner: &Arc<Inner>,
+    job: Arc<ClientJob>,
+    tracker: Arc<Tracker>,
+) {
     let (ctrl_tx, ctrl_rx) = watch::channel(Ctrl::Run);
-    tracker.set_status(crate::transfer::Status::Connecting);
-    let handle = tokio::spawn(run(inner.clone(), job.clone(), tracker, ctrl_rx));
+    tracker.set_status(Status::Connecting);
+    let handle = tokio::spawn(run(inner.clone(), job, tracker, ctrl_rx));
     *running = Some(Running {
         ctrl: ctrl_tx,
         handle,
@@ -131,31 +177,32 @@ pub(crate) async fn resume(
     job: Arc<ClientJob>,
     tracker: Arc<Tracker>,
 ) -> Result<()> {
-    {
-        let running = job.running.lock().await;
-        if running.as_ref().is_some_and(|r| !r.handle.is_finished()) {
-            return Ok(());
-        }
+    let mut running = job.running.lock().await;
+    if running.as_ref().is_some_and(|r| !r.handle.is_finished()) {
+        return Ok(());
     }
     match tracker.status() {
-        crate::transfer::Status::Done => bail!("transfer already finished"),
-        crate::transfer::Status::Cancelled => bail!("transfer was cancelled"),
+        Status::Done => bail!("transfer already finished"),
+        Status::Cancelled => bail!("transfer was cancelled"),
         _ => {}
     }
-    spawn(inner, job, tracker).await;
+    spawn_locked(&mut running, inner, job.clone(), tracker);
     Ok(())
 }
 
 /// Cancels a client transfer and deletes its `.part` files.
 pub(crate) async fn cancel(job: Arc<ClientJob>, tracker: Arc<Tracker>) -> Result<()> {
     let mut running = job.running.lock().await;
+    if tracker.status() == Status::Cancelled {
+        return Ok(());
+    }
     let was_running = running.as_ref().is_some_and(|r| !r.handle.is_finished());
     if let Some(r) = running.take() {
         let _ = r.ctrl.send(Ctrl::Cancel);
         let _ = r.handle.await;
     }
     if !was_running {
-        if tracker.status() == crate::transfer::Status::Done {
+        if tracker.status() == Status::Done {
             bail!("transfer already finished");
         }
         delete_parts(&job).await;
@@ -167,10 +214,34 @@ pub(crate) async fn cancel(job: Arc<ClientJob>, tracker: Arc<Tracker>) -> Result
 async fn delete_parts(job: &ClientJob) {
     let parts: Vec<PathBuf> = job.part_files.lock().iter().cloned().collect();
     for p in parts {
-        if let Err(e) = tokio::fs::remove_file(&p).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("could not delete {}: {e}", p.display());
+        // The aborted receive tasks may still hold the file open for a moment;
+        // Windows refuses to delete an open file, so retry briefly.
+        for attempt in 0..20 {
+            match tokio::fs::remove_file(&p).await {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) if attempt == 19 => {
+                    tracing::warn!("could not delete {}: {e}", p.display());
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
+        }
+    }
+}
+
+/// Makes sure a worker that ends without reaching a resting state (e.g. a
+/// panic) leaves the transfer in `Error`, so `Transfer::wait` never hangs.
+struct EndGuard(Arc<Tracker>);
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        let st = self.0.status();
+        if !st.is_final() && st != Status::Paused {
+            self.0.error(
+                ErrorCode::Other,
+                "transfer task ended unexpectedly".into(),
+                None,
+            );
         }
     }
 }
@@ -181,6 +252,7 @@ async fn run(
     tracker: Arc<Tracker>,
     mut ctrl: watch::Receiver<Ctrl>,
 ) {
+    let _guard = EndGuard(tracker.clone());
     let drive_fut = drive(&inner, &job, &tracker);
     tokio::select! {
         res = drive_fut => match res {
@@ -277,7 +349,7 @@ async fn open(
     ),
     SessErr,
 > {
-    tracker.set_status(crate::transfer::Status::Connecting);
+    tracker.set_status(Status::Connecting);
     let host = job.ticket.host().map_err(|e| SessErr::Other(anyhow!(e)))?;
     let conn = inner.connect(host, ALPN_XFER).await.map_err(net(false))?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
@@ -317,6 +389,7 @@ async fn get_session(
         .ok_or_else(|| SessErr::Other(anyhow!("no destination")))?;
     let (conn, mut send, mut recv) = open(inner, job, tracker).await?;
     let manifest: Manifest = read_msg(&mut recv).await.map_err(net(true))?;
+    xfer::check_manifest(&manifest).map_err(SessErr::Other)?;
 
     let hashes = inner.hashes.clone();
     let m2 = manifest.clone();
@@ -414,7 +487,7 @@ fn plan_get(job_dir: &Path, manifest: &Manifest, hashes: &HashCache) -> Result<G
         let Some(offset) = xfer::resume_offset(&final_path, &part, e, hashes)? else {
             continue;
         };
-        plan.to_do_bytes += e.size - offset;
+        plan.to_do_bytes = plan.to_do_bytes.saturating_add(e.size - offset);
         plan.want.items.push(WantItem { index, offset });
         plan.items.insert(
             index,
@@ -424,6 +497,7 @@ fn plan_get(job_dir: &Path, manifest: &Manifest, hashes: &HashCache) -> Result<G
                 part,
                 offset,
                 label: rel.as_str(),
+                no_clobber: false,
             },
         );
     }
@@ -447,12 +521,16 @@ async fn put_session(
     write_msg(&mut send, &manifest).await.map_err(net(true))?;
     let want: Want = read_msg(&mut recv).await.map_err(net(true))?;
     let mut items = Vec::with_capacity(want.items.len());
-    let mut to_do = 0;
+    let mut to_do = 0u64;
+    let mut seen = BTreeSet::new();
     for w in &want.items {
         let f: &FileEntry = manifest
             .files
             .get(w.index as usize)
             .ok_or_else(|| SessErr::Other(anyhow!("host wants unknown file #{}", w.index)))?;
+        if !seen.insert(w.index) {
+            return Err(SessErr::Other(anyhow!("host wants {} twice", f.rel)));
+        }
         if w.offset > f.size {
             return Err(SessErr::Other(anyhow!(
                 "host wants bad offset for {}",
@@ -475,7 +553,12 @@ async fn put_session(
     );
     let _ticker = Abort(tracker.spawn_ticker(conn.clone()));
     xfer::send_files(&conn, items, CLIENT_STREAMS, tracker).await?;
-    let done: Done = read_msg(&mut recv).await.map_err(net(true))?;
+    let done: Done = timed(
+        "waiting for Done",
+        xfer::stall_timeout(),
+        read_msg(&mut recv),
+    )
+    .await?;
     let path = conn_path(&conn);
     let _ = send.finish();
     conn.close(0u32.into(), b"done");
