@@ -12,19 +12,60 @@ use anyhow::{anyhow, bail, Context, Result};
 use iroh::{endpoint::Connection, SecretKey};
 
 use crate::{
-    fsutil::{numbered_name, part_path, walk, HashCache},
+    fsutil::{numbered_name, part_path, walk, HashCache, HASH_THREADS},
     jobs::{JobEvent, JobStore},
     node::{EntryKind, HostRuntime, Inner},
     paths::{check_inside, resolve_rel, sanitize_component, sanitize_rel, RelPath},
     ticket::{self, HostAddr, Ticket, TicketError, TicketSpec, MAX_JOB_LEN},
     transfer::{conn_path, ErrorCode, Side, Tracker},
+    tuning::host_stream_cap,
     util::{clean_text, now_unix, random_id, random_suffix},
     wire::{
         read_msg, read_msg_max, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello,
         Manifest, Op, Want, WantItem, MAX_HELLO,
     },
-    xfer::{self, net, timed, RecvItem, SendItem, SessErr},
+    xfer::{self, net, timed, Pipe, RecvItem, SendItem, SessErr},
+    ALPN_XFER2,
 };
+
+/// Starts hashing the source folder of a get ticket in the background
+/// (`HashCache`, up to 4 files at once) so the manifest is ready when the
+/// client connects. No-op for put-only tickets or unresolvable paths.
+#[allow(dead_code)] // wired up by node.rs / ctl.rs (see contracts/CHANGES.md)
+pub(crate) fn prehash_ticket(inner: &Inner, rt: &HostRuntime, t: &Ticket) {
+    if !t.body.get || t.body.admin {
+        return;
+    }
+    let Some(root) = rt.root(&t.body.root) else {
+        return;
+    };
+    let Ok(path) = sanitize_rel(&t.body.path) else {
+        return;
+    };
+    if let Ok(src) = resolve_rel(root, &path) {
+        spawn_prehash(inner, src);
+    }
+}
+
+/// Background prehash of `src` into the node's hash cache (see
+/// [`crate::fsutil::spawn_prehash`]).
+#[allow(dead_code)] // wired up by node.rs / ctl.rs (see contracts/CHANGES.md)
+pub(crate) fn spawn_prehash(inner: &Inner, src: PathBuf) {
+    let _ = crate::fsutil::spawn_prehash(inner.hashes.clone(), src);
+}
+
+/// [`issue_ticket`] with the node's key/jobs/addresses, then [`prehash_ticket`]
+/// (for `Node::create_ticket` and ctl `CreateTicket`).
+#[allow(dead_code)] // wired up by node.rs / ctl.rs (see contracts/CHANGES.md)
+pub(crate) fn issue_ticket_and_prehash(
+    inner: &Inner,
+    rt: &HostRuntime,
+    spec: TicketSpec,
+) -> Result<Ticket> {
+    let t = issue_ticket(&inner.secret, &inner.jobs, rt, spec, &inner.host_addr())?;
+    prehash_ticket(inner, rt, &t);
+    Ok(t)
+}
 
 /// Longest peer device name / app version kept (logs, jobs.json, UI).
 pub(crate) const MAX_DEVICE: usize = 64;
@@ -186,7 +227,11 @@ fn try_acquire(inner: &Arc<Inner>, max: u32) -> Option<Slot> {
 }
 
 async fn deny(conn: &Connection, send: &mut iroh::endpoint::SendStream, reason: DenyReason) {
-    tracing::info!(remote = %conn.remote_id().fmt_short(), alpn = "toss/xfer/1", "denied: {reason}");
+    tracing::info!(
+        remote = %conn.remote_id().fmt_short(),
+        alpn = %String::from_utf8_lossy(conn.alpn()),
+        "denied: {reason}"
+    );
     let _ = write_msg(send, &HostHello::Denied { reason }).await;
     let _ = send.finish();
     // Give the client a moment to read the answer, then close.
@@ -262,7 +307,14 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
     {
         return;
     }
-    tracing::info!(job = %ticket.body.job, %device, ?op, %app_version, "transfer accepted");
+    tracing::info!(
+        job = %ticket.body.job,
+        %device,
+        ?op,
+        %app_version,
+        alpn = %String::from_utf8_lossy(conn.alpn()),
+        "transfer accepted"
+    );
 
     let id = format!("{}-{}", ticket.id_hex(), random_suffix());
     let dest = match op {
@@ -387,7 +439,15 @@ async fn host_get(
         want.items.len() as u32,
         to_do,
     );
-    xfer::send_files(conn, items, rt.cfg.max_parallel_streams as usize, tracker).await?;
+    if conn.alpn() == ALPN_XFER2 {
+        let pipe = Pipe::new(
+            &inner.cfg.net.tuning,
+            host_stream_cap(rt.cfg.max_parallel_streams),
+        );
+        xfer::send_files_v2(conn, items, &pipe, tracker).await?;
+    } else {
+        xfer::send_files(conn, items, rt.cfg.max_parallel_streams as usize, tracker).await?;
+    }
     let done: Done = timed("waiting for Done", xfer::stall_timeout(), read_msg(recv)).await?;
     tracing::info!(files = done.files, bytes = done.bytes, ok = done.ok, msg = %done.msg, "client done");
     let _ = send.finish();
@@ -395,7 +455,8 @@ async fn host_get(
     Ok(done)
 }
 
-/// Walks the ticket source and hashes every file. Returns the manifest and the
+/// Walks the ticket source and hashes every file (up to [`HASH_THREADS`] at
+/// once; cached ones from a prehash are free). Returns the manifest and the
 /// absolute path for each entry.
 fn build_manifest(
     src: &std::path::Path,
@@ -412,15 +473,17 @@ fn build_manifest(
     } else {
         RelPath::default()
     };
-    let files = walk(src, &prefix)?;
+    // Defense in depth: never serve something that resolves outside the root.
+    let files: Vec<_> = walk(src, &prefix)?
+        .into_iter()
+        .filter(|f| check_inside(root_c, &f.abs).is_ok())
+        .collect();
+    let paths: Vec<PathBuf> = files.iter().map(|f| f.abs.clone()).collect();
+    let hashed = hashes.hash_many(&paths, HASH_THREADS);
     let mut manifest = Manifest::default();
     let mut abs = Vec::with_capacity(files.len());
-    for f in files {
-        // Defense in depth: never serve something that resolves outside the root.
-        if check_inside(root_c, &f.abs).is_err() {
-            continue;
-        }
-        let hash = hashes.hash(&f.abs)?;
+    for (f, hash) in files.into_iter().zip(hashed) {
+        let hash = hash?;
         let size = std::fs::metadata(&f.abs)?.len();
         manifest.total += size;
         manifest.files.push(FileEntry {
@@ -471,8 +534,13 @@ async fn host_put(
         plan.want.items.len() as u32,
         plan.to_do_bytes,
     );
-    let summary =
-        xfer::receive_files(conn, &plan.base_c, plan.items, tracker, &inner.hashes).await?;
+    let summary = if conn.alpn() == ALPN_XFER2 {
+        let pipe = Pipe::new(&inner.cfg.net.tuning, None);
+        xfer::receive_files_v2(conn, &plan.base_c, plan.items, &pipe, tracker, &inner.hashes)
+            .await?
+    } else {
+        xfer::receive_files(conn, &plan.base_c, plan.items, tracker, &inner.hashes).await?
+    };
 
     let mut notes = Vec::new();
     if !plan.renames.is_empty() {

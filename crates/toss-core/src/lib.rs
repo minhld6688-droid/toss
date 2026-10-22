@@ -31,6 +31,7 @@ mod xfer;
 #[doc(hidden)]
 pub mod testing {
     pub use crate::xfer::set_timeouts;
+    pub use crate::client::force_xfer1_client;
 }
 
 pub use ctl::CtlClient;
