@@ -37,8 +37,12 @@ interface Store {
   flights: { id: number; x: number; y: number }[];
   /** bumped when a comet lands, the tab answers with a pulse */
   navPulse: number;
+  /** "Vì sao?" on a relay transfer: timestamp of the last request to open the Kết nối section (0 = none) */
+  diagFocus: number;
 
   setScreen(s: Screen): void;
+  /** Settings → Kết nối, scrolled into view */
+  openDiagnostics(): void;
   setApp(a: AppState): void;
   patchApp(p: Partial<AppState>): void;
   openTicket(text: string): Promise<boolean>;
@@ -101,8 +105,10 @@ export const useStore = create<Store>((set, get) => ({
   dropHover: false,
   flights: [],
   navPulse: 0,
+  diagFocus: 0,
 
   setScreen: (screen) => set({ screen }),
+  openDiagnostics: () => set({ screen: "settings", sheet: null, sheetNote: null, diagFocus: Date.now() }),
   setApp: (app) => set({ app }),
   patchApp: (p) => set((s) => (s.app ? { app: { ...s.app, ...p } } : s)),
   setDropHover: (dropHover) => set({ dropHover }),
@@ -182,7 +188,7 @@ export const useStore = create<Store>((set, get) => ({
         next = {
           id: ev.id, job: ev.job, op: ev.op, side: ev.side, peer: ev.peer, status: "connecting",
           bytes_done: 0, bytes_total: 0, files_done: 0, files_total: 0, speed_bps: 0, eta_s: null,
-          path: "unknown", dest: null, error: null, started_at: Math.floor(Date.now() / 1000),
+          path: "unknown", rtt_ms: null, streams: 0, dest: null, error: null, started_at: Math.floor(Date.now() / 1000),
         };
         break;
       case "manifest":
@@ -191,7 +197,7 @@ export const useStore = create<Store>((set, get) => ({
       case "progress":
         if (t) next = {
           ...t, status: t.status === "paused" ? "paused" : "running", bytes_done: ev.bytes_done, bytes_total: ev.bytes_total,
-          files_done: ev.files_done, files_total: ev.files_total, speed_bps: ev.speed_bps, eta_s: ev.eta_s, path: ev.path, error: null,
+          files_done: ev.files_done, files_total: ev.files_total, speed_bps: ev.speed_bps, eta_s: ev.eta_s, path: ev.path, rtt_ms: ev.rtt_ms ?? null, streams: ev.streams ?? 0, error: null,
         };
         break;
       case "done":

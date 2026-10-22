@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { api, errorMessage } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { EASE, Icon, Nest, Words } from "./ui";
 import { TossMark } from "./TossMark";
+import { FirewallAllow, FIREWALL_WHY } from "./Firewall";
 
 export function Wizard() {
   const app = useStore((s) => s.app)!;
@@ -13,6 +14,18 @@ export function Wizard() {
   const [name, setName] = useState(app.device_name);
   const [dest, setDest] = useState(app.dest_dir);
   const [busy, setBusy] = useState(false);
+  // Host machines (host mode already on at first run) get one more step when the firewall would
+  // block editors from connecting directly. Once decided it stays, so the steps do not shift back.
+  const [needsFw, setNeedsFw] = useState(false);
+  useEffect(() => {
+    if (!app.host) return;
+    let dead = false;
+    api.get_diagnostics().then((d) => { if (!dead && d.firewall === "missing") setNeedsFw(true); }).catch(() => undefined);
+    return () => { dead = true; };
+  }, [app.host]);
+  const steps = needsFw ? 4 : 3;
+  const last = steps - 1;
+  const fwStep = needsFw ? 2 : -1;
   const reduce = useReducedMotion();
   const prev = useRef(0);
   const dir = step >= prev.current ? 1 : -1;
@@ -29,7 +42,7 @@ export function Wizard() {
       <div className="aura" /><div className="grain" />
       <div className="relative z-10 flex flex-col h-full">
       <div className="flex gap-1.5 mb-8">
-        {[0, 1, 2].map((i) => (
+        {Array.from({ length: steps }, (_, i) => i).map((i) => (
           <div key={i} className="h-1 flex-1 rounded-full bg-line/15 overflow-hidden">
             <motion.div
               className="h-full rounded-full bg-accent origin-left" initial={false}
@@ -53,7 +66,7 @@ export function Wizard() {
         {step === 0 && (
           <>
             <TossMark className="w-32 -ml-2 mb-2" />
-            <div className="text-xs text-mute mb-1">Bước 1/3</div>
+            <div className="text-xs text-mute mb-1">Bước 1/{steps}</div>
             <Words text="Tên máy của bạn" accent={["máy"]} className="text-[30px] mb-2" />
             <p className="text-sm text-mute mb-4">Tên này hiện ở phía máy tổng khi bạn nhận hoặc trả file.</p>
             <input className="input h-12 text-base" autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && name.trim() && setStep(1)} />
@@ -61,7 +74,7 @@ export function Wizard() {
         )}
         {step === 1 && (
           <>
-            <div className="text-xs text-mute mb-1">Bước 2/3</div>
+            <div className="text-xs text-mute mb-1">Bước 2/{steps}</div>
             <Words text="Thư mục nhận file" accent={["nhận"]} className="text-[30px] mb-2" />
             <p className="text-sm text-mute mb-4">File nhận về sẽ nằm trong thư mục này, mỗi job một folder riêng.</p>
             <div className="card p-3 flex items-center gap-2">
@@ -71,9 +84,21 @@ export function Wizard() {
             </div>
           </>
         )}
-        {step === 2 && (
+        {step === fwStep && (
           <>
-            <div className="text-xs text-mute mb-1">Bước 3/3</div>
+            <div className="text-xs text-mute mb-1">Bước 3/{steps}</div>
+            <motion.div
+              className="w-14 h-14 rounded-full bg-accent/15 text-accent grid place-items-center mb-3" style={{ boxShadow: "0 0 0 8px rgb(var(--accent) / 0.06)" }}
+              initial={reduce ? false : { scale: 0, rotate: -60 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 420, damping: 14, delay: 0.2 }}
+            ><Icon name="shield" className="w-7 h-7" weight="bold" /></motion.div>
+            <Words text="Cho phép qua firewall" accent={["firewall"]} className="text-[30px] mb-2" />
+            <p className="text-sm text-mute mb-4">{FIREWALL_WHY}</p>
+            <FirewallAllow />
+          </>
+        )}
+        {step === last && (
+          <>
+            <div className="text-xs text-mute mb-1">Bước {steps}/{steps}</div>
             <motion.div
               className="w-14 h-14 rounded-full bg-ok/15 text-ok grid place-items-center mb-3" style={{ boxShadow: "0 0 0 8px rgb(var(--ok) / 0.06)" }}
               initial={reduce ? false : { scale: 0, rotate: -60 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 420, damping: 14, delay: 0.2 }}
@@ -91,7 +116,7 @@ export function Wizard() {
 
       <div className="flex gap-2">
         {step > 0 && <button className="btn btn-lg" onClick={() => setStep(step - 1)}>Quay lại</button>}
-        {step < 2
+        {step < last
           ? <button className="btn btn-primary btn-lg flex-1 magnet" disabled={step === 0 && !name.trim()} onClick={() => setStep(step + 1)}>Tiếp tục<Nest /></button>
           : <button className="btn btn-primary btn-lg flex-1 magnet" disabled={busy} onClick={finish}>Bắt đầu dùng Toss<Nest /></button>}
       </div>

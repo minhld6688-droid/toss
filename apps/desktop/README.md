@@ -15,6 +15,8 @@ apps/desktop
 │  ├─ commands.rs       every command of ipc.ts, snake_case names/args
 │  ├─ shell.rs          tray, deep links, `.toss` files, hide-to-tray helpers
 │  ├─ settings.rs       settings.json
+│  ├─ firewall.rs       v0.4: firewall check + "Cho phép qua firewall" (Windows PowerShell / UAC, macOS socketfilterfw + osascript)
+│  ├─ logs.rs           v0.4: `<data_dir>/logs/toss.log` (5 MB / daily, 3 kept) + "Xuất log" zip
 │  ├─ config.rs         DEFAULT_PAGE_HOST (change the link-page host here) and other constants
 │  └─ ipc.rs            serde mirrors of the IPC types
 ├─ app-icon.svg         source of src-tauri/icons (`npx tauri icon app-icon.svg`)
@@ -66,14 +68,16 @@ Not needed for v1: updater, code signing (configure in CI).
 - **Links**: `toss://t/<ticket>` (deep-link scheme `toss`, single-instance forwards argv), `https://<page_host>/#<ticket>`, raw `toss1…`, or a dropped/opened `.toss` text file. All end in the same confirm sheet: **Nhận** (get) and/or a drop zone **Kéo folder vào để trả** (put). Admin tickets offer "Dùng làm máy tổng từ xa".
 - **Native notifications** when a transfer finishes or fails while the window is not focused.
 - **Host mode** is opt-in (Cài đặt → Chế độ máy tổng). Settings changes apply through `set_host`; roots must exist, aliases `[A-Za-z0-9_-]{1,32}`.
+- **Kết nối** (Cài đặt, v0.4): `get_diagnostics` polled every 5 s while visible — likelihood of a direct path, relay, UDP port, port mapping, NAT, firewall (+ one-click `add_firewall_rule`), reasons, "Thử nối tới máy tổng" (`test_connect`; empty ticket = stored admin ticket), "Xuất log", and Nâng cao (own relay, mDNS, port mapping, streams, BBR/Cubic via `set_net`, applied by a node restart when idle). Transfer cards show the RTT and, on relay, "Vì sao?" which opens that section. Host mode listens on UDP 41820 unless another port is set.
 - **Device name** change restarts the P2P node (same identity), deferred to next launch if a transfer is running.
 
 ## Where things live
 
 | What | Where |
 | --- | --- |
-| Settings (`device_name`, `dest_dir`, `host`, `admin_ticket`, `autostart`, `first_run`, optional `page_host`) | `<data_dir>/settings.json` |
+| Settings (`device_name`, `dest_dir`, `host`, `admin_ticket`, `autostart`, `first_run`, `net`, optional `page_host`) | `<data_dir>/settings.json` |
 | Node key (`key`), `jobs.json`, `revoked.json` (toss-core) | `<data_dir>/` |
+| Logs (`toss.log`, `toss.1.log`, `toss.2.log`) | `<data_dir>/logs/` (`RUST_LOG` overrides the default filter `info,iroh=warn,toss_core=info`) |
 | Received files | `dest_dir/<job>/` (default `~/Toss`) |
 | Recent links in the UI | WebView `localStorage` (`toss.recents.v1`) — convenience only |
 

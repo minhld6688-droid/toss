@@ -2,8 +2,8 @@
 // admin control and transfers with progress so the UI can be built and screenshotted
 // without Rust. Implements the same surface as Commands (+ ExtraCommands).
 import type {
-  AppState, Commands, DirEntry, HostConfig, HostStatus, JobRecord,
-  TicketInfo, TicketSpec, TransferEvent, TransferState,
+  AppState, Commands, ConnectReport, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
+  NetConfig, NetDiagUi, TicketInfo, TicketSpec, TransferEvent, TransferState,
 } from "./ipc-types";
 import type { ExtraCommands } from "./ipc-extra";
 
@@ -91,7 +91,13 @@ const demoHost: HostConfig = {
   ],
   return_root: "D:\\Studio\\Tra-ve",
   max_parallel_jobs: 2,
+  bind_port: 41820,
 };
+
+const defaultNet = (): NetConfig => ({
+  relay_urls: [], mdns: true, portmap: true,
+  tuning: { stream_window_mb: 8, send_window_mb: 64, congestion: "bbr", streams: 8, streams_high_rtt: 16, chunk_kb: 1024, range_split_mb: 512, small_file_kb: 1024 },
+});
 
 const state: AppState = {
   version: "0.1.0",
@@ -104,6 +110,7 @@ const state: AppState = {
   first_run: wizard,
   context_menu: true,
   auto_receive: params.get("auto") !== "0",
+  net: defaultNet(),
 };
 let adminTicket: string | null = params.get("remote") === "1" ? "toss1mockadmin" + "abcdefghijklmnopqrstuvwxyz234567" : null;
 
@@ -115,7 +122,7 @@ const startedAt = Date.now();
 function tfBase(p: Partial<TransferState> & { id: string; job: string }): TransferState {
   return {
     op: "get", side: "client", peer: "Máy tổng", status: "connecting", bytes_done: 0, bytes_total: 0,
-    files_done: 0, files_total: 0, speed_bps: 0, eta_s: null, path: "unknown", dest: null, error: null,
+    files_done: 0, files_total: 0, speed_bps: 0, eta_s: null, path: "unknown", rtt_ms: null, streams: 0, dest: null, error: null,
     started_at: now(), ...p,
   };
 }
@@ -124,15 +131,15 @@ function seed() {
   const dest = `${state.dest_dir}/11B2 - RAW`;
   transfers.set("a1-0001", tfBase({
     id: "a1-0001", job: "11B2 - RAW", status: "done", bytes_done: 4.2 * GB, bytes_total: 4.2 * GB,
-    files_done: 318, files_total: 318, path: "direct", dest, started_at: now() - 3600,
+    files_done: 318, files_total: 318, path: "direct", rtt_ms: 6, dest, started_at: now() - 3600,
   }));
   transfers.set("a2-0002", tfBase({
     id: "a2-0002", job: "12A3 - Retouch (trả)", op: "put", status: "done", bytes_done: 1.1 * GB, bytes_total: 1.1 * GB,
-    files_done: 96, files_total: 96, path: "relay", started_at: now() - 7200,
+    files_done: 96, files_total: 96, path: "relay", rtt_ms: 164, started_at: now() - 7200,
   }));
   transfers.set("a3-0003", tfBase({
     id: "a3-0003", job: "12A3 - RAW", status: "running", bytes_done: 1.7 * GB, bytes_total: 5.6 * GB,
-    files_done: 121, files_total: 402, speed_bps: 38 * MB, eta_s: 103, path: "direct",
+    files_done: 121, files_total: 402, speed_bps: 38 * MB, eta_s: 103, path: "direct", rtt_ms: 12, streams: 8,
     dest: `${state.dest_dir}/12A3 - RAW`, started_at: now() - 60,
   }));
   runLoop("a3-0003", 6 * MB);
@@ -156,11 +163,11 @@ function runLoop(id: string, perTick: number) {
     if (s.bytes_done >= s.bytes_total) {
       s.status = "done"; s.files_done = s.files_total; s.speed_bps = 0; s.eta_s = null;
       window.clearInterval(t); timers.delete(id);
-      emitTransfer({ type: "progress", id, bytes_done: s.bytes_total, bytes_total: s.bytes_total, files_done: s.files_total, files_total: s.files_total, speed_bps: 0, eta_s: 0, path: s.path });
+      emitTransfer({ type: "progress", id, bytes_done: s.bytes_total, bytes_total: s.bytes_total, files_done: s.files_total, files_total: s.files_total, speed_bps: 0, eta_s: 0, path: s.path, rtt_ms: s.rtt_ms, streams: 0 });
       emitTransfer({ type: "done", id, files: s.files_total, bytes: s.bytes_total, elapsed_s: Math.max(1, now() - s.started_at), dest: s.dest });
       return;
     }
-    emitTransfer({ type: "progress", id, bytes_done: Math.round(s.bytes_done), bytes_total: s.bytes_total, files_done: s.files_done, files_total: s.files_total, speed_bps: s.speed_bps, eta_s: s.eta_s, path: s.path });
+    emitTransfer({ type: "progress", id, bytes_done: Math.round(s.bytes_done), bytes_total: s.bytes_total, files_done: s.files_done, files_total: s.files_total, speed_bps: s.speed_bps, eta_s: s.eta_s, path: s.path, rtt_ms: s.rtt_ms, streams: s.streams });
   }, 500);
   timers.set(id, t);
 }
@@ -178,6 +185,8 @@ async function launch(info: TicketInfo, op: "get" | "put", paths?: string[]): Pr
     if (s.status !== "connecting") return;
     s.bytes_total = Math.round(total); s.files_total = files;
     s.status = "running"; s.path = Math.random() < 0.7 ? "direct" : "relay";
+    s.rtt_ms = s.path === "direct" ? 4 + Math.floor(Math.random() * 12) : 120 + Math.floor(Math.random() * 100);
+    s.streams = s.path === "direct" ? 8 : 16;
     if (op === "get") s.dest = `${state.dest_dir}/${info.job}`;
     emitTransfer({ type: "manifest", id, files, bytes: s.bytes_total, to_do_files: files, to_do_bytes: s.bytes_total });
     runLoop(id, s.path === "direct" ? 9 * MB : 3 * MB);
@@ -257,6 +266,54 @@ function seedShares() {
 // jobs already refused once by start_get ("đã nhận xong"); the second try (sheet "Tải lại") goes through
 const reloadOk = new Set<string>();
 
+// ---- v0.4 diagnostics ------------------------------------------------------
+// ?net=relay (default: symmetric NAT, no port mapping, firewall missing) | medium | direct | probing
+const scenario = params.get("net") ?? "relay";
+let firewall: FirewallState = (params.get("fw") as FirewallState | null) ?? (scenario === "direct" ? "ok" : scenario === "probing" ? "unknown" : "missing");
+const RELAY = "https://aps1-1.relay.n0.iroh.link./";
+const PORT_REASON = "Router không hỗ trợ UPnP — mở cổng UDP 41820 thủ công để editor ở xa nối trực tiếp";
+
+function mockDiag(): NetDiagUi {
+  const base = { relay_url: RELAY, relay_connected: true, custom_relay: state.net.relay_urls.length > 0, direct_addrs: ["192.168.1.20:41820", "113.190.12.45:41820"], bind_port: 41820, mdns: state.net.mdns, firewall, log_dir: "/Users/minh/Library/Application Support/toss/logs" };
+  switch (scenario) {
+    case "direct": return {
+      ...base, direct_addrs: ["113.190.12.45:41820", "[2402:800:6344:1c3::2]:41820", "192.168.1.20:41820"],
+      portmap: { status: "mapped", external_addr: "113.190.12.45:41820", protocol: "upnp" },
+      nat: { udp: true, global_v4: "113.190.12.45", global_v6: "2402:800:6344:1c3::2", mapping_varies_by_dest: false, hairpin: true, relay_latency_ms: 31 },
+      direct_likelihood: "high", reasons: [],
+    };
+    case "medium": return {
+      ...base, portmap: { status: "unavailable", external_addr: null, protocol: null },
+      nat: { udp: true, global_v4: "113.190.12.45", global_v6: null, mapping_varies_by_dest: false, hairpin: false, relay_latency_ms: 38 },
+      direct_likelihood: "medium", reasons: [PORT_REASON],
+    };
+    case "probing": return {
+      ...base, relay_url: "", relay_connected: false, direct_addrs: [], bind_port: null,
+      portmap: { status: "probing", external_addr: null, protocol: null },
+      nat: { udp: false, global_v4: null, global_v6: null, mapping_varies_by_dest: null, hairpin: null, relay_latency_ms: null },
+      direct_likelihood: "unknown", reasons: [],
+    };
+    default: return {
+      ...base, portmap: { status: "unavailable", external_addr: null, protocol: null },
+      nat: { udp: true, global_v4: "113.190.12.45", global_v6: null, mapping_varies_by_dest: true, hairpin: false, relay_latency_ms: 38 },
+      direct_likelihood: "low", reasons: ["NAT đối xứng: editor ở xa sẽ đi qua relay", PORT_REASON],
+    };
+  }
+}
+
+function mockReport(): ConnectReport {
+  if (scenario === "direct") return {
+    ok: true, path: "direct", rtt_ms: 11, connect_ms: 420, direct_after_ms: 1300,
+    known_paths: ["udp 113.190.12.45:41820 (đang dùng)", "udp 192.168.1.20:41820", "relay https://aps1-1.relay.n0.iroh.link./"], reason: "",
+  };
+  if (scenario === "probing") return { ok: false, path: "unknown", rtt_ms: null, connect_ms: 8000, direct_after_ms: null, known_paths: [], reason: "Chưa nối được relay nên chưa thể thử." };
+  return {
+    ok: true, path: "relay", rtt_ms: 168, connect_ms: 1240, direct_after_ms: null,
+    known_paths: ["relay https://aps1-1.relay.n0.iroh.link./ (đang dùng)", "udp 192.168.1.20:41820 (không phản hồi)", "udp 113.190.12.45:41820 (không phản hồi)"],
+    reason: "Chưa đục được lỗ NAT sau 8 giây: máy tổng đứng sau NAT đối xứng và router chưa mở cổng UDP 41820.",
+  };
+}
+
 // ---- api -----------------------------------------------------------------
 export const mockApi: Commands & ExtraCommands = {
   async get_state() { await sleep(60); return structuredClone(state); },
@@ -305,7 +362,7 @@ export const mockApi: Commands & ExtraCommands = {
   async resume({ id }) {
     const s = transfers.get(id); if (!s || s.status !== "paused") return;
     s.status = "running"; runLoop(id, bytesPerTick.get(id) ?? 6 * MB);
-    emitTransfer({ type: "progress", id, bytes_done: s.bytes_done, bytes_total: s.bytes_total, files_done: s.files_done, files_total: s.files_total, speed_bps: 0, eta_s: null, path: s.path });
+    emitTransfer({ type: "progress", id, bytes_done: s.bytes_done, bytes_total: s.bytes_total, files_done: s.files_done, files_total: s.files_total, speed_bps: 0, eta_s: null, path: s.path, rtt_ms: s.rtt_ms, streams: s.streams });
   },
   async cancel({ id }) {
     const s = transfers.get(id); if (!s) return;
@@ -334,7 +391,7 @@ export const mockApi: Commands & ExtraCommands = {
     await sleep(600);
     if (!path.trim()) throw new Error("Thiếu đường dẫn folder");
     if (/FAIL/.test(path)) throw new Error("Không đọc được folder này (không có quyền truy cập)");
-    if (!state.host) state.host = { roots: [], return_root: `${state.dest_dir}/Tra-ve`, max_parallel_jobs: 2 };
+    if (!state.host) state.host = { roots: [], return_root: `${state.dest_dir}/Tra-ve`, max_parallel_jobs: 2, bind_port: 41820 };
     const info = doCreate({ job: baseOf(path), root: "qs-x", path: "", ret: baseOf(path), get: true, put, days }, false);
     // same folder shared again: the old quick-share entry is replaced (its previous ticket stays valid until it expires)
     const at = quickShares.findIndex((q) => q.path === path);
@@ -370,6 +427,20 @@ export const mockApi: Commands & ExtraCommands = {
     }
   },
   async has_admin_ticket() { return adminTicket !== null; },
+
+  async get_diagnostics() { await sleep(120); return mockDiag(); },
+  async add_firewall_rule() {
+    await sleep(900);
+    if (params.get("fwfail") === "1") throw new Error("Bạn đã từ chối quyền quản trị, firewall chưa được mở");
+    firewall = "ok";
+  },
+  async test_connect({ ticket }) {
+    if (!ticket.trim() && !adminTicket) throw new Error("Chưa có máy tổng — dán một link của máy tổng để thử");
+    await sleep(params.get("fast") === "1" ? 200 : 1800);
+    return mockReport();
+  },
+  async set_net({ net }) { await sleep(150); state.net = structuredClone(net); },
+  async export_logs() { await sleep(400); return "/Users/minh/Desktop/toss-logs-2026-10-22-091500.zip"; },
 };
 
 // deterministic pseudo-QR so the mock looks right (NOT scannable)

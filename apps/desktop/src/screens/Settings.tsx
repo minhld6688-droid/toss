@@ -3,12 +3,16 @@ import type { HostConfig, HostStatus, TicketInfo } from "../lib/ipc-types";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { midTruncate, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Icon, Nest, Row, Section, Toggle, Words } from "../components/ui";
+import { AnimatePresence, Icon, Nest, Row, Section, Toggle, Words } from "../components/ui";
 import { LinkMaker, LinkBackend } from "../components/LinkMaker";
 import { JobList } from "../components/JobList";
 import { QrLink } from "../components/QrLink";
+import { ConnectionSection } from "../components/Connection";
+import { FirewallSheet } from "../components/Firewall";
 
 const ALIAS_RE = /^[A-Za-z0-9_-]{1,32}$/;
+/** Host mode listens on this UDP port unless the user picks another (contracts/speed-v0.4.md §2). */
+const DEFAULT_HOST_PORT = 41820;
 
 function useRefreshApp() {
   const setApp = useStore((s) => s.setApp);
@@ -142,16 +146,23 @@ function HostEditor() {
 
   const dirty = JSON.stringify(draft) !== saved;
   const sep = app.dest_dir.includes("\\") ? "\\" : "/";
+  // Port field keeps the raw text so typing "41820" is not clamped halfway; it commits when valid.
+  const [portText, setPortText] = useState(app.host?.bind_port != null ? String(app.host.bind_port) : "");
+  useEffect(() => setPortText(app.host?.bind_port != null ? String(app.host.bind_port) : ""), [app.host?.bind_port]);
+  const portBad = portText !== "" && !(Number(portText) >= 1024 && Number(portText) <= 65535);
+  const [fwAsk, setFwAsk] = useState(false);
 
   async function toggle(on: boolean) {
     try {
       if (on) {
-        const cfg: HostConfig = { roots: [], return_root: `${app.dest_dir}${sep}Tra-ve`, max_parallel_jobs: 2 };
+        const cfg: HostConfig = { roots: [], return_root: `${app.dest_dir}${sep}Tra-ve`, max_parallel_jobs: 2, bind_port: DEFAULT_HOST_PORT };
         await api.set_host({ config: cfg });
       } else {
         await api.set_host({ config: null });
       }
       await refreshApp();
+      // First time as a host: editors cannot reach us directly while the firewall blocks UDP.
+      if (on) api.get_diagnostics().then((d) => { if (d.firewall === "missing") setFwAsk(true); }).catch(() => undefined);
     } catch (e) { toast(errorMessage(e), "error"); }
   }
 
@@ -166,10 +177,12 @@ function HostEditor() {
     if (new Set(aliases).size !== aliases.length) { toast("Tên gốc bị trùng", "error"); return; }
     if (draft.roots.some((r) => !r.path)) { toast("Chọn thư mục cho mỗi gốc", "error"); return; }
     if (!draft.return_root) { toast("Chọn thư mục trả về", "error"); return; }
+    if (portBad) { toast("Cổng UDP phải từ 1024 đến 65535", "error"); return; }
     try { await api.set_host({ config: draft }); await refreshApp(); toast("Đã lưu cấu hình máy tổng"); } catch (e) { toast(errorMessage(e), "error"); }
   }
 
   return (
+    <>
     <Section title="Chế độ máy tổng">
       <Row title="Chế độ máy tổng" hint="Máy này giữ file và cho phép máy khác nhận/trả">
         <Toggle on={!!app.host} label="Chế độ máy tổng" onChange={toggle} />
@@ -217,16 +230,19 @@ function HostEditor() {
             </div>
           </Row>
 
-          <Row title="Cổng UDP cố định" hint="Tuỳ chọn, để port-forward trên router. Đổi cổng cần mở lại Toss">
+          <Row title="Cổng UDP" hint={`Mặc định ${DEFAULT_HOST_PORT}. Mở/forward cổng này trên router để editor ở xa nối trực tiếp`}>
             <input
-              className="input w-24 text-right mono"
+              className={`input w-24 text-right mono ${portBad ? "border-bad" : ""}`}
               inputMode="numeric"
-              placeholder="tự động"
-              value={draft.bind_port ?? ""}
+              placeholder={String(DEFAULT_HOST_PORT)}
+              aria-label="Cổng UDP"
+              value={portText}
               onChange={(e) => {
-                const v = e.target.value.replace(/\D/g, "");
-                const n = v === "" ? null : Math.min(65535, Math.max(1024, Number(v)));
-                setDraft({ ...draft, bind_port: n });
+                const v = e.target.value.replace(/\D/g, "").slice(0, 5);
+                setPortText(v);
+                const n = Number(v);
+                if (v === "") setDraft({ ...draft, bind_port: null });
+                else if (n >= 1024 && n <= 65535) setDraft({ ...draft, bind_port: n });
               }}
             />
           </Row>
@@ -235,6 +251,8 @@ function HostEditor() {
         </div>
       )}
     </Section>
+    <AnimatePresence>{fwAsk && <FirewallSheet key="fw" onClose={() => setFwAsk(false)} />}</AnimatePresence>
+    </>
   );
 }
 
@@ -394,6 +412,7 @@ export function Settings() {
     <div className="p-4">
       <Words text="Cài đặt" accent={["đặt"]} className="text-[30px] mb-4" />
       <DeviceSection />
+      <ConnectionSection />
       <ShareSection />
       <HostEditor />
       {app.host && <LocalHostTools />}
