@@ -61,7 +61,7 @@ Có thể tạo link từ xa: tạo một **admin ticket** trên máy tổng và
 
 Mặc định **không cần mở cổng nào**: Toss (qua iroh) tự đục NAT để nối trực tiếp, và nếu không được thì đi vòng qua relay (chậm hơn nhưng vẫn chạy). Mạng studio nhiều lớp NAT hoặc firewall chặt thì thường rơi vào relay.
 
-iroh mở một cổng UDP **ngẫu nhiên** mỗi lần chạy, nên forward cổng trên router chỉ có ích nếu bản Toss của bạn cho đặt **cổng UDP cố định**. Khi đó: đặt một cổng (ví dụ 41641), trên router forward UDP cổng đó tới IP nội bộ của máy tổng (nên đặt IP tĩnh/DHCP reservation). Router bật UPnP/NAT-PMP thì thường không phải làm gì. Nếu không chắc, bỏ qua bước này.
+Mặc định Toss dùng cổng UDP ngẫu nhiên. Muốn forward cổng: vào **Cài đặt → Chế độ máy tổng → Cổng UDP cố định**, đặt một cổng (ví dụ 41641), mở lại Toss, trên router forward UDP cổng đó tới IP nội bộ của máy tổng (nên đặt IP tĩnh/DHCP reservation). Router bật UPnP/NAT-PMP thì thường không phải làm gì. Nếu không chắc, bỏ qua bước này.
 
 ---
 
