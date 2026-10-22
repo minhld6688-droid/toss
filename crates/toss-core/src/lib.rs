@@ -23,6 +23,7 @@ pub mod wire;
 
 mod client;
 mod host;
+mod mdns;
 mod netdiag;
 mod tuning;
 mod xfer;

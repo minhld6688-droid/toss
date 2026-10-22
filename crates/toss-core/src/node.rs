@@ -14,7 +14,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use iroh::{
     address_lookup::MemoryLookup,
-    endpoint::{presets, Connection},
+    endpoint::{presets, Connection, PortmapperConfig},
     Endpoint, EndpointAddr, EndpointId, SecretKey, Watcher,
 };
 use parking_lot::{Mutex, RwLock};
@@ -87,6 +87,13 @@ fn default_streams() -> u32 {
 }
 
 impl HostConfig {
+    /// UDP port a host binds: [`HostConfig::bind_port`] or
+    /// [`crate::net::DEFAULT_HOST_PORT`] (41820) when unset (v0.4). Use with
+    /// [`Node::start_host`], which falls back to a random port if it is taken.
+    pub fn effective_bind_port(&self) -> u16 {
+        self.bind_port.unwrap_or(crate::net::DEFAULT_HOST_PORT)
+    }
+
     /// Config with default limits.
     pub fn new(roots: Vec<Root>, return_root: PathBuf) -> HostConfig {
         HostConfig {
@@ -260,6 +267,11 @@ pub(crate) struct Inner {
     pub put_reserved: host::PutReservations,
     /// Fixed UDP port the endpoint was bound to (None = random).
     pub bind_port: Option<u16>,
+    /// v0.4: mDNS lookup (None = off or failed to start, see `net_notes`).
+    pub mdns: Option<iroh_mdns_address_lookup::MdnsAddressLookup>,
+    /// v0.4: start-time network problems for diagnostics (Vietnamese, one
+    /// sentence each): host port taken, mDNS unavailable, bad relay URL.
+    pub net_notes: Vec<String>,
 }
 
 impl Inner {
@@ -379,6 +391,8 @@ impl Inner {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "connected to host"
                 );
+                // v0.4: still on the relay after 10 s → re-add ticket + mDNS addresses once.
+                crate::netdiag::spawn_repunch(self, ticket, &conn);
                 Ok(conn)
             }
             Err(e) => {
@@ -511,8 +525,38 @@ impl Node {
 
     /// Like [`Node::start`], binding UDP `port` (IPv4 `0.0.0.0:port`, plus
     /// `[::]:port` when IPv6 is available) instead of a random one; meant for
-    /// hosts ([`HostConfig::bind_port`]). Fails if the IPv4 port is taken.
+    /// hosts ([`HostConfig::bind_port`]). Fails if the IPv4 port is taken
+    /// (see [`Node::start_host`] for the variant that falls back).
     pub async fn start_with_port(cfg: NodeConfig, port: Option<u16>) -> Result<Node> {
+        Node::start_inner(cfg, port, Vec::new()).await
+    }
+
+    /// v0.4 host start: binds `port` or, when `None`,
+    /// [`crate::net::DEFAULT_HOST_PORT`] (41820, the port the firewall rule,
+    /// port mapping and router forwards expect). If that port cannot be bound
+    /// (another program or a second Toss holds it) the node starts on a random
+    /// port instead and [`Node::diagnostics`] explains why. Pass
+    /// `host_cfg.bind_port`.
+    pub async fn start_host(cfg: NodeConfig, port: Option<u16>) -> Result<Node> {
+        let port = port.unwrap_or(crate::net::DEFAULT_HOST_PORT);
+        match Node::start_inner(cfg.clone(), Some(port), Vec::new()).await {
+            Ok(node) => Ok(node),
+            Err(e) => {
+                tracing::warn!("cannot bind UDP port {port}, using a random port: {e:#}");
+                let note = format!(
+                    "Cổng UDP {port} đang bị chương trình khác dùng — Toss chạy trên cổng ngẫu \
+                     nhiên nên mở cổng/port forward không khớp; tắt chương trình kia rồi mở lại Toss"
+                );
+                Node::start_inner(cfg, None, vec![note]).await
+            }
+        }
+    }
+
+    async fn start_inner(
+        cfg: NodeConfig,
+        port: Option<u16>,
+        mut net_notes: Vec<String>,
+    ) -> Result<Node> {
         std::fs::create_dir_all(&cfg.data_dir)
             .with_context(|| format!("create data dir {}", cfg.data_dir.display()))?;
         let secret = load_or_create_secret_key(&cfg.data_dir)?;
@@ -521,7 +565,20 @@ impl Node {
             .secret_key(secret.clone())
             .address_lookup(lookup.clone())
             .transport_config(crate::tuning::transport_config(&cfg.net.tuning))
+            .portmapper_config(if cfg.net.portmap {
+                PortmapperConfig::default()
+            } else {
+                PortmapperConfig::Disabled
+            })
             .alpns(vec![]);
+        if !cfg.net.relay_urls.is_empty() {
+            let (mode, bad) = crate::netdiag::relay_mode(&cfg.net.relay_urls);
+            for b in bad {
+                tracing::warn!(url = %b, "ignoring bad relay URL");
+                net_notes.push(format!("Địa chỉ relay riêng không hợp lệ: {b}"));
+            }
+            builder = builder.relay_mode(mode);
+        }
         if let Some(port) = port {
             use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
             builder = builder
@@ -544,7 +601,30 @@ impl Node {
                     Some(p) => format!("bind iroh endpoint on UDP port {p}"),
                     None => "bind iroh endpoint".to_string(),
                 })?;
-        tracing::info!(id = %endpoint.id(), "toss node started");
+        let mdns = if cfg.net.mdns {
+            match crate::mdns::start(&endpoint) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::warn!("mDNS unavailable, same-LAN discovery off: {e}");
+                    net_notes.push(
+                        "mDNS không chạy được (mạng hoặc máy chặn multicast) — máy cùng mạng LAN \
+                         vẫn nối qua địa chỉ trong link"
+                            .into(),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        tracing::info!(
+            id = %endpoint.id(),
+            port = ?port,
+            mdns = mdns.is_some(),
+            portmap = cfg.net.portmap,
+            own_relays = cfg.net.relay_urls.len(),
+            "toss node started"
+        );
         let (events, _) = broadcast::channel(1024);
         let inner = Arc::new(Inner {
             endpoint: endpoint.clone(),
@@ -562,6 +642,8 @@ impl Node {
             busy_seen: Mutex::new(HashMap::new()),
             put_reserved: Default::default(),
             bind_port: port,
+            mdns,
+            net_notes,
         });
         tokio::spawn(log_relay_status(endpoint.clone()));
         tokio::spawn(accept_loop(endpoint, Arc::downgrade(&inner)));
@@ -626,6 +708,13 @@ impl Node {
         crate::netdiag::test_connect(&self.inner, ticket).await
     }
 
+    /// v0.4: waits until the first net report (NAT / UDP / public address
+    /// probe against the relays) is in, at most `timeout`, so that
+    /// [`Node::diagnostics`] is not `unknown`. Returns whether one is available.
+    pub async fn wait_net_report(&self, timeout: Duration) -> bool {
+        crate::netdiag::wait_net_report(&self.inner, timeout).await
+    }
+
     /// The fixed UDP port this node was started with (`None` = random).
     pub fn bind_port(&self) -> Option<u16> {
         self.inner.bind_port
@@ -645,9 +734,11 @@ impl Node {
                 }
                 let rt = tokio::task::spawn_blocking(move || HostRuntime::new(cfg)).await??;
                 *self.inner.host.write() = Some(rt);
-                self.inner
-                    .endpoint
-                    .set_alpns(vec![ALPN_XFER2.to_vec(), ALPN_XFER.to_vec(), ALPN_CTL.to_vec()]);
+                self.inner.endpoint.set_alpns(vec![
+                    ALPN_XFER2.to_vec(),
+                    ALPN_XFER.to_vec(),
+                    ALPN_CTL.to_vec(),
+                ]);
                 tracing::info!("host mode on");
                 self.inner.emit_host_status();
             }
