@@ -303,11 +303,27 @@ impl Inner {
         HostAddr::from_endpoint_addr(&self.endpoint.addr())
     }
 
-    /// Dials `addr` with ALPN; times out after [`CONNECT_TIMEOUT`].
-    pub async fn connect(&self, addr: impl Into<EndpointAddr>, alpn: &[u8]) -> Result<Connection> {
+    /// Dials `addr` with ALPN, offering `additional` ALPNs after `alpn` (the host picks the
+    /// first one it supports; read it back with `Connection::alpn()`). v0.4: get/put dial
+    /// `toss/xfer/2` with `toss/xfer/1` as additional ALPN.
+    pub async fn connect_alpns(
+        &self,
+        addr: impl Into<EndpointAddr>,
+        alpn: &[u8],
+        additional: Vec<Vec<u8>>,
+    ) -> Result<Connection> {
         let addr = addr.into();
         let id = addr.id;
-        match tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, alpn)).await {
+        let fut = async {
+            let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
+            let connecting = self
+                .endpoint
+                .connect_with_opts(addr, alpn, opts)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            connecting.await.map_err(|e| anyhow!(e))
+        };
+        match tokio::time::timeout(CONNECT_TIMEOUT, fut).await {
             Ok(Ok(c)) => Ok(c),
             Ok(Err(e)) => Err(anyhow!(e)).with_context(|| format!("connect to {}", id.fmt_short())),
             Err(_) => bail!(
@@ -324,6 +340,16 @@ impl Inner {
     /// still runs as a fallback (iroh starts it whenever no path is selected).
     /// Logs every attempt at info level.
     pub async fn dial_host(&self, ticket: &Ticket, alpn: &[u8]) -> Result<Connection> {
+        self.dial_host_alpns(ticket, alpn, Vec::new()).await
+    }
+
+    /// [`Inner::dial_host`] offering additional ALPNs (see [`Inner::connect_alpns`]).
+    pub async fn dial_host_alpns(
+        &self,
+        ticket: &Ticket,
+        alpn: &[u8],
+        additional: Vec<Vec<u8>>,
+    ) -> Result<Connection> {
         let addr = ticket.endpoint_addr().map_err(|e| anyhow!(e))?;
         let id = addr.id;
         let host = id.fmt_short().to_string();
@@ -344,7 +370,7 @@ impl Inner {
             if relay == "-" && direct == 0 { ": none" } else { "" }
         );
         let started = Instant::now();
-        match self.connect(addr, alpn).await {
+        match self.connect_alpns(addr, alpn, additional).await {
             Ok(conn) => {
                 tracing::info!(
                     %host,
