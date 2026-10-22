@@ -1,0 +1,142 @@
+name: Release
+
+# Tag v* (e.g. v0.1.0) -> build Mac (universal) + Windows installers, publish a GitHub
+# Release, then republish the installers under the STABLE names the link page
+# (web/index.html, constant TOSS.assets) downloads from releases/latest/download/:
+#   Toss.dmg         Toss-setup.exe
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create/update (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-latest
+            args: --target universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            find_glob: '*/bundle/dmg/*.dmg'
+            asset: Toss.dmg
+          - name: windows
+            os: windows-latest
+            args: ''
+            rust_targets: ''
+            find_glob: '*/bundle/nsis/*-setup.exe'
+            asset: Toss-setup.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install desktop UI dependencies
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile
+          elif [ -f package-lock.json ]; then npm ci
+          else npm install; fi
+
+      # Optional macOS signing + notarization. Without the secrets the build is unsigned.
+      - name: Export Apple signing env (only if configured)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          S_CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          S_CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          S_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          S_ID: ${{ secrets.APPLE_ID }}
+          S_PW: ${{ secrets.APPLE_PASSWORD }}
+          S_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$S_CERT" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$S_CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$S_CERT_PW"
+              echo "APPLE_SIGNING_IDENTITY=$S_IDENTITY"
+              echo "APPLE_ID=$S_ID"
+              echo "APPLE_PASSWORD=$S_PW"
+              echo "APPLE_TEAM_ID=$S_TEAM"
+            } >> "$GITHUB_ENV"
+            echo "Apple signing enabled"
+          else
+            echo "No APPLE_CERTIFICATE secret: building unsigned"
+          fi
+
+      - name: Build and publish release
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ env.TAG }}
+          releaseName: 'Toss ${{ env.TAG }}'
+          releaseBody: 'Cài đặt: xem docs/INSTALL.md. Mac: tải Toss.dmg. Windows: tải Toss-setup.exe.'
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # tauri-action names files like Toss_0.1.0_universal.dmg / Toss_0.1.0_x64-setup.exe.
+      # The link page needs fixed names, so upload copies under the stable names.
+      - name: Upload installer under stable asset name
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GLOB: ${{ matrix.find_glob }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          # Newest match wins (a restored build cache may hold an older bundle).
+          src=$(find . -type f -path "$GLOB" -print0 | xargs -0 -r ls -t | head -n 1)
+          if [ -z "$src" ]; then
+            echo "::error::no file matching $GLOB"; exit 1
+          fi
+          echo "Using: $src"
+          mkdir -p release-assets
+          cp "$src" "release-assets/$ASSET"
+          gh release upload "$TAG" "release-assets/$ASSET" --clobber --repo "$GITHUB_REPOSITORY"
+
+  verify:
+    name: verify stable assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Toss.dmg and Toss-setup.exe are on the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$names"
+          for a in Toss.dmg Toss-setup.exe; do
+            echo "$names" | grep -qx "$a" || { echo "::error::missing release asset $a"; exit 1; }
+          done

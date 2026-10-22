@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies (Tauri / webkit2gtk)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file patchelf xdg-utils \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Test toss-core
+        run: cargo test -p toss-core
+
+      # The Tauri crate's build script needs the frontend dist folder to exist,
+      # so build the UI before checking the whole workspace.
+      - name: Install desktop UI dependencies
+        working-directory: apps/desktop
+        run: |
+          if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile
+          elif [ -f package-lock.json ]; then npm ci
+          else npm install; fi
+
+      - name: Build desktop UI
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Check workspace
+        run: cargo check --workspace

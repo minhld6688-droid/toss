@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Toss</title>
+<meta name="description" content="Toss: chuyển file trực tiếp giữa máy tổng và editor, không qua server.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a36'/%3E%3Cpath d='M9 21l14-10-4 14-3-6z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f3ee;
+  --surface: #ffffff;
+  --text: #1c1a17;
+  --muted: #6b655c;
+  --line: #e2ddd3;
+  --accent: #ff5a36;
+  --accent-text: #ffffff;
+  --accent-soft: #ffe9e3;
+  --ok: #1f8a4c;
+  --warn-bg: #fff4d6;
+  --warn-text: #7a5b00;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14120f;
+    --surface: #1e1b17;
+    --text: #f3efe8;
+    --muted: #a39b8f;
+    --line: #35302a;
+    --accent: #ff6b49;
+    --accent-text: #1a0d08;
+    --accent-soft: #3a211a;
+    --ok: #4cc782;
+    --warn-bg: #3a2f10;
+    --warn-text: #f1d37a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14120f; --surface: #1e1b17; --text: #f3efe8; --muted: #a39b8f; --line: #35302a;
+  --accent: #ff6b49; --accent-text: #1a0d08; --accent-soft: #3a211a; --ok: #4cc782;
+  --warn-bg: #3a2f10; --warn-text: #f1d37a;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px 16px 32px;
+}
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 700; font-size: 22px; letter-spacing: -0.02em;
+  margin: 8px 0 28px;
+}
+.brand svg { width: 34px; height: 34px; display: block; }
+main { width: 100%; max-width: 480px; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 28px 24px;
+}
+h1 { font-size: 24px; line-height: 1.25; margin: 0 0 8px; letter-spacing: -0.02em; }
+p { margin: 0 0 16px; }
+.muted { color: var(--muted); }
+.small { font-size: 14px; }
+[hidden] { display: none !important; }
+
+.btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit; font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform .06s ease, border-color .15s ease, background .15s ease;
+}
+.btn:hover { border-color: var(--muted); }
+.btn:active { transform: scale(.985); }
+.btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.btn.primary {
+  min-height: 60px; font-size: 18px;
+  background: var(--accent); color: var(--accent-text); border-color: transparent;
+}
+.btn.primary:hover { filter: brightness(1.05); }
+.btn.suggested { border-color: var(--accent); background: var(--accent-soft); }
+.stack { display: grid; gap: 10px; margin: 16px 0; }
+
+.status { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.spinner {
+  width: 22px; height: 22px; flex: none;
+  border-radius: 50%;
+  border: 3px solid var(--line); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+.hint { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+
+ol.steps { margin: 18px 0 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 10px; }
+ol.steps li { counter-increment: s; display: flex; gap: 12px; align-items: flex-start; }
+ol.steps li::before {
+  content: counter(s);
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent);
+  font-weight: 700; font-size: 14px;
+  display: grid; place-items: center; margin-top: 1px;
+}
+.divider { height: 1px; background: var(--line); margin: 22px 0; border: 0; }
+.ticket-line {
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted); word-break: break-all;
+  background: var(--bg); border: 1px dashed var(--line); border-radius: 10px;
+  padding: 8px 10px; margin: 0 0 12px;
+}
+.note { background: var(--warn-bg); color: var(--warn-text); border-radius: 12px; padding: 10px 14px; font-size: 14px; margin: 0 0 16px; }
+.link-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.link-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="brand" aria-label="Toss">
+  <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#ff5a36"/><path d="M9 21l14-10-4 14-3-6z" fill="#fff"/></svg>
+  <span>Toss</span>
+</div>
+
+<main>
+  <noscript>
+    <div class="card">
+      <h1>Cần bật JavaScript</h1>
+      <p class="muted">Trang này dùng JavaScript để mở link trong ứng dụng Toss. Tải Toss tại <a href="https://github.com/minhld6688-droid/toss/releases/latest">GitHub Releases</a>.</p>
+    </div>
+  </noscript>
+
+  <!-- Landing: no ticket in the URL -->
+  <section class="card" id="view-landing" hidden>
+    <h1>Chuyển file thẳng giữa các máy</h1>
+    <p class="muted">Toss gửi thư mục job từ máy tổng của studio về máy editor (và gửi bản đã làm xong ngược lại) chỉ bằng một link hoặc mã QR. File đi trực tiếp giữa hai máy, không qua server nào.</p>
+    <div class="stack" data-downloads></div>
+    <p class="muted small" data-mobile-note hidden>Toss chạy trên máy tính (Mac hoặc Windows). Mở link này trên máy tính của bạn để tải.</p>
+  </section>
+
+  <!-- Link: valid ticket in the fragment -->
+  <section class="card" id="view-link" hidden data-state="opening">
+    <div id="state-opening">
+      <div class="status"><div class="spinner" aria-hidden="true"></div><h1 style="margin:0">Đang mở Toss…</h1></div>
+      <p class="muted">Nếu trình duyệt hỏi, hãy chọn cho phép mở Toss.</p>
+    </div>
+
+    <div id="state-opened" hidden>
+      <h1>Đã gửi link sang Toss</h1>
+      <p class="muted">Chuyển sang ứng dụng Toss để theo dõi tiến trình. Nếu bạn đã huỷ hộp thoại của trình duyệt, bấm bên dưới để thử lại.</p>
+      <p class="small"><button type="button" class="link-btn" id="btn-notopened">Toss chưa mở?</button></p>
+    </div>
+
+    <div id="state-fallback" hidden>
+      <p class="hint">Toss chưa mở?</p>
+      <p class="muted">Có thể máy chưa cài Toss, hoặc trình duyệt đã chặn việc mở ứng dụng.</p>
+      <button type="button" class="btn primary" id="btn-reopen">Mở lại trong Toss</button>
+      <div class="stack" data-downloads></div>
+      <p class="muted small" data-mobile-note hidden>Toss chạy trên máy tính (Mac hoặc Windows). Hãy mở link này trên máy tính.</p>
+      <ol class="steps">
+        <li><span>Cài Toss từ file vừa tải.</span></li>
+        <li><span>Mở Toss một lần cho nó đăng ký link.</span></li>
+        <li><span>Quay lại tab này và bấm lại link.</span></li>
+      </ol>
+      <hr class="divider">
+      <p class="ticket-line" id="ticket-preview"></p>
+      <button type="button" class="btn" id="btn-copy">Copy ticket</button>
+      <p class="muted small" style="margin:10px 0 0">Đã cài Toss mà vẫn không mở? Copy ticket rồi dán vào ứng dụng Toss.</p>
+    </div>
+  </section>
+
+  <!-- Invalid -->
+  <section class="card" id="view-invalid" hidden>
+    <h1>Link không hợp lệ</h1>
+    <p class="muted">Link này thiếu hoặc sai mã ticket. Hãy nhờ người gửi tạo và gửi lại link mới.</p>
+    <div class="stack" data-downloads></div>
+  </section>
+</main>
+
+<footer>Toss · chuyển file trực tiếp, không qua server</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  // Release asset names. The release workflow (.github/workflows/release.yml)
+  // must publish assets with exactly these names.
+  var TOSS = {
+    repo: 'minhld6688-droid/toss',
+    assets: { mac: 'Toss.dmg', win: 'Toss-setup.exe' },
+    scheme: 'toss://t/',
+    fallbackDelayMs: 1500
+  };
+  var BASE = 'https://github.com/' + TOSS.repo + '/releases/latest/download/';
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---- ticket parsing -------------------------------------------------
+  function readTicket() {
+    var raw = location.hash.replace(/^#/, '');
+    if (!raw) return { kind: 'none' };
+    try { raw = decodeURIComponent(raw); } catch (e) { /* keep raw */ }
+    raw = raw.trim();
+    raw = raw.replace(/^toss:\/\/t\//i, '');
+    raw = raw.replace(/^https?:\/\/[^#]*#/i, '');
+    raw = raw.trim();
+    // toss1 + RFC 4648 base32 (a-z, 2-7), upper or lower case, 50..2000 chars.
+    if (raw.length < 50 || raw.length > 2000 || !/^toss1[a-z2-7]+$/i.test(raw)) {
+      return { kind: 'invalid' };
+    }
+    return { kind: 'ok', ticket: raw.toLowerCase() };
+  }
+
+  // ---- platform -------------------------------------------------------
+  function detectPlatform() {
+    var ua = navigator.userAgent || '';
+    var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+    if (/android|iphone|ipad|ipod/i.test(ua)) return 'mobile';
+    if (/iPad|iPhone/.test(plat) || (/Mac/i.test(plat) && navigator.maxTouchPoints > 1)) return 'mobile';
+    if (/mac/i.test(plat) || /Macintosh/i.test(ua)) return 'mac';
+    if (/win/i.test(plat) || /Windows/i.test(ua)) return 'win';
+    return 'other';
+  }
+
+  function renderDownloads(platform) {
+    var items = [
+      { key: 'mac', label: 'Tải Toss cho Mac (.dmg)', href: BASE + TOSS.assets.mac },
+      { key: 'win', label: 'Tải Toss cho Windows (.exe)', href: BASE + TOSS.assets.win }
+    ];
+    // Put the visitor's own platform first.
+    if (platform === 'win') items.reverse();
+    document.querySelectorAll('[data-downloads]').forEach(function (box) {
+      box.textContent = '';
+      items.forEach(function (it) {
+        var a = document.createElement('a');
+        a.className = 'btn' + (it.key === platform ? ' suggested' : '');
+        a.href = it.href;
+        a.rel = 'noopener noreferrer';
+        a.textContent = it.label;
+        a.setAttribute('data-platform', it.key);
+        box.appendChild(a);
+      });
+    });
+    document.querySelectorAll('[data-mobile-note]').forEach(function (n) {
+      n.hidden = platform !== 'mobile';
+    });
+  }
+
+  function show(id) {
+    ['view-landing', 'view-link', 'view-invalid'].forEach(function (v) { $(v).hidden = v !== id; });
+  }
+
+  // ---- clipboard ------------------------------------------------------
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy') ? resolve() : reject(new Error('copy failed')); }
+      catch (e) { reject(e); }
+      finally { document.body.removeChild(ta); }
+    });
+  }
+
+  // ---- link flow ------------------------------------------------------
+  function runLink(ticket) {
+    var deep = TOSS.scheme + ticket;
+    var left = false; // page lost focus / went hidden => the OS probably opened the app
+    var iframe = null;
+
+    function setState(name) {
+      ['opening', 'opened', 'fallback'].forEach(function (s) { $('state-' + s).hidden = s !== name; });
+    }
+
+    function markLeft() { left = true; }
+    window.addEventListener('blur', markLeft);
+    window.addEventListener('pagehide', markLeft);
+    document.addEventListener('visibilitychange', function () { if (document.hidden) left = true; });
+
+    function launch() {
+      // Safari ignores location changes to unknown schemes in some cases; an iframe covers it.
+      try {
+        if (iframe) iframe.remove();
+        iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.tabIndex = -1;
+        iframe.src = deep;
+        document.body.appendChild(iframe);
+      } catch (e) { /* ignore */ }
+      location.href = deep;
+    }
+
+    $('ticket-preview').textContent = ticket.length > 40
+      ? ticket.slice(0, 22) + '…' + ticket.slice(-10) + '  (' + ticket.length + ' ký tự)'
+      : ticket;
+
+    $('btn-reopen').addEventListener('click', function () { launch(); });
+    $('btn-notopened').addEventListener('click', function () { setState('fallback'); });
+    $('btn-copy').addEventListener('click', function () {
+      var btn = $('btn-copy');
+      copyText(ticket).then(function () { btn.textContent = 'Đã copy'; }, function () { btn.textContent = 'Không copy được'; })
+        .then(function () { setTimeout(function () { btn.textContent = 'Copy ticket'; }, 2000); });
+    });
+
+    show('view-link');
+    setState('opening');
+    launch();
+
+    setTimeout(function () {
+      if (!left && !document.hidden) setState('fallback');
+      else setState('opened');
+    }, TOSS.fallbackDelayMs);
+
+  }
+
+  // ---- boot -----------------------------------------------------------
+  var platform = detectPlatform();
+  renderDownloads(platform);
+  var t = readTicket();
+  if (t.kind === 'none') show('view-landing');
+  else if (t.kind === 'invalid') show('view-invalid');
+  else runLink(t.ticket);
+
+  window.addEventListener('hashchange', function () { location.reload(); });
+})();
+</script>
+</body>
+</html>
