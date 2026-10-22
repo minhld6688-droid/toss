@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8cff"/>
+      <stop offset="1" stop-color="#2557d6"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#g)"/>
+  <!-- paper-plane / arrow glyph -->
+  <path d="M268 540 L760 292 C776 284 792 300 784 316 L536 808 C528 824 504 822 500 804 L456 628 Z" fill="#ffffff"/>
+  <path d="M456 628 L760 292 L420 560 Z" fill="#c9dbff"/>
+</svg>

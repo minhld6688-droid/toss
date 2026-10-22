@@ -1,0 +1,29 @@
+[package]
+name = "toss-core"
+description = "Toss core: signed tickets, toss/xfer/1 + toss/ctl/1 protocols over iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iroh = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+blake3 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+data-encoding = { workspace = true }
+rand = { workspace = true }
+dirs = "6"
+hex = "0.4"
+parking_lot = "0.12"
+dunce = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }

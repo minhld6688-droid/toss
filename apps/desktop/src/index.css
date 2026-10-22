@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 244 245 247;
+  --card: 255 255 255;
+  --line: 228 231 236;
+  --ink: 23 27 35;
+  --mute: 107 115 128;
+  --accent: 47 109 240;
+  --accent-ink: 255 255 255;
+  --ok: 27 148 82;
+  --bad: 213 58 58;
+  --warn: 190 120 15;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: 17 18 21;
+    --card: 27 29 34;
+    --line: 45 48 56;
+    --ink: 232 234 239;
+    --mute: 142 150 163;
+    --accent: 66 128 245;
+    --accent-ink: 255 255 255;
+    --ok: 62 187 120;
+    --bad: 240 100 100;
+    --warn: 225 165 60;
+    color-scheme: dark;
+  }
+}
+
+html, body, #root { height: 100%; }
+body {
+  @apply bg-bg text-ink font-sans text-base antialiased;
+  margin: 0;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+input, textarea, .selectable { user-select: text; -webkit-user-select: text; }
+button { font: inherit; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgb(var(--line)); border-radius: 8px; }
+
+@layer components {
+  .card { @apply bg-card border border-line rounded-lg; }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 h-8 px-3 rounded text-sm font-medium border border-line bg-card text-ink
+      transition-colors select-none cursor-pointer disabled:opacity-50 disabled:cursor-default hover:bg-bg;
+  }
+  .btn-primary { @apply bg-accent text-accent-ink border-accent hover:bg-accent hover:brightness-110; }
+  .btn-lg { @apply h-10 px-4 text-base; }
+  .btn-ghost { @apply border-transparent bg-transparent hover:bg-line/60; }
+  .btn-danger { @apply text-bad; }
+  .input {
+    @apply w-full h-8 px-2 rounded border border-line bg-bg text-ink text-sm outline-none placeholder:text-mute
+      focus:border-accent focus:ring-1 focus:ring-accent;
+  }
+  .label { @apply text-xs text-mute mb-1 block; }
+  .h-section { @apply text-xs font-semibold uppercase tracking-wide text-mute px-1 mb-2; }
+  .chip { @apply inline-flex items-center h-5 px-2 rounded-full text-xs font-medium bg-line/70 text-mute; }
+}

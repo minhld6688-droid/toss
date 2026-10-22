@@ -1,0 +1,41 @@
+[package]
+name = "toss-desktop"
+description = "Toss desktop app (Tauri 2 shell around toss-core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "toss_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+toss-core = { path = "../../../crates/toss-core" }
+
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = "6"
+hex = "0.4"
+data-encoding = { workspace = true }
+hostname = "0.4"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+# Pin: tauri-plugin-deep-link 2.6.2 does not compile against rust-ini 0.21.3 (new ParseOption fields).
+# Unused here; it only constrains resolution. Remove once the plugin is fixed upstream.
+rust-ini = ">=0.21.0, <0.21.3"

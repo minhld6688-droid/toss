@@ -1,0 +1,85 @@
+//! Serde mirrors of the types in contracts/ipc.ts (snake_case, same field names).
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Root {
+    pub alias: String,
+    pub path: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostConfig {
+    pub roots: Vec<Root>,
+    pub return_root: String,
+    pub max_parallel_jobs: u32,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct AppState {
+    pub version: String,
+    pub endpoint_id: String,
+    pub device_name: String,
+    pub dest_dir: String,
+    pub host: Option<HostConfig>,
+    pub page_host: String,
+    pub autostart: bool,
+    pub first_run: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct TicketInfo {
+    pub ticket: String,
+    pub id: String,
+    pub host: String,
+    pub job: String,
+    pub root: String,
+    pub path: String,
+    pub ret: String,
+    pub get: bool,
+    pub put: bool,
+    pub admin: bool,
+    pub exp: u64,
+    pub web_url: String,
+    pub deep_link: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct TicketSpec {
+    pub job: String,
+    pub root: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub ret: String,
+    pub get: bool,
+    pub put: bool,
+    pub days: u32,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct JobLast {
+    pub at: u64,
+    pub device: String,
+    pub op: &'static str,
+    pub files: u32,
+    pub bytes: u64,
+    pub ok: bool,
+    pub msg: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct JobRecord {
+    pub id: String,
+    pub job: String,
+    pub root: String,
+    pub path: String,
+    pub get: bool,
+    pub put: bool,
+    pub exp: u64,
+    pub created: u64,
+    pub revoked: bool,
+    pub last: Option<JobLast>,
+    /// Re-signed ticket string for display/copy; "" when this app did not mint it.
+    pub ticket: String,
+}
