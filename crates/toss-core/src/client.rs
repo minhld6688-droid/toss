@@ -14,7 +14,7 @@ use iroh::endpoint::Connection;
 use tokio::sync::watch;
 
 use crate::{
-    fsutil::{part_path, walk, HashCache},
+    fsutil::{part_path, walk, HashCache, HASH_THREADS},
     node::{ClientJob, Ctrl, EntryKind, Inner, Running},
     paths::{canonicalize, check_inside, sanitize_component, sanitize_rel},
     ticket::Ticket,
@@ -24,8 +24,8 @@ use crate::{
         read_msg, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello, Manifest, Op,
         Want, WantItem,
     },
-    xfer::{self, net, timed, RecvItem, SendItem, SessErr},
-    ALPN_XFER,
+    xfer::{self, net, timed, Pipe, RecvItem, SendItem, SessErr},
+    ALPN_XFER, ALPN_XFER2,
 };
 
 /// Seconds between retries for Busy / HostOffline.
@@ -34,7 +34,24 @@ pub const RETRY_SECS: u64 = 30;
 pub const BUSY_LIMIT: Duration = Duration::from_secs(3600);
 /// Give up on HostOffline after this long.
 pub const OFFLINE_LIMIT: Duration = Duration::from_secs(24 * 3600);
+/// Streams of an xfer/1 put (old hosts).
 const CLIENT_STREAMS: usize = 4;
+
+/// Test hook: endpoints (by id) whose client sessions dial plain `toss/xfer/1`
+/// like a v0.3 client.
+static XFER1_ONLY: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<[u8; 32]>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Makes the client sessions of the node with endpoint `id` speak only
+/// `toss/xfer/1` (tests of the v0.3 compatibility path).
+pub fn force_xfer1_client(id: iroh::EndpointId, on: bool) {
+    let mut set = XFER1_ONLY.lock();
+    if on {
+        set.insert(*id.as_bytes());
+    } else {
+        set.remove(id.as_bytes());
+    }
+}
 
 /// Creates and starts a client transfer.
 pub(crate) async fn start(
@@ -350,10 +367,15 @@ async fn open(
     SessErr,
 > {
     tracker.set_status(Status::Connecting);
-    let conn = inner
-        .dial_host(&job.ticket, ALPN_XFER)
-        .await
-        .map_err(net(false))?;
+    let conn = if XFER1_ONLY.lock().contains(inner.endpoint.id().as_bytes()) {
+        inner.dial_host(&job.ticket, ALPN_XFER).await
+    } else {
+        // v0.4: offer xfer/2, fall back to xfer/1 with a v0.3 host.
+        inner
+            .dial_host_alpns(&job.ticket, ALPN_XFER2, vec![ALPN_XFER.to_vec()])
+            .await
+    }
+    .map_err(net(false))?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
     let hello = ClientHello::v1 {
         ticket: job.ticket.clone(),
@@ -411,8 +433,20 @@ async fn get_session(
     write_msg(&mut send, &plan.want).await.map_err(net(true))?;
 
     let _ticker = Abort(tracker.spawn_ticker(conn.clone()));
-    let summary =
-        xfer::receive_files(&conn, &plan.base_c, plan.items, tracker, &inner.hashes).await?;
+    let summary = if conn.alpn() == ALPN_XFER2 {
+        let pipe = Pipe::new(&inner.cfg.net.tuning, None);
+        xfer::receive_files_v2(
+            &conn,
+            &plan.base_c,
+            plan.items,
+            &pipe,
+            tracker,
+            &inner.hashes,
+        )
+        .await?
+    } else {
+        xfer::receive_files(&conn, &plan.base_c, plan.items, tracker, &inner.hashes).await?
+    };
 
     let mut notes = Vec::new();
     if !plan.skipped.is_empty() {
@@ -554,7 +588,12 @@ async fn put_session(
         to_do,
     );
     let _ticker = Abort(tracker.spawn_ticker(conn.clone()));
-    xfer::send_files(&conn, items, CLIENT_STREAMS, tracker).await?;
+    if conn.alpn() == ALPN_XFER2 {
+        let pipe = Pipe::new(&inner.cfg.net.tuning, None);
+        xfer::send_files_v2(&conn, items, &pipe, tracker).await?;
+    } else {
+        xfer::send_files(&conn, items, CLIENT_STREAMS, tracker).await?;
+    }
     let done: Done = timed(
         "waiting for Done",
         xfer::stall_timeout(),
@@ -579,8 +618,7 @@ async fn put_session(
 /// Manifest for a put: each selected file is `name`, each selected folder keeps
 /// its name as first segment.
 fn build_put_manifest(paths: &[PathBuf], hashes: &HashCache) -> Result<(Manifest, Vec<PathBuf>)> {
-    let mut manifest = Manifest::default();
-    let mut abs = Vec::new();
+    let mut walked = Vec::new();
     let mut seen = BTreeSet::new();
     for p in paths {
         let name = p
@@ -594,15 +632,19 @@ fn build_put_manifest(paths: &[PathBuf], hashes: &HashCache) -> Result<(Manifest
                 tracing::warn!("skipping duplicate {rel}");
                 continue;
             }
-            let hash = hashes.hash(&f.abs)?;
-            manifest.total += f.size;
-            manifest.files.push(FileEntry {
-                rel,
-                size: f.size,
-                hash,
-            });
-            abs.push(f.abs);
+            walked.push(f);
         }
+    }
+    let abs: Vec<PathBuf> = walked.iter().map(|f| f.abs.clone()).collect();
+    let hashed = hashes.hash_many(&abs, HASH_THREADS);
+    let mut manifest = Manifest::default();
+    for (f, hash) in walked.into_iter().zip(hashed) {
+        manifest.total += f.size;
+        manifest.files.push(FileEntry {
+            rel: f.rel.as_str(),
+            size: f.size,
+            hash: hash?,
+        });
     }
     Ok((manifest, abs))
 }

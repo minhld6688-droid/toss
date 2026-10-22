@@ -31,7 +31,7 @@ concurrency:
 
 env:
   # "true" = a missing "path=" log line fails the job; "false" = only a warning.
-  REQUIRE_PATH: "false"
+  REQUIRE_PATH: "true"
 
 jobs:
   host:
@@ -195,7 +195,9 @@ jobs:
           # Source: tracing line "connected to host ... path=Direct" (last one wins).
           # Fallback: any "path=<word>" token. "none" = the log does not say.
           path_of() {
-            p=$(grep -E 'connected to host.*path=' "$1" | tail -1 | sed -E 's/.*path="?([A-Za-z_]+).*/\1/' | tr 'A-Z' 'a-z')
+            # v0.4: toss-cli prints the FINAL path on its "done: ... path=<direct|relay|mixed>" line.
+            p=$(grep -E '^done: .* path=' "$1" | tail -1 | sed -E 's/.* path=([a-z]+).*/\1/')
+            [ -n "$p" ] || p=$(grep -E 'connected to host.*path=' "$1" | tail -1 | sed -E 's/.*path="?([A-Za-z_]+).*/\1/' | tr 'A-Z' 'a-z')
             if [ -z "$p" ]; then
               p=$(grep -oE 'path=(Direct|Relay|Mixed|Unknown|direct|relay|mixed|unknown)' "$1" | tail -1 | sed -E 's/path=//' | tr 'A-Z' 'a-z')
             fi

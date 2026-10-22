@@ -129,6 +129,47 @@ exchange rebuilds the plan.
   clients receive `Denied{Busy}` and retry every 30 s for up to 1 h.
 - Path sanitization applies to every `rel` on both sides.
 
+## 3b. ALPN `toss/xfer/2` — segmented data streams (v0.4)
+
+The ALPN is the version. Hosts accept `toss/xfer/2` and `toss/xfer/1`; v0.4
+clients dial `toss/xfer/2` with `toss/xfer/1` offered as an additional ALPN and
+follow whichever the host picks (`Connection::alpn()`), so v0.3 hosts and
+clients keep working. Control stream, `ClientHello`, `HostHello`, `Manifest`,
+`Want` and `Done` and their framing are exactly as in §3.
+
+Data: the sender (host on get, client on put) opens uni streams. Each stream
+carries one or more *segments* back to back and ends with FIN:
+
+```
+u32 LE index | u64 LE offset | u64 LE len | <len bytes>      (20-byte header)
+```
+
+Rules: `index` is a `Want` item; `WantItem.offset <= offset` and
+`offset + len <= size`; segments of one file never overlap and together cover
+`[WantItem.offset, size)` exactly; every wanted file gets at least one segment
+(`len = 0` for a file with nothing left, e.g. empty files). The receiver stops
+accepting streams once every wanted file is verified (or failed verification),
+then sends `Done` as in §3.
+
+Sender policy (not a receiver requirement, `NodeConfig.net.tuning`): files
+larger than `range_split_mb` are split into segments of
+`min(range_split_mb, 64 MiB)`, one per stream; files smaller than
+`small_file_kb` are batched (≤ 16 MiB and ≤ 4096 files per stream); earlier
+streams get higher QUIC send priority. Streams in flight: `tuning.streams`
+(8), `tuning.streams_high_rtt` (16) while the path is relay or RTT > 30 ms;
+a host `max_parallel_streams` other than 0/4 caps it.
+
+Receiver: writes each segment at its offset into `<rel>.part`, keeps a per-file
+contiguous watermark and trims `.part` to it whenever a session ends before the
+file is verified, so `.part`-size resume (§3 Resume) stays exact. blake3 is
+checked incrementally (rolling over the contiguous prefix for split files);
+`sync_data` once per file; host never overwrites on put (same as §3).
+
+Transport (v0.4 defaults, `tuning.rs`): per-stream receive window 2 MiB
+(hard cap — noq closes a connection with more than 1024 gaps in one stream
+buffer), connection receive window = streams_high_rtt × stream window, send
+window 64 MiB, Cubic (BBRv3 opt-in), initial RTT 50 ms.
+
 ## 4. ALPN `toss/ctl/1` — control (admin devices → host)
 
 Control stream only, request/response, postcard with the same length prefix.

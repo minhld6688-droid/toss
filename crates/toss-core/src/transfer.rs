@@ -277,6 +277,24 @@ pub fn conn_path(conn: &Connection) -> ConnPath {
     }
 }
 
+/// RTT of the connection's selected path (or the best open path), in ms.
+pub fn conn_rtt_ms(conn: &Connection) -> Option<u32> {
+    let paths = conn.paths();
+    let mut best: Option<std::time::Duration> = None;
+    for p in paths.iter() {
+        let rtt = p.rtt();
+        if p.is_selected() {
+            return Some(ms(rtt));
+        }
+        best = Some(best.map_or(rtt, |b| b.min(rtt)));
+    }
+    best.map(ms)
+}
+
+fn ms(d: Duration) -> u32 {
+    u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
+}
+
 /// Per-transfer bookkeeping shared by the worker task and the node.
 #[derive(Debug)]
 pub(crate) struct Tracker {
@@ -287,6 +305,8 @@ pub(crate) struct Tracker {
     pub files_done: AtomicU32,
     /// Bytes actually moved over the network (all sessions).
     pub moved: AtomicU64,
+    /// Data streams currently open (v0.4 `streams`).
+    pub streams: AtomicU32,
     started: Instant,
     samples: Mutex<VecDeque<(Instant, u64)>>,
 }
@@ -329,6 +349,7 @@ impl Tracker {
             bytes_done: AtomicU64::new(0),
             files_done: AtomicU32::new(0),
             moved: AtomicU64::new(0),
+            streams: AtomicU32::new(0),
             started: Instant::now(),
             samples: Mutex::new(VecDeque::new()),
         })
@@ -438,10 +459,12 @@ impl Tracker {
                 _ => 0,
             }
         };
+        let streams = self.streams.load(Ordering::Relaxed);
         let mut ev = None;
         self.update(|s| {
             s.bytes_done = done;
             s.files_done = files_done;
+            s.streams = streams;
             s.speed_bps = speed;
             s.path = path;
             let left = s.bytes_total.saturating_sub(done);
@@ -478,9 +501,25 @@ impl Tracker {
             iv.tick().await;
             loop {
                 iv.tick().await;
+                me.set_rtt(conn_rtt_ms(&conn));
                 me.tick(conn_path(&conn));
             }
         })
+    }
+
+    /// Records the RTT of the selected path (shown in the next Progress).
+    pub fn set_rtt(&self, rtt_ms: Option<u32>) {
+        self.update(|s| {
+            if rtt_ms.is_some() {
+                s.rtt_ms = rtt_ms;
+            }
+        });
+    }
+
+    /// Counts an open data stream until the guard is dropped.
+    pub fn stream_open(self: &Arc<Self>) -> StreamGuard {
+        self.streams.fetch_add(1, Ordering::Relaxed);
+        StreamGuard(self.clone())
     }
 
     /// Final Progress + Done.
@@ -563,6 +602,15 @@ impl Tracker {
                 s.status = st;
             }
         });
+    }
+}
+
+/// See [`Tracker::stream_open`].
+pub(crate) struct StreamGuard(Arc<Tracker>);
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.0.streams.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

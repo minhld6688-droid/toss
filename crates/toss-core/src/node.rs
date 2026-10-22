@@ -767,13 +767,9 @@ impl Node {
             .inner
             .host_runtime()
             .ok_or_else(|| anyhow!("host mode is off"))?;
-        host::issue_ticket(
-            &self.inner.secret,
-            &self.inner.jobs,
-            &rt,
-            spec,
-            &self.inner.host_addr(),
-        )
+        // v0.4: also starts hashing the job's source folder in the background,
+        // so the manifest is ready when the editor clicks the link.
+        host::issue_ticket_and_prehash(&self.inner, &rt, spec)
     }
 
     /// Creates an admin ticket (control channel access). Errors if host mode is off.

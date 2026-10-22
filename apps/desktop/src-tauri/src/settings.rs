@@ -180,7 +180,11 @@ mod tests {
         assert!(s.context_menu, "context menu defaults to on");
         assert!(s.auto_receive, "auto receive defaults to on");
         assert!(s.quick_shares.is_empty() && !s.host_auto);
-        assert_eq!(s.net, toss_core::NetConfig::default(), "pre-0.4 files get the default net config");
+        assert_eq!(
+            s.net,
+            toss_core::NetConfig::default(),
+            "pre-0.4 files get the default net config"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -194,7 +198,11 @@ mod tests {
         s.net.tuning.congestion = toss_core::net::Congestion::Cubic;
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir).net, s.net);
-        fs::write(Settings::path(&dir), r#"{"device_name":"May","net":{"portmap":false}}"#).unwrap();
+        fs::write(
+            Settings::path(&dir),
+            r#"{"device_name":"May","net":{"portmap":false}}"#,
+        )
+        .unwrap();
         let back = Settings::load(&dir);
         assert!(!back.net.portmap && back.net.mdns && back.net.relay_urls.is_empty());
         let _ = fs::remove_dir_all(&dir);

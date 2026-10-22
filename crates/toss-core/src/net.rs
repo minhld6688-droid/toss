@@ -41,10 +41,10 @@ impl Default for NetConfig {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Congestion {
-    /// BBR (default).
-    #[default]
+    /// BBR (BBRv3 in noq). Opt-in until it beats Cubic on a real LAN/WAN A/B.
     Bbr,
-    /// Cubic (quinn/noq default; kept for A/B benchmarks).
+    /// Cubic (default since v0.4: faster than BBR on every v0.4 bench).
+    #[default]
     Cubic,
 }
 
@@ -52,11 +52,11 @@ pub enum Congestion {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Tuning {
-    /// Per-stream receive window, MiB (default 8).
+    /// Per-stream receive window, MiB (default 2; capped at 2 by `tuning.rs`, see CHANGES.md).
     pub stream_window_mb: u32,
     /// Connection send window, MiB (default 64).
     pub send_window_mb: u32,
-    /// Congestion controller (default BBR).
+    /// Congestion controller (default Cubic).
     pub congestion: Congestion,
     /// Data streams in flight per transfer (default 8).
     pub streams: u32,
@@ -73,9 +73,9 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
-            stream_window_mb: 8,
+            stream_window_mb: 2,
             send_window_mb: 64,
-            congestion: Congestion::Bbr,
+            congestion: Congestion::Cubic,
             streams: 8,
             streams_high_rtt: 16,
             chunk_kb: 1024,

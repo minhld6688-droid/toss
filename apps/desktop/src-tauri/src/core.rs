@@ -27,8 +27,9 @@ use toss_core::{
 };
 
 use crate::{
-    config, firewall, logs,
+    config, firewall,
     ipc::{AppState, HostConfig, JobLast, JobRecord, NetDiagUi, Root, TicketInfo, TicketSpec},
+    logs,
     settings::{data_dir, QuickShare, Settings},
 };
 
@@ -149,7 +150,11 @@ impl Core {
             let s = self.settings.lock().unwrap_or_else(|p| p.into_inner());
             // User roots + quick-share roots (missing folders are tolerated here and
             // picked up by the retry once their drive is mounted).
-            (s.device_name.clone(), effective_host(&s, false), s.net.clone())
+            (
+                s.device_name.clone(),
+                effective_host(&s, false),
+                s.net.clone(),
+            )
         };
         std::fs::create_dir_all(&self.data_dir).context("tạo thư mục dữ liệu")?;
         let cfg = NodeConfig {
@@ -985,7 +990,8 @@ impl Core {
         let dest = dirs::desktop_dir()
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."));
-        let out = tokio::task::spawn_blocking(move || logs::export_zip(&dir, &extra, &dest)).await??;
+        let out =
+            tokio::task::spawn_blocking(move || logs::export_zip(&dir, &extra, &dest)).await??;
         Ok(out.to_string_lossy().into_owned())
     }
 
@@ -1094,8 +1100,13 @@ fn clean_net(mut net: NetConfig) -> Result<NetConfig> {
         let rest = u
             .strip_prefix("https://")
             .or_else(|| u.strip_prefix("http://"))
-            .ok_or_else(|| anyhow!("Địa chỉ relay phải bắt đầu bằng https:// (vd. https://relay.example.vn)"))?;
-        if rest.is_empty() || rest.contains(char::is_whitespace) || (!rest.contains('.') && !rest.starts_with("localhost")) {
+            .ok_or_else(|| {
+                anyhow!("Địa chỉ relay phải bắt đầu bằng https:// (vd. https://relay.example.vn)")
+            })?;
+        if rest.is_empty()
+            || rest.contains(char::is_whitespace)
+            || (!rest.contains('.') && !rest.starts_with("localhost"))
+        {
             bail!("Địa chỉ relay “{u}” không hợp lệ");
         }
         urls.push(u);
@@ -1417,9 +1428,18 @@ mod tests {
         n.tuning.streams = 99;
         n.tuning.streams_high_rtt = 4;
         let c = clean_net(n).unwrap();
-        assert_eq!(c.relay_urls, ["https://relay.example.vn"], "trimmed, de-duplicated");
+        assert_eq!(
+            c.relay_urls,
+            ["https://relay.example.vn"],
+            "trimmed, de-duplicated"
+        );
         assert_eq!((c.tuning.streams, c.tuning.streams_high_rtt), (32, 32));
-        for bad in ["relay.example.vn", "ftp://x.vn", "https://", "https://no spaces.vn"] {
+        for bad in [
+            "relay.example.vn",
+            "ftp://x.vn",
+            "https://",
+            "https://no spaces.vn",
+        ] {
             let n = NetConfig {
                 relay_urls: vec![bad.into()],
                 ..NetConfig::default()

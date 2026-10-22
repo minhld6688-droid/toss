@@ -31,7 +31,8 @@ static GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 /// Installs the global subscriber: stderr + rolling file. A file that cannot be opened
 /// only costs the file layer.
 pub fn init(dir: &Path) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let file = match Rotating::open(dir.to_path_buf()) {
         Ok(w) => {
             let (nb, guard) = tracing_appender::non_blocking(w);
@@ -57,7 +58,8 @@ pub fn init(dir: &Path) {
 }
 
 fn day_of(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400)
+    t.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400)
 }
 
 /// `toss.log`, `toss.1.log`, …
@@ -198,7 +200,8 @@ pub fn export_zip(data_dir: &Path, extra: &[(&str, Vec<u8>)], dest_dir: &Path) -
         .unwrap_or(Duration::ZERO)
         .as_secs();
     let out = dest_dir.join(format!("toss-logs-{}.zip", stamp(now)));
-    let mut zip = ZipWriter::new(File::create(&out).with_context(|| format!("tạo {}", out.display()))?);
+    let mut zip =
+        ZipWriter::new(File::create(&out).with_context(|| format!("tạo {}", out.display()))?);
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let mut add = |name: &str, bytes: &[u8]| -> Result<()> {
@@ -256,7 +259,9 @@ mod tests {
         names.sort();
         assert_eq!(names, ["toss.1.log", "toss.2.log", "toss.log"]);
         // newest line is in toss.log
-        assert!(fs::read_to_string(dir.join("toss.log")).unwrap().contains("line 009"));
+        assert!(fs::read_to_string(dir.join("toss.log"))
+            .unwrap()
+            .contains("line 009"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -265,11 +270,19 @@ mod tests {
         let dir = tmp("stale");
         fs::write(dir.join("toss.log"), "old day\n").unwrap();
         let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
-        File::options().write(true).open(dir.join("toss.log")).unwrap().set_modified(old).unwrap();
+        File::options()
+            .write(true)
+            .open(dir.join("toss.log"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let mut w = Rotating::open(dir.clone()).unwrap();
         w.write_all(b"today\n").unwrap();
         w.flush().unwrap();
-        assert_eq!(fs::read_to_string(dir.join("toss.1.log")).unwrap(), "old day\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("toss.1.log")).unwrap(),
+            "old day\n"
+        );
         assert_eq!(fs::read_to_string(dir.join("toss.log")).unwrap(), "today\n");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -297,15 +310,27 @@ mod tests {
         fs::create_dir_all(data.join("logs")).unwrap();
         fs::write(data.join("logs/toss.log"), "hello log\n").unwrap();
         fs::write(data.join("key"), "TOP SECRET KEY").unwrap();
-        fs::write(data.join("settings.json"), r#"{"device_name":"May","admin_ticket":"toss1xyz"}"#).unwrap();
+        fs::write(
+            data.join("settings.json"),
+            r#"{"device_name":"May","admin_ticket":"toss1xyz"}"#,
+        )
+        .unwrap();
         let out = export_zip(&data, &[("diagnostics.json", b"{}".to_vec())], &dest).unwrap();
         assert!(out.starts_with(&dest));
         let mut z = zip::ZipArchive::new(File::open(&out).unwrap()).unwrap();
-        let mut names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
+        let mut names: Vec<String> = (0..z.len())
+            .map(|i| z.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
         names.sort();
-        assert_eq!(names, ["diagnostics.json", "logs/toss.log", "settings.json"]);
+        assert_eq!(
+            names,
+            ["diagnostics.json", "logs/toss.log", "settings.json"]
+        );
         let mut s = String::new();
-        z.by_name("settings.json").unwrap().read_to_string(&mut s).unwrap();
+        z.by_name("settings.json")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
         assert!(!s.contains("toss1xyz"));
         let _ = fs::remove_dir_all(&data);
         let _ = fs::remove_dir_all(&dest);

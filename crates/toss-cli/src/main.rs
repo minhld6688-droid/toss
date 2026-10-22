@@ -1,6 +1,8 @@
 //! `toss-cli` — thin command line front-end for `toss-core`, for tests on two
 //! real machines. See `contracts/core-api.md`.
 
+mod bench;
+
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -129,6 +131,8 @@ enum Cmd {
         #[arg(long)]
         ticket: Option<String>,
     },
+    /// Loopback benchmark: two nodes in this process, one get; prints JSON.
+    Bench(bench::BenchArgs),
 }
 
 #[derive(Args, Debug)]
@@ -349,6 +353,7 @@ async fn main() -> Result<()> {
             let ticket = ticket.as_deref().map(parse_ticket).transpose()?;
             run_diag(cfg, ticket).await?;
         }
+        Cmd::Bench(args) => bench::run(args).await?,
     }
     Ok(())
 }
@@ -677,11 +682,18 @@ async fn finish_transfer(node: Node, t: toss_core::Transfer, max_wait: u64) -> R
     node.shutdown().await;
     match st.status {
         Status::Done => {
+            // v0.4: final connection path (after any relay -> direct upgrade), RTT and streams;
+            // e2e.yml reads `path=` from this line.
             println!(
-                "done: {} files, {}{}",
+                "done: {} files, {}{} path={} rtt={} streams={}",
                 st.files_total,
                 human(st.bytes_total),
-                st.dest.map(|d| format!(" -> {d}")).unwrap_or_default()
+                st.dest.map(|d| format!(" -> {d}")).unwrap_or_default(),
+                format!("{:?}", st.path).to_lowercase(),
+                st.rtt_ms
+                    .map(|r| format!("{r}ms"))
+                    .unwrap_or_else(|| "?".into()),
+                st.streams,
             );
             Ok(())
         }

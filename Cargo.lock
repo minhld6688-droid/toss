@@ -6381,13 +6381,14 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "toss-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
  "dirs 6.0.0",
  "gethostname",
  "hex",
+ "iroh",
  "serde",
  "serde_json",
  "tokio",
@@ -6397,10 +6398,11 @@ dependencies = [
 
 [[package]]
 name = "toss-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "bytes",
  "data-encoding",
  "dirs 6.0.0",
  "dunce",
@@ -6408,6 +6410,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "n0-future",
+ "noq-proto",
  "parking_lot",
  "portmapper",
  "postcard",
@@ -6423,7 +6426,7 @@ dependencies = [
 
 [[package]]
 name = "toss-desktop"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",

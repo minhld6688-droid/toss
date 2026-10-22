@@ -7,7 +7,7 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::sync::Mutex;
 
 use crate::{
-    host::{issue_ticket, verify_common, MAX_DEVICE},
+    host::{issue_ticket_and_prehash, verify_common, MAX_DEVICE},
     jobs::JobRecord,
     node::{list_dir, Inner},
     ticket::{Ticket, TicketSpec},
@@ -264,13 +264,9 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
                     }
                 }
             }
-            CtlRequest::CreateTicket(spec) => CtlResponse::Ticket(issue_ticket(
-                &inner.secret,
-                &inner.jobs,
-                &rt,
-                spec,
-                &inner.host_addr(),
-            )?),
+            CtlRequest::CreateTicket(spec) => {
+                CtlResponse::Ticket(issue_ticket_and_prehash(&inner, &rt, spec)?)
+            }
             CtlRequest::ListJobs => CtlResponse::Jobs(inner.jobs.list()),
             CtlRequest::Revoke { id } => {
                 inner.jobs.revoke(id)?;

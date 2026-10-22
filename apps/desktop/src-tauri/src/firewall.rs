@@ -139,7 +139,14 @@ fn powershell(script: &str, exe: &str) -> std::io::Result<std::process::Output> 
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
         .env("TOSS_EXE", exe)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -215,7 +222,10 @@ fn osa_escape(s: &str) -> String {
 fn mac_admin_script(app: &str) -> String {
     let q = sh_quote(app);
     let cmd = format!("{SOCKETFILTERFW} --add {q} ; {SOCKETFILTERFW} --unblockapp {q}");
-    format!("do shell script \"{}\" with administrator privileges", osa_escape(&cmd))
+    format!(
+        "do shell script \"{}\" with administrator privileges",
+        osa_escape(&cmd)
+    )
 }
 
 /// `--getglobalstate`: "Firewall is disabled. (State = 0)" → off.
@@ -264,7 +274,10 @@ fn check() -> FirewallState {
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
     };
-    match run(&["--getglobalstate"]).as_deref().and_then(parse_global_state) {
+    match run(&["--getglobalstate"])
+        .as_deref()
+        .and_then(parse_global_state)
+    {
         Some(false) => return FirewallState::Ok,
         Some(true) => {}
         None => return FirewallState::Unknown,
@@ -300,14 +313,24 @@ mod tests {
     #[test]
     fn windows_scripts() {
         let s = win_add_script(r"C:\Users\O'Neil\Toss\Toss.exe", r"C:\Temp\x.txt");
-        assert!(s.contains("-Protocol UDP") && s.contains("-Direction Inbound") && s.contains("-Action Allow"));
-        assert!(s.contains(r"-Program 'C:\Users\O''Neil\Toss\Toss.exe'"), "{s}");
+        assert!(
+            s.contains("-Protocol UDP")
+                && s.contains("-Direction Inbound")
+                && s.contains("-Action Allow")
+        );
+        assert!(
+            s.contains(r"-Program 'C:\Users\O''Neil\Toss\Toss.exe'"),
+            "{s}"
+        );
         assert!(s.contains("Remove-NetFirewallRule -DisplayName 'Toss'"));
         // base64 of UTF-16LE: "A" -> "QQA="
         assert_eq!(encoded_command("A"), "QQA=");
         let l = win_launcher_script("QQA=");
         assert!(l.contains("-Verb RunAs") && l.contains("'QQA='") && l.contains("1223"));
-        assert!(!WIN_CHECK_PS.contains('\n'), "check script must be one line");
+        assert!(
+            !WIN_CHECK_PS.contains('\n'),
+            "check script must be one line"
+        );
         assert_eq!(parse_win_check("ok\r\n"), FirewallState::Ok);
         assert_eq!(parse_win_check("warning\nmissing"), FirewallState::Missing);
         assert_eq!(parse_win_check(""), FirewallState::Unknown);
@@ -316,20 +339,34 @@ mod tests {
     #[test]
     fn mac_script_quotes_the_path() {
         let s = mac_admin_script("/Applications/Toss's \"App\".app");
-        assert!(s.starts_with("do shell script \"") && s.ends_with("with administrator privileges"));
-        assert!(s.contains("--add '/Applications/Toss'\\\\''s \\\"App\\\".app'"), "{s}");
+        assert!(
+            s.starts_with("do shell script \"") && s.ends_with("with administrator privileges")
+        );
+        assert!(
+            s.contains("--add '/Applications/Toss'\\\\''s \\\"App\\\".app'"),
+            "{s}"
+        );
         assert!(s.contains("--unblockapp"));
         assert_eq!(
             app_target(Path::new("/Applications/Toss.app/Contents/MacOS/Toss")),
             PathBuf::from("/Applications/Toss.app")
         );
-        assert_eq!(app_target(Path::new("/tmp/toss")), PathBuf::from("/tmp/toss"));
+        assert_eq!(
+            app_target(Path::new("/tmp/toss")),
+            PathBuf::from("/tmp/toss")
+        );
     }
 
     #[test]
     fn mac_output_parsing() {
-        assert_eq!(parse_global_state("Firewall is disabled. (State = 0)"), Some(false));
-        assert_eq!(parse_global_state("Firewall is enabled. (State = 1)"), Some(true));
+        assert_eq!(
+            parse_global_state("Firewall is disabled. (State = 0)"),
+            Some(false)
+        );
+        assert_eq!(
+            parse_global_state("Firewall is enabled. (State = 1)"),
+            Some(true)
+        );
         assert_eq!(parse_global_state("???"), None);
         assert_eq!(
             parse_app_blocked("Application at path ( /Applications/Toss.app ) is not blocked"),
@@ -344,6 +381,9 @@ mod tests {
 
     #[test]
     fn serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&FirewallState::Missing).unwrap(), "\"missing\"");
+        assert_eq!(
+            serde_json::to_string(&FirewallState::Missing).unwrap(),
+            "\"missing\""
+        );
     }
 }
