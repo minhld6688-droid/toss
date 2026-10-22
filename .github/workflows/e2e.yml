@@ -1,9 +1,20 @@
 name: e2e
 
-# Real-network end-to-end test: a Windows runner acts as the studio host, a macOS
+# Real-network end-to-end test: a Windows runner acts as the studio host, another
 # runner acts as the editor. They find each other through iroh's public discovery
-# and relays (two different Azure VMs behind NAT), transfer a 200 MB job folder
+# and relays (two different Azure VMs behind NAT), transfer a job folder
 # host -> client (get), then client -> host (put), and verify every byte.
+#
+# Two variants run as a matrix (each variant = its own host + client pair, own ticket artifact):
+#   direct      macOS editor, 200 MB. The get must run on a Direct path; MB/s is printed.
+#   relay-only  Ubuntu editor with ALL outbound UDP dropped by iptables (except DNS), 40 MB.
+#               Holepunching cannot work, so the transfer must still finish through the relay
+#               and the path must NOT be Direct. continue-on-error: relay reachability from
+#               the runners is not guaranteed, so a failure here never turns the run red.
+#
+# The path is read from the client log line "connected to host ... path=<Direct|Relay|Mixed>"
+# (tracing, target toss_core). While toss-cli/toss-core do not print it yet, the check only warns;
+# set REQUIRE_PATH to "true" below once they do and the check becomes a hard assertion.
 on:
   workflow_dispatch:
   push:
@@ -18,11 +29,28 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # "true" = a missing "path=" log line fails the job; "false" = only a warning.
+  REQUIRE_PATH: "false"
+
 jobs:
   host:
-    name: host (windows)
+    name: host (windows, ${{ matrix.variant }})
     runs-on: windows-latest
     timeout-minutes: 40
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: direct
+            client_os: macos-latest
+            big_mb: 200
+            experimental: false
+          - variant: relay-only
+            client_os: ubuntu-latest
+            big_mb: 40
+            experimental: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,8 +59,10 @@ jobs:
           key: e2e-host
       - name: Build toss-cli
         run: cargo build --release -p toss-cli
-      - name: Create test data (30 files incl. 200 MB, with checksums)
+      - name: Create test data (30 files incl. one big file, with checksums)
         shell: pwsh
+        env:
+          BIG_MB: ${{ matrix.big_mb }}
         run: |
           $root = "$env:RUNNER_TEMP\root\job1"
           New-Item -ItemType Directory -Force "$root\sub\deep" | Out-Null
@@ -43,8 +73,8 @@ jobs:
             $dir = if ($i % 3 -eq 0) { "$root\sub\deep" } elseif ($i % 2 -eq 0) { "$root\sub" } else { $root }
             [IO.File]::WriteAllBytes("$dir\file_$i.bin", $bytes)
           }
-          $big = New-Object byte[] (200MB); $rng.NextBytes($big)
-          [IO.File]::WriteAllBytes("$root\big_200mb.raw", $big)
+          $big = New-Object byte[] ([int]$env:BIG_MB * 1MB); $rng.NextBytes($big)
+          [IO.File]::WriteAllBytes("$root\big.raw", $big)
           "hello toss" | Set-Content -NoNewline "$root\note.txt"
           Get-ChildItem -Recurse -File $root | ForEach-Object {
             $rel = $_.FullName.Substring($root.Length + 1).Replace('\','/')
@@ -83,7 +113,7 @@ jobs:
       - name: Publish ticket for the client job
         uses: actions/upload-artifact@v4
         with:
-          name: ticket
+          name: ticket-${{ matrix.variant }}
           path: ${{ runner.temp }}/ticket
           retention-days: 1
       - name: Run host and wait for the client to get and put
@@ -126,60 +156,181 @@ jobs:
           "OK: $($sums.Count) files returned identical (put verified)"
 
   client:
-    name: client (macos)
-    runs-on: macos-latest
+    name: client (${{ matrix.client_name }}, ${{ matrix.variant }})
+    runs-on: ${{ matrix.client_os }}
     timeout-minutes: 40
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: direct
+            client_os: macos-latest
+            client_name: macos
+            experimental: false
+            expect: direct
+          - variant: relay-only
+            client_os: ubuntu-latest
+            client_name: ubuntu, direct UDP blocked
+            experimental: true
+            expect: relay
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: e2e-client
+          key: e2e-client-${{ matrix.variant }}
       - name: Build toss-cli
         run: cargo build --release -p toss-cli
+      - name: Shell helpers (path + speed from the CLI output)
+        run: |
+          cat > "$RUNNER_TEMP/lib.sh" <<'LIB'
+          # sha256 of a file on macOS (shasum) and Linux (sha256sum)
+          sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+
+          # strip ANSI colors that tracing may add
+          clean() { perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$1" > "$2"; }
+
+          # connection path of a transfer log: direct | relay | mixed | unknown | none
+          # Source: tracing line "connected to host ... path=Direct" (last one wins).
+          # Fallback: any "path=<word>" token. "none" = the log does not say.
+          path_of() {
+            p=$(grep -E 'connected to host.*path=' "$1" | tail -1 | sed -E 's/.*path="?([A-Za-z_]+).*/\1/' | tr 'A-Z' 'a-z')
+            if [ -z "$p" ]; then
+              p=$(grep -oE 'path=(Direct|Relay|Mixed|Unknown|direct|relay|mixed|unknown)' "$1" | tail -1 | sed -E 's/path=//' | tr 'A-Z' 'a-z')
+            fi
+            echo "${p:-none}"
+          }
+
+          # print "<bytes> <seconds>" from the final "<id> done N files B B in Ns" event line
+          done_stats() {
+            grep -E ' done [0-9]+ files [0-9]+ B in [0-9]+s' "$1" | tail -1 \
+              | sed -E 's/.* done [0-9]+ files ([0-9]+) B in ([0-9]+)s.*/\1 \2/'
+          }
+
+          # report <label> <log> <wall-seconds>: prints speed + path, appends to the step summary,
+          # sets globals PATH_SEEN and MBPS
+          report() {
+            label="$1"; log="$2"; wall="$3"
+            stats=$(done_stats "$log" || true)
+            bytes=${stats%% *}; secs=${stats##* }
+            if [ -z "$stats" ]; then bytes=0; secs=$wall; fi
+            [ "${secs:-0}" -lt 1 ] && secs=$(( wall < 1 ? 1 : wall ))
+            MBPS=$(awk -v b="$bytes" -v s="$secs" 'BEGIN { printf "%.1f", b / 1000000 / s }')
+            PATH_SEEN=$(path_of "$log")
+            echo "$label: $bytes bytes in ${secs}s = ${MBPS} MB/s, path=${PATH_SEEN} (wall ${wall}s)"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              echo "- **${VARIANT}** ${label}: $(( bytes / 1000000 )) MB in ${secs} s = **${MBPS} MB/s**, path **${PATH_SEEN}**" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if grep -q 'still on relay after' "$log"; then
+              echo "note: still on relay after 10s was logged:"; grep 'still on relay after' "$log" | tail -2
+            fi
+          }
+
+          # assert_path <expect: direct|relay> <seen>
+          assert_path() {
+            expect="$1"; seen="$2"
+            case "$seen" in
+              none)
+                if [ "${REQUIRE_PATH:-false}" = "true" ]; then
+                  echo "::error::the client log has no 'connected to host ... path=' line, cannot tell Direct from Relay"; return 1
+                fi
+                echo "::warning::path not reported by toss-cli/toss-core (no 'connected to host ... path=' line); ${expect} not asserted"
+                return 0 ;;
+            esac
+            if [ "$expect" = "direct" ]; then
+              if [ "$seen" = "direct" ]; then echo "OK: ran on Direct"; return 0; fi
+              echo "::error::expected a Direct path but the transfer ran on: $seen"; return 1
+            fi
+            # expect relay: must have used the relay, direct UDP is blocked
+            if [ "$seen" = "direct" ]; then
+              echo "::error::path is Direct although outbound UDP is blocked: the block is not effective"; return 1
+            fi
+            echo "OK: finished without a direct path ($seen)"; return 0
+          }
+          LIB
+          echo "helpers written to $RUNNER_TEMP/lib.sh"
       - name: Wait for the host's ticket
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           for i in $(seq 1 90); do
-            if gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n ticket -D "$RUNNER_TEMP/ticket" 2>/dev/null; then break; fi
+            if gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n "ticket-${{ matrix.variant }}" -D "$RUNNER_TEMP/ticket" 2>/dev/null; then break; fi
             sleep 10
           done
           test -s "$RUNNER_TEMP/ticket/ticket.txt" || { echo "ticket never appeared"; exit 1; }
           echo "ticket: $(cut -c1-24 "$RUNNER_TEMP/ticket/ticket.txt")… ($(wc -c < "$RUNNER_TEMP/ticket/ticket.txt") chars)"
+      - name: Block outbound direct UDP (relay-only variant)
+        if: matrix.variant == 'relay-only'
+        run: |
+          # Holepunching and direct QUIC are UDP; relays are HTTPS (TCP). Drop every outbound
+          # UDP packet except loopback and DNS, for IPv4 and IPv6. iptables is robust on the
+          # Ubuntu runner (macOS pf needs interface names and a reloaded ruleset).
+          for ipt in iptables ip6tables; do
+            sudo $ipt -I OUTPUT 1 -o lo -j ACCEPT
+            sudo $ipt -I OUTPUT 2 -p udp --dport 53 -j ACCEPT
+            sudo $ipt -I OUTPUT 3 -p udp -j DROP
+            sudo $ipt -S OUTPUT
+          done
+          # sanity: a UDP datagram to a public address must not get through the firewall
+          # (the send itself succeeds locally; the rule counter must increase)
+          before=$(sudo iptables -L OUTPUT -n -v -x | awk '/DROP.*udp/{print $1; exit}')
+          python3 - <<'PY'
+          import socket
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          for _ in range(3):
+              s.sendto(b"x", ("8.8.8.8", 41820))
+          PY
+          after=$(sudo iptables -L OUTPUT -n -v -x | awk '/DROP.*udp/{print $1; exit}')
+          echo "UDP DROP rule packets: before=$before after=$after"
+          test "${after:-0}" -gt "${before:-0}" || { echo "::error::the UDP block is not matching traffic"; exit 1; }
       - name: Get the job folder from the host
         env:
           RUST_LOG: info,toss_core=debug,iroh=info
+          NO_COLOR: "1"
+          VARIANT: ${{ matrix.variant }}
         run: |
+          set +e -u -o pipefail   # handle the exit codes ourselves (the default shell has -e)
+          . "$RUNNER_TEMP/lib.sh"
           T=$(cat "$RUNNER_TEMP/ticket/ticket.txt")
           mkdir -p "$RUNNER_TEMP/dl"
           start=$(date +%s)
-          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client --max-wait 600 get "$T" --dest "$RUNNER_TEMP/dl" 2>&1 | tee "$RUNNER_TEMP/get.err"
-          test "${PIPESTATUS[0]}" -eq 0
+          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client --max-wait 600 get "$T" --dest "$RUNNER_TEMP/dl" 2>&1 | tee "$RUNNER_TEMP/get.raw"
+          rc=${PIPESTATUS[0]}
           end=$(date +%s)
-          echo "get took $((end-start)) s"
-          grep -oE "(Direct|Relay|Mixed|Unknown)" "$RUNNER_TEMP/get.err" | sort | uniq -c
+          clean "$RUNNER_TEMP/get.raw" "$RUNNER_TEMP/get.err"
+          test "$rc" -eq 0 || { echo "::error::get failed (exit $rc)"; exit 1; }
+          report get "$RUNNER_TEMP/get.err" $((end-start))
+          assert_path "${{ matrix.expect }}" "$PATH_SEEN"
       - name: Verify received files byte-for-byte
         run: |
+          . "$RUNNER_TEMP/lib.sh"
           cd "$RUNNER_TEMP/dl/e2e"
-          find . -type f | sed 's|^\./||' | sort | while read f; do echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  $f"; done > "$RUNNER_TEMP/client-sums.txt"
+          find . -type f | sed 's|^\./||' | sort | while read -r f; do echo "$(sha "$f")  $f"; done > "$RUNNER_TEMP/client-sums.txt"
           if ! diff <(tr -d '\r' < "$RUNNER_TEMP/ticket/host-sums.txt" | sort) <(sort "$RUNNER_TEMP/client-sums.txt"); then echo "received files differ"; exit 1; fi
           echo "OK: $(wc -l < "$RUNNER_TEMP/client-sums.txt") files received identical (get verified)"
       - name: Put the folder back to the host
         env:
           RUST_LOG: info,toss_core=debug,iroh=info
+          NO_COLOR: "1"
+          VARIANT: ${{ matrix.variant }}
         run: |
+          set +e -u -o pipefail   # handle the exit codes ourselves (the default shell has -e)
+          . "$RUNNER_TEMP/lib.sh"
           T=$(cat "$RUNNER_TEMP/ticket/ticket.txt")
           start=$(date +%s)
-          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client --max-wait 600 put "$T" "$RUNNER_TEMP/dl/e2e" 2>&1 | tee "$RUNNER_TEMP/put.err"
-          test "${PIPESTATUS[0]}" -eq 0
+          target/release/toss-cli --data-dir "$RUNNER_TEMP/cdata" --name ci-client --max-wait 600 put "$T" "$RUNNER_TEMP/dl/e2e" 2>&1 | tee "$RUNNER_TEMP/put.raw"
+          rc=${PIPESTATUS[0]}
           end=$(date +%s)
-          echo "put took $((end-start)) s"
+          clean "$RUNNER_TEMP/put.raw" "$RUNNER_TEMP/put.err"
+          test "$rc" -eq 0 || { echo "::error::put failed (exit $rc)"; exit 1; }
+          report put "$RUNNER_TEMP/put.err" $((end-start))
+          assert_path "${{ matrix.expect }}" "$PATH_SEEN"
       - name: Upload client logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: client-logs
+          name: client-logs-${{ matrix.variant }}
           path: |
             ${{ runner.temp }}/get.err
             ${{ runner.temp }}/put.err

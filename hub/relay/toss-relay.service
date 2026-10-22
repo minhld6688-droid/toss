@@ -1,0 +1,33 @@
+[Unit]
+Description=Toss relay (iroh-relay 1.4.1)
+Documentation=https://github.com/minhld6688-droid/toss/tree/main/hub/relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=toss-relay
+Group=toss-relay
+ExecStart=/usr/local/bin/iroh-relay --config-path /etc/toss-relay/relay.toml
+Environment=RUST_LOG=info
+Restart=always
+RestartSec=3
+# Let's Encrypt cache lives in /var/lib/toss-relay (created and owned by systemd)
+StateDirectory=toss-relay
+# Bind ports 80/443 as a normal user
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LimitNOFILE=1048576
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

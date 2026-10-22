@@ -1,0 +1,14 @@
+# Toss relay allow-list. Copy to /etc/toss-relay/allowed.txt
+#
+# One endpoint id per line: 64 lowercase hex characters. Text after # is ignored.
+# No ids at all (or file missing) = relay is OPEN: anyone who knows the URL can
+# use it (rate limits in relay.toml still apply).
+# With at least one id = ONLY these devices may use the relay. Add the studio
+# host AND every editor, otherwise that editor silently falls back to n0's relay.
+#
+# Get a full id on a device:  toss-cli id        (first column)
+# (The Toss app only shows a shortened id.)
+#
+# After editing run:  sudo /opt/toss-relay/update-allowed.sh
+#
+# 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # may tong

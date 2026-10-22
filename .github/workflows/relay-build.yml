@@ -1,0 +1,99 @@
+name: relay-build
+
+# Builds the iroh-relay binary used by hub/relay/install.sh on ubuntu-22.04 (glibc 2.35,
+# runs on Ubuntu 22.04 and 24.04 VPS) so the owner does not have to compile for 10+ minutes
+# on a small VPS. Manual only. Result: workflow artifact, and optionally a GitHub release.
+#
+#   gh workflow run relay-build.yml -f publish=true
+#   -> release "relay-iroh-relay-1.4.1" with asset iroh-relay-linux-x86_64 (+ .sha256)
+#   sudo TOSS_RELAY_BIN_URL=<asset url> TOSS_RELAY_BIN_SHA256=<hash> ./install.sh relay.example.vn me@example.vn
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: iroh-relay crate version (must match the iroh version Toss uses)
+        required: true
+        default: "1.4.1"
+        type: string
+      publish:
+        description: Also attach the binary to a GitHub release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build iroh-relay
+        run: |
+          set -euo pipefail
+          cargo install iroh-relay --version "$VERSION" --features server --locked --root "$RUNNER_TEMP/out"
+          mkdir -p dist
+          cp "$RUNNER_TEMP/out/bin/iroh-relay" dist/iroh-relay-linux-x86_64
+          strip dist/iroh-relay-linux-x86_64 || true
+          (cd dist && sha256sum iroh-relay-linux-x86_64 | tee iroh-relay-linux-x86_64.sha256)
+          ./dist/iroh-relay-linux-x86_64 --version
+          ./dist/iroh-relay-linux-x86_64 --help | head -20
+      - name: Smoke test with the real config template (allow-list, manual cert, high ports)
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/rt"; mkdir -p "$T/etc"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/default.key" -out "$T/default.crt" \
+            -days 1 -subj /CN=localhost -addext subjectAltName=DNS:localhost
+          # a valid endpoint id = hex of a real ed25519 public key
+          openssl genpkey -algorithm ed25519 -out "$T/id.pem"
+          id=$(openssl pkey -in "$T/id.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          echo "test endpoint id: $id"
+          printf 'RELAY_DOMAIN=relay.example.vn\nCONTACT_EMAIL=ci@example.com\n' > "$T/etc/relay.env"
+          echo "$id  # ci" > "$T/etc/allowed.txt"
+          TOSS_RELAY_CONF_DIR="$T/etc" TOSS_RELAY_TEMPLATE="$PWD/hub/relay/relay.toml.in" \
+            hub/relay/update-allowed.sh --no-restart
+          # Only what a non-root CI box needs differs from production: ports, and a manual cert
+          # instead of Let's Encrypt (no public DNS here). Everything else is the shipped template.
+          sed -i \
+            -e 's|^http_bind_addr = .*|http_bind_addr = "127.0.0.1:8080"|' \
+            -e 's|^https_bind_addr = .*|https_bind_addr = "127.0.0.1:8443"|' \
+            -e 's|^quic_bind_addr = .*|quic_bind_addr = "127.0.0.1:17842"|' \
+            -e 's|^metrics_bind_addr = .*|metrics_bind_addr = "127.0.0.1:19090"|' \
+            -e 's|^cert_mode = .*|cert_mode = "Manual"|' \
+            -e "s|^cert_dir = .*|cert_dir = \"$T\"|" \
+            "$T/etc/relay.toml"
+          cat "$T/etc/relay.toml"
+          ./dist/iroh-relay-linux-x86_64 --config-path "$T/etc/relay.toml" > "$T/relay.log" 2>&1 &
+          pid=$!
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsSk https://127.0.0.1:8443/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          cat "$T/relay.log" || true
+          if [ "$ok" != 1 ]; then kill "$pid" 2>/dev/null || true; echo "::error::relay did not start with the shipped config"; exit 1; fi
+          curl -fsSk -o /dev/null -w 'generate_204 -> %{http_code}\n' https://127.0.0.1:8443/generate_204
+          curl -fsS http://127.0.0.1:19090/metrics | head -5
+          ss -ulnH | grep ':17842' || { kill "$pid"; echo "::error::QUIC address discovery port not listening"; exit 1; }
+          kill "$pid"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iroh-relay-linux-x86_64
+          path: dist/*
+          retention-days: 30
+      - name: Publish release asset
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="relay-iroh-relay-$VERSION"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "Toss relay binary (iroh-relay $VERSION)" \
+            --notes "Prebuilt iroh-relay $VERSION for hub/relay/install.sh (Linux x86_64, glibc 2.35+)."
+          gh release upload "$tag" dist/iroh-relay-linux-x86_64 dist/iroh-relay-linux-x86_64.sha256 --clobber
+          echo "Asset: https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/iroh-relay-linux-x86_64"

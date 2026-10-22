@@ -1,0 +1,50 @@
+# Toss relay - iroh-relay 1.4.1 config TEMPLATE.
+# Do not edit /etc/toss-relay/relay.toml by hand: it is regenerated from this
+# template by update-allowed.sh (install.sh calls it). The upper-case words
+# between two at-signs are filled in from /etc/toss-relay/relay.env and
+# /etc/toss-relay/allowed.txt.
+#
+# Keys verified against iroh-relay 1.4.1 (src/main.rs, struct Config).
+# NOTE: top-level scalar keys (access, enable_*, *_bind_addr) MUST stay above
+# the first [table] header, otherwise TOML puts them inside that table.
+
+# Who may use the relay.
+#   open      -> access = "everyone"
+#   allowlist -> access.allowlist = ["<endpoint id>", ...]   (from allowed.txt)
+@ACCESS@
+
+# Relay HTTP(S) services. HTTPS (/relay websocket, /ping, /generate_204,
+# /healthz) listens on 443; plain HTTP on 80 only serves the landing page.
+http_bind_addr = "[::]:80"
+
+# QUIC address discovery (QAD): replaces STUN in iroh 1.x. Toss clients probe
+# UDP 7842 of the relay to learn their public address. Needs UDP 7842 open.
+enable_quic_addr_discovery = true
+
+# Prometheus metrics, localhost only (never expose this port).
+enable_metrics = true
+metrics_bind_addr = "127.0.0.1:9090"
+
+[tls]
+https_bind_addr = "[::]:443"
+quic_bind_addr = "[::]:7842"
+# Built-in ACME client (Let's Encrypt, TLS-ALPN-01 on port 443): the relay gets
+# and renews its own certificate. No certbot needed. Certs are cached in cert_dir.
+cert_mode = "LetsEncrypt"
+hostname = "@DOMAIN@"
+contact = "@CONTACT_EMAIL@"
+prod_tls = @PROD_TLS@
+cert_dir = "/var/lib/toss-relay/certs"
+
+# Abuse protection. The per-client limit applies to data RECEIVED from one
+# client (token bucket). 52428800 B/s = 50 MB/s = 400 Mbit/s: far above what a
+# VPS uplink gives one client, so it only stops a runaway client. Raise it, or
+# delete the [limits.client.rx] table, if you have a fat pipe.
+[limits]
+# New connections accepted per second, with a burst allowance.
+accept_conn_limit = 50.0
+accept_conn_burst = 200
+
+[limits.client.rx]
+bytes_per_second = @RATE_BPS@
+max_burst_bytes = 16777216
