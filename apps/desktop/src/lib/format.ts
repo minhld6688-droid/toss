@@ -45,3 +45,8 @@ export function baseName(p: string): string {
   const parts = p.split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] ?? p;
 }
+
+/** "abcdefghij…uvwxyz": keep the head and the tail of a long string (paths, links, tickets). */
+export function midTruncate(s: string, head = 24, tail = 10): string {
+  return s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(s.length - tail)}`;
+}

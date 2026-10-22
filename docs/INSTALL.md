@@ -55,6 +55,14 @@ Tải bản mới nhất ở trang Releases của dự án:
 
 Trên máy tổng: chọn folder gốc + đường dẫn con, đặt tên job, chọn quyền **nhận (get)** và/hoặc **gửi (put)** và thời hạn, bấm tạo. Toss cho ra link web và mã QR. Gửi link cho editor qua Zalo/Telegram/email. Ai có link là dùng được, nên đặt thời hạn ngắn và thu hồi (revoke) khi xong job.
 
+### Chia sẻ nhanh bằng chuột phải: "Tạo link Toss" (v0.3)
+
+Máy nào cài Toss cũng chia sẻ được một folder mà không cần khai folder gốc: **chuột phải vào folder → Tạo link Toss**. Toss mở màn hình Chia sẻ, tạo link nhận folder đó, **tự copy link vào clipboard** và báo "Đã copy link Toss cho <folder>". Dán link vào Zalo/Telegram là xong. Nếu chế độ máy tổng đang tắt, Toss tự bật nó (file gửi ngược về nằm trong `<folder nhận>/Tra-ve`) và tự tắt lại khi bạn gỡ chia sẻ cuối cùng. Folder đã chia sẻ vẫn chạy sau khi khởi động lại máy; gỡ chia sẻ sẽ thu hồi mọi link của folder đó.
+
+- **Windows**: mục **Tạo link Toss** có khi chuột phải vào một folder, và khi chuột phải vào chỗ trống bên trong một folder. Trên Windows 11 menu rút gọn không hiện mục này: bấm **Show more options** (hoặc giữ `Shift` khi chuột phải). Mục được ghi cho tài khoản Windows hiện tại (không cần quyền Administrator) và bị xoá khi gỡ Toss.
+- **Mac**: mục nằm trong **chuột phải → Quick Actions → Tạo link Toss** (và trong menu **Finder → Services**). Lần đầu dùng, macOS có thể hỏi cho phép chạy, chọn **Allow/Cho phép**. Nếu chưa thấy mục: System Settings → Keyboard → Keyboard Shortcuts → Services (hoặc System Settings → Privacy & Security → Extensions → Finder) và bật **Tạo link Toss**. Bản Quick Action nằm ở `~/Library/Services/Tạo link Toss.workflow`.
+- Tắt/bật mục này trong phần **Cài đặt** của Toss. Toss ghi lại mục này mỗi lần mở, nên chuyển Toss sang chỗ khác hoặc cài lại cũng không cần làm gì.
+
 Có thể tạo link từ xa: tạo một **admin ticket** trên máy tổng và dán vào Toss trên máy tin cậy của bạn để tạo link job mà không cần ngồi ở studio.
 
 ### Cổng UDP (tuỳ chọn, nâng cao)

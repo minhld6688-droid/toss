@@ -3,7 +3,9 @@
 mod commands;
 pub mod config;
 mod core;
+mod ctxmenu;
 mod ipc;
+mod services;
 mod settings;
 mod shell;
 
@@ -25,8 +27,9 @@ pub fn run() {
     let setup_core = core.clone();
     let app = tauri::Builder::default()
         // single-instance must be registered first: forwards argv (deep links on Windows/Linux).
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            let handled = shell::handle_args(app, &argv);
+        // Also carries `--share <folder>` from the right-click menu.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let handled = shell::handle_args(app, &argv, std::path::Path::new(&cwd));
             if !handled && !argv.iter().any(|a| a == HIDDEN_FLAG) {
                 shell::show_main(app);
             }
@@ -75,6 +78,11 @@ pub fn run() {
             commands::qr_svg,
             commands::copy_text,
             commands::ui_ready,
+            commands::share_folder,
+            commands::list_quick_shares,
+            commands::remove_quick_share,
+            commands::set_context_menu,
+            commands::set_auto_receive,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -112,7 +120,17 @@ pub fn run() {
                 }
             }
             let argv: Vec<String> = std::env::args().collect();
-            shell::handle_args(&handle, &argv);
+            let cwd = std::env::current_dir().unwrap_or_default();
+            shell::handle_args(&handle, &argv, &cwd);
+
+            // Right-click "Tạo link Toss": (re)apply the saved choice, idempotent
+            // (also repairs the entry after the app moved / was reinstalled).
+            let menu_on = setup_core.settings().context_menu;
+            std::thread::spawn(move || {
+                if let Err(e) = ctxmenu::apply(menu_on) {
+                    tracing::warn!("context menu ({menu_on}): {e:#}");
+                }
+            });
 
             shell::build_tray(&handle)?;
 

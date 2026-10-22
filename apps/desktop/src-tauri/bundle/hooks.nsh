@@ -21,6 +21,10 @@
 !macro NSIS_HOOK_PREUNINSTALL
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Toss"'
   Pop $0
+  ; Right-click "Tao link Toss" (v0.3): written per user by Toss itself
+  ; (src-tauri/src/ctxmenu.rs, WIN_KEYS). Removed for the user running the uninstaller.
+  DeleteRegKey HKCU "Software\Classes\Directory\shell\Toss"
+  DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\Toss"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

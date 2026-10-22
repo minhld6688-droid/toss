@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { HostConfig, HostStatus, TicketInfo } from "../lib/ipc-types";
 import { api, errorMessage, isMock } from "../lib/ipc";
-import { shortId } from "../lib/format";
+import { midTruncate, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Icon, Nest, Row, Section, Toggle } from "../components/ui";
 import { LinkMaker, LinkBackend } from "../components/LinkMaker";
@@ -55,6 +55,79 @@ function DeviceSection() {
         </div>
       </div>
     </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+function ShareSection() {
+  const app = useStore((s) => s.app)!;
+  const toast = useStore((s) => s.toast);
+  const patch = useStore((s) => s.patchApp);
+  const openShare = useStore((s) => s.openShare);
+  const rev = useStore((s) => s.sharesRev);
+  const refreshApp = useRefreshApp();
+  const [shares, setShares] = useState<{ alias: string; path: string; job_id: string | null }[] | null>(null);
+  const [confirm, setConfirm] = useState<string | null>(null);
+
+  const guard = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { toast(errorMessage(e), "error"); } };
+  const load = useCallback(async () => {
+    try { setShares(await api.list_quick_shares()); } catch (e) { setShares([]); toast(errorMessage(e), "error"); }
+  }, [toast]);
+  useEffect(() => { void load(); }, [load, rev]);
+  useEffect(() => {
+    if (!confirm) return;
+    const t = window.setTimeout(() => setConfirm(null), 3000);
+    return () => window.clearTimeout(t);
+  }, [confirm]);
+
+  async function remove(alias: string) {
+    if (confirm !== alias) { setConfirm(alias); return; }
+    setConfirm(null);
+    await guard(async () => { await api.remove_quick_share({ alias }); await load(); await refreshApp(); toast("Đã gỡ chia sẻ"); });
+  }
+
+  return (
+    <>
+      <Section title="Nhận & chia sẻ">
+        <Row title="Tự động nhận khi bấm link" hint="Bấm link có quyền nhận là tải ngay">
+          <Toggle on={app.auto_receive} label="Tự động nhận khi bấm link" onChange={(on) => guard(async () => { await api.set_auto_receive({ on }); patch({ auto_receive: on }); })} />
+        </Row>
+        <Row title="Menu chuột phải: Tạo link Toss" hint="Chuột phải vào folder để tạo link chia sẻ">
+          <Toggle on={app.context_menu} label="Menu chuột phải: Tạo link Toss" onChange={(on) => guard(async () => { await api.set_context_menu({ on }); patch({ context_menu: on }); })} />
+        </Row>
+      </Section>
+
+      <Section
+        title="Folder đang chia sẻ"
+        right={<button className="btn btn-ghost !h-7 !px-2.5 !text-xs -mt-1" onClick={() => guard(async () => {
+          const p = await api.pick_folder({ title: "Chọn folder để chia sẻ" });
+          if (p) openShare(p);
+        })}><Icon name="plus" className="w-3.5 h-3.5" />Chia sẻ…</button>}
+      >
+        {shares === null ? (
+          <div className="text-sm text-mute">Đang tải…</div>
+        ) : shares.length === 0 ? (
+          <div className="text-sm text-mute">Chưa chia sẻ folder nào. Chuột phải vào một folder và chọn “Tạo link Toss”, hoặc bấm “Chia sẻ…”.</div>
+        ) : (
+          <ul className="divide-y divide-line/10 -my-1">
+            {shares.map((s) => (
+              <li key={s.alias} className="flex items-center gap-2.5 py-2.5">
+                <span className="grid place-items-center w-8 h-8 rounded-full shrink-0 bg-accent/15 text-accent"><Icon name="folder" className="w-4 h-4" weight="bold" /></span>
+                <div className="min-w-0 flex-1">
+                  <div className="mono text-xs text-ink selectable whitespace-nowrap overflow-hidden" title={s.path}>{midTruncate(s.path, 8, 18)}</div>
+                  <div className="text-xs text-mute">{s.job_id ? <>Job <span className="mono selectable">{shortId(s.job_id, 8)}</span></> : "Chưa có link"}</div>
+                </div>
+                <button
+                  className={`btn btn-ghost btn-danger shrink-0 !h-8 ${confirm === s.alias ? "!bg-bad/10" : ""}`}
+                  onClick={() => void remove(s.alias)}
+                  title="Thu hồi link và ngừng chia sẻ folder này"
+                >{confirm === s.alias ? "Bấm lại để gỡ" : "Gỡ"}</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+    </>
   );
 }
 
@@ -321,6 +394,7 @@ export function Settings() {
     <div className="p-4">
       <h1 className="text-2xl font-semibold tracking-tight mb-4">Cài đặt</h1>
       <DeviceSection />
+      <ShareSection />
       <HostEditor />
       {app.host && <LocalHostTools />}
       <RemoteSection />

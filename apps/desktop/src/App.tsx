@@ -5,6 +5,7 @@ import { Home } from "./screens/Home";
 import { Transfers } from "./screens/Transfers";
 import { Settings } from "./screens/Settings";
 import { TicketSheet } from "./components/TicketSheet";
+import { ShareAsk, ShareView } from "./components/ShareView";
 import { Wizard } from "./components/Wizard";
 import { AnimatePresence, Icon } from "./components/ui";
 
@@ -22,6 +23,8 @@ export default function App() {
   const toasts = useStore((s) => s.toasts);
   const dropHover = useStore((s) => s.dropHover);
   const sheet = useStore((s) => s.sheet);
+  const share = useStore((s) => s.share);
+  const shareAsk = useStore((s) => s.shareAsk);
 
   useEffect(() => {
     const st = useStore.getState();
@@ -36,7 +39,9 @@ export default function App() {
       const reg = async (p: Promise<() => void>) => { const off = await p; if (dead) off(); else offs.push(off); };
       await reg(on("transfer:event", (ev) => useStore.getState().applyEvent(ev)));
       await reg(on("host:status", (h) => useStore.getState().setHostStatus(h)));
-      await reg(on("deep-link", ({ ticket }) => { void useStore.getState().openTicket(ticket); }));
+      await reg(on("deep-link", ({ ticket }) => { void useStore.getState().receiveLink(ticket); }));
+      await reg(on("share", ({ path }) => useStore.getState().openShare(path)));
+      await reg(on("share:error", ({ msg }) => useStore.getState().toast(msg, "error")));
       await reg(on("navigate", ({ screen }) => useStore.getState().setScreen(screen)));
       await reg(on("drop:hover", ({ on: v }) => useStore.getState().setDropHover(v)));
       await reg(on("drop", ({ paths }) => {
@@ -47,6 +52,9 @@ export default function App() {
           api.start_put({ ticket: sheet.ticket, paths })
             .then(async () => { await s.refreshTransfers(); s.closeSheet(); s.setScreen("transfers"); s.toast("Đang trả file…"); })
             .catch((e) => s.toast(errorMessage(e), "error"));
+        } else if (!sheet && !s.share && paths.length > 0) {
+          // no ticket selected, not in a put flow: offer to share the dropped folder
+          s.askShare(paths[0]);
         } else {
           s.toast("Mở link trả hàng trước, rồi kéo folder vào");
         }
@@ -97,12 +105,14 @@ export default function App() {
       </nav>
 
       <AnimatePresence>{sheet && <TicketSheet key="sheet" info={sheet} />}</AnimatePresence>
+      <AnimatePresence>{shareAsk && !share && <ShareAsk key="share-ask" path={shareAsk} />}</AnimatePresence>
+      <AnimatePresence>{share && <ShareView key={share.nonce} path={share.path} />}</AnimatePresence>
       {app.first_run && <Wizard />}
 
-      {dropHover && !sheet && (
+      {dropHover && !sheet && !share && (
         <div className="fixed inset-0 z-20 pointer-events-none grid place-items-center bg-accent/10">
           <div className="absolute inset-3 rounded-[24px] border-2 border-dashed border-accent/70" />
-          <div className="glass rounded-full px-5 py-2.5 text-base font-medium">Thả để trả file</div>
+          <div className="glass rounded-full px-5 py-2.5 text-base font-medium">Thả để chia sẻ folder</div>
         </div>
       )}
 

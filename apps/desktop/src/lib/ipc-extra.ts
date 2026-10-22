@@ -15,4 +15,6 @@ export type ExtraEvents = {
   navigate: { screen: "home" | "transfers" | "settings" };
   /** OS drag is hovering over the window (true) or left it (false). */
   "drop:hover": { on: boolean };
+  /** the shell could not start a right-click share (bad path, no access…): show `msg` as a toast. */
+  "share:error": { msg: string };
 };

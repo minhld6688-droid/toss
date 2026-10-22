@@ -11,6 +11,8 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
   const toast = useStore((s) => s.toast);
   const refresh = useStore((s) => s.refreshTransfers);
   const dropHover = useStore((s) => s.dropHover);
+  const note = useStore((s) => s.sheetNote);
+  const doneDest = useStore((s) => Object.values(s.transfers).find((t) => t.op === "get" && t.status === "done" && t.job === info.job && t.dest)?.dest ?? null);
   const [busy, setBusy] = useState(false);
   const exp = fmtExpiry(info.exp);
 
@@ -71,10 +73,18 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
 
       {exp.expired && <div className="rounded-[12px] bg-bad/10 text-bad text-sm px-3 py-2 mb-3">Link đã hết hạn. Nhờ máy tổng tạo link mới.</div>}
 
+      {note && (
+        <div className={`rounded-[12px] text-sm px-3 py-2 mb-3 ${note.kind === "error" ? "bg-bad/10 text-bad" : "bg-ok/10 text-ok"}`}>{note.text}</div>
+      )}
+
       {info.get && (
         <button className="btn btn-primary btn-lg w-full" disabled={busy || exp.expired} onClick={doGet}>
-          Nhận<Nest name="down" />
+          {note?.kind === "exists" ? "Tải lại" : "Nhận"}<Nest name={note?.kind === "exists" ? "refresh" : "down"} />
         </button>
+      )}
+
+      {note?.kind === "exists" && doneDest && (
+        <button className="btn w-full mt-2" onClick={() => api.open_path({ path: doneDest }).catch((e) => toast(errorMessage(e), "error"))}><Icon name="folder" />Mở folder</button>
       )}
 
       {info.put && (

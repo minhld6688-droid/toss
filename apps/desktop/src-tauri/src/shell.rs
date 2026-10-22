@@ -1,9 +1,12 @@
 //! Window / tray / deep-link plumbing around the Tauri app.
 
 use std::{
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+use serde_json::{json, Value};
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -12,15 +15,19 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt as _;
 
-use crate::{config, core::Core};
+use crate::{config, core::Core, ctxmenu::SHARE_FLAG};
 
 /// Max size of a `.toss` file we are willing to read (a ticket is ~330 chars).
 const MAX_TOSS_FILE: u64 = 64 * 1024;
 
+/// An event for the UI: (name, payload).
+type Event = (&'static str, Value);
+
 #[derive(Default)]
 pub struct Shell {
-    /// UI readiness and the deep links queued until then, under one lock so a
-    /// link arriving while the UI becomes ready is neither lost nor sent twice.
+    /// UI readiness and the events (`deep-link`, `share`, `share:error`) queued until
+    /// then, under one lock so an event arriving while the UI becomes ready is neither
+    /// lost nor sent twice.
     queue: Mutex<Queue>,
     last: Mutex<Option<(String, Instant)>>,
 }
@@ -28,35 +35,35 @@ pub struct Shell {
 #[derive(Default)]
 struct Queue {
     ui_ready: bool,
-    pending: Vec<String>,
+    pending: Vec<Event>,
 }
 
 impl Shell {
-    /// The UI registered its listeners: flush deep links that arrived during startup.
+    /// The UI registered its listeners: flush events that arrived during startup.
     pub fn mark_ready(&self, app: &AppHandle) {
-        for t in self.take_ready() {
-            let _ = app.emit("deep-link", serde_json::json!({ "ticket": t }));
+        for (name, payload) in self.take_ready() {
+            let _ = app.emit(name, payload);
         }
     }
 
-    /// Marks the UI ready and returns the queued tickets to emit.
-    fn take_ready(&self) -> Vec<String> {
+    /// Marks the UI ready and returns the queued events to emit, in order.
+    fn take_ready(&self) -> Vec<Event> {
         let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         q.ui_ready = true;
         std::mem::take(&mut q.pending)
     }
 
-    /// Queues `ticket` unless the UI is ready; true = emit it now.
-    fn offer(&self, ticket: &str) -> bool {
+    /// Queues the event unless the UI is ready; true = emit it now.
+    fn offer(&self, name: &'static str, payload: &Value) -> bool {
         let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         if !q.ui_ready {
-            q.pending.push(ticket.to_string());
+            q.pending.push((name, payload.clone()));
         }
         q.ui_ready
     }
 
-    /// False if the same ticket was delivered less than 2 s ago (argv and the
-    /// deep-link plugin both report the link that launched the app).
+    /// False if the same key (ticket, share path) was delivered less than 2 s ago
+    /// (argv and the deep-link plugin both report the link that launched the app).
     fn first_delivery(&self, ticket: &str) -> bool {
         let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((t, at)) = last.as_ref() {
@@ -77,16 +84,84 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// Emit `name` now, or queue it until the UI is ready.
+fn deliver(app: &AppHandle, name: &'static str, payload: Value) {
+    if app.state::<Shell>().offer(name, &payload) {
+        let _ = app.emit(name, payload);
+    }
+}
+
 /// Hand a ticket (or `toss://` URL body) to the UI, queueing it until the UI is ready.
 pub fn deliver_ticket(app: &AppHandle, ticket: String) {
-    let shell = app.state::<Shell>();
-    if !shell.first_delivery(&ticket) {
+    if !app.state::<Shell>().first_delivery(&ticket) {
         return;
     }
     show_main(app);
-    if shell.offer(&ticket) {
-        let _ = app.emit("deep-link", serde_json::json!({ "ticket": ticket }));
+    deliver(app, "deep-link", json!({ "ticket": ticket }));
+}
+
+/// Right-click "Tạo link Toss": `share {path}` for a folder, `share:error {msg}` otherwise.
+pub fn deliver_share(app: &AppHandle, raw: &str, cwd: &Path) {
+    if !app
+        .state::<Shell>()
+        .first_delivery(&format!("share\u{0}{raw}"))
+    {
+        return;
     }
+    show_main(app);
+    match share_target(raw, cwd) {
+        Ok(p) => deliver(app, "share", json!({ "path": p.to_string_lossy() })),
+        Err(msg) => {
+            tracing::warn!("--share {raw:?}: {msg}");
+            deliver(app, "share:error", json!({ "msg": msg }));
+        }
+    }
+}
+
+/// The folder after `--share` (or `--share=<folder>`), if any. Explorer passes a drive
+/// root's background as `"D:\"`, which Windows argv parsing turns into `D:"`: repaired.
+pub fn share_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        let v = if a == SHARE_FLAG {
+            it.next().cloned()
+        } else {
+            a.strip_prefix(SHARE_FLAG)
+                .and_then(|r| r.strip_prefix('='))
+                .map(str::to_string)
+        };
+        if let Some(v) = v {
+            let mut v = v.trim().trim_end_matches('"').to_string();
+            if v.len() == 2 && v.ends_with(':') {
+                v.push('\\');
+            }
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Validates a `--share` argument: must be an existing directory (relative paths are
+/// taken from `cwd`). Returns the canonical path, or a Vietnamese message for the UI.
+pub fn share_target(raw: &str, cwd: &Path) -> Result<PathBuf, String> {
+    if raw.trim().is_empty() {
+        return Err("Chưa chọn thư mục để chia sẻ".into());
+    }
+    let p = Path::new(raw.trim());
+    let p = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
+    if !p.exists() {
+        return Err(format!("Không tìm thấy “{raw}”"));
+    }
+    if !p.is_dir() {
+        return Err(format!(
+            "“{raw}” là file, không phải thư mục. Chuột phải vào một thư mục để tạo link Toss."
+        ));
+    }
+    toss_core::paths::canonicalize(&p).map_err(|e| format!("Không đọc được “{raw}”: {e:#}"))
 }
 
 /// `toss://t/<ticket>` -> `<ticket>`.
@@ -121,9 +196,14 @@ pub fn ticket_from_file(path: &str) -> Option<String> {
     Some(ticket_from_url(t).unwrap_or_else(|| t.to_string()))
 }
 
-/// Looks through process arguments for `toss://` links and `.toss` files. True if one was handled.
-pub fn handle_args(app: &AppHandle, args: &[String]) -> bool {
+/// Looks through process arguments for `--share <folder>`, `toss://` links and `.toss`
+/// files. `cwd` is the launching process' working directory. True if one was handled.
+pub fn handle_args(app: &AppHandle, args: &[String], cwd: &Path) -> bool {
     let mut handled = false;
+    if let Some(dir) = share_arg(args) {
+        deliver_share(app, &dir, cwd);
+        return true;
+    }
     for a in args.iter().skip(1) {
         if let Some(t) = ticket_from_url(a).or_else(|| ticket_from_file(a)) {
             deliver_ticket(app, t);
@@ -228,12 +308,20 @@ mod tests {
         assert!(sh.first_delivery("a"));
         assert!(!sh.first_delivery("a"), "argv + plugin duplicate");
         assert!(sh.first_delivery("b"));
-        // Before the UI is ready: queued, in order.
-        assert!(!sh.offer("a"));
-        assert!(!sh.offer("b"));
-        assert_eq!(sh.take_ready(), vec!["a".to_string(), "b".to_string()]);
+        // Before the UI is ready: queued, in order (deep links and shares alike).
+        assert!(!sh.offer("deep-link", &json!({ "ticket": "a" })));
+        assert!(!sh.offer("share", &json!({ "path": "/x" })));
+        assert!(!sh.offer("deep-link", &json!({ "ticket": "b" })));
+        assert_eq!(
+            sh.take_ready(),
+            vec![
+                ("deep-link", json!({ "ticket": "a" })),
+                ("share", json!({ "path": "/x" })),
+                ("deep-link", json!({ "ticket": "b" })),
+            ]
+        );
         // After: emitted directly, nothing left behind.
-        assert!(sh.offer("c"));
+        assert!(sh.offer("share:error", &json!({ "msg": "m" })));
         assert!(sh.take_ready().is_empty());
     }
 
@@ -246,16 +334,64 @@ mod tests {
             let s2 = sh.clone();
             let offerer = std::thread::spawn(move || {
                 (0..20)
-                    .filter(|i| s2.offer(&i.to_string()))
+                    .filter(|i| s2.offer("deep-link", &json!(i.to_string())))
                     .map(|i| i.to_string())
                     .collect::<Vec<_>>()
             });
-            let flushed = sh.take_ready();
+            let flushed: Vec<String> = sh
+                .take_ready()
+                .into_iter()
+                .map(|(_, v)| v.as_str().unwrap().to_string())
+                .collect();
             let direct = offerer.join().unwrap();
             let mut all: Vec<String> = flushed.into_iter().chain(direct).collect();
             all.sort_by_key(|s| s.parse::<u32>().unwrap());
             assert_eq!(all, (0..20).map(|i| i.to_string()).collect::<Vec<_>>());
         }
+    }
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        std::iter::once("Toss")
+            .chain(a.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn share_argument() {
+        assert_eq!(
+            share_arg(&argv(&["--share", r"C:\Studio\12A3"])),
+            Some(r"C:\Studio\12A3".into())
+        );
+        assert_eq!(
+            share_arg(&argv(&["--share=/Users/m/Ảnh lớp"])),
+            Some("/Users/m/Ảnh lớp".into())
+        );
+        // Explorer background of a drive root: "%V" = `D:\` → argv `D:"`.
+        assert_eq!(share_arg(&argv(&["--share", "D:\""])), Some(r"D:\".into()));
+        assert_eq!(share_arg(&argv(&["--share"])), None);
+        assert_eq!(share_arg(&argv(&["toss://t/toss1abc"])), None);
+        assert_eq!(share_arg(&["--share".into(), "/x".into()]), None); // argv[0] is the exe
+    }
+
+    #[test]
+    fn share_target_must_be_a_folder() {
+        let dir = std::env::temp_dir().join(format!("toss-share-arg-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Lớp 12A3")).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        let ok = share_target(dir.join("Lớp 12A3").to_str().unwrap(), Path::new("/")).unwrap();
+        assert!(ok.is_absolute() && ok.ends_with("Lớp 12A3"));
+        // relative to the launching process' cwd
+        assert_eq!(share_target("Lớp 12A3", &dir).unwrap(), ok);
+        let file = share_target(dir.join("a.jpg").to_str().unwrap(), Path::new("/"));
+        assert!(file.unwrap_err().contains("không phải thư mục"));
+        assert!(
+            share_target(dir.join("nope").to_str().unwrap(), Path::new("/"))
+                .unwrap_err()
+                .contains("Không tìm thấy")
+        );
+        assert!(share_target("  ", Path::new("/")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

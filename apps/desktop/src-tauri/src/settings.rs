@@ -21,6 +21,26 @@ pub struct Settings {
     pub first_run: bool,
     /// Override of `config::DEFAULT_PAGE_HOST` (hand-edit only).
     pub page_host: Option<String>,
+    /// v0.3: "Tạo link Toss" registered in the OS right-click menu (applied at startup).
+    pub context_menu: bool,
+    /// v0.3: a clicked link with `get` starts downloading at once (UI behaviour).
+    pub auto_receive: bool,
+    /// v0.3: folders shared via right-click; served as extra host roots (never in `host.roots`).
+    pub quick_shares: Vec<QuickShare>,
+    /// Host mode was turned on by a quick share (not by the user): it is turned off
+    /// again when the last quick share is removed.
+    pub host_auto: bool,
+}
+
+/// One quick-shared folder (ipc.ts `list_quick_shares`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct QuickShare {
+    /// `qs-<first 8 hex of blake3(canonical path)>`.
+    pub alias: String,
+    /// Canonical folder path.
+    pub path: String,
+    /// Id (hex) of the latest ticket created for it.
+    pub job_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -34,6 +54,10 @@ impl Default for Settings {
             autostart: false,
             first_run: true,
             page_host: None,
+            context_menu: true,
+            auto_receive: true,
+            quick_shares: Vec::new(),
+            host_auto: false,
         }
     }
 }
@@ -94,5 +118,65 @@ impl Settings {
             .clone()
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| config::DEFAULT_PAGE_HOST.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::Root;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("toss-settings-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn v03_fields_round_trip() {
+        let dir = tmp("rt");
+        let s = Settings {
+            context_menu: false,
+            auto_receive: false,
+            host_auto: true,
+            host: Some(HostConfig {
+                roots: vec![Root {
+                    alias: "RAW".into(),
+                    path: "/raw".into(),
+                }],
+                return_root: "/ret".into(),
+                max_parallel_jobs: 2,
+                bind_port: None,
+            }),
+            quick_shares: vec![QuickShare {
+                alias: "qs-0123abcd".into(),
+                path: "/photos/12A3".into(),
+                job_id: Some("00ff".into()),
+            }],
+            ..Settings::default()
+        };
+        s.save(&dir).unwrap();
+        let back = Settings::load(&dir);
+        assert!(!back.context_menu && !back.auto_receive && back.host_auto);
+        assert_eq!(back.quick_shares, s.quick_shares);
+        assert_eq!(back.host, s.host);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_settings_get_v03_defaults() {
+        let dir = tmp("old");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            Settings::path(&dir),
+            r#"{"device_name":"May","dest_dir":"/d","host":null,"admin_ticket":null,"autostart":true,"first_run":false,"page_host":null}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&dir);
+        assert_eq!(s.device_name, "May");
+        assert!(s.context_menu, "context menu defaults to on");
+        assert!(s.auto_receive, "auto receive defaults to on");
+        assert!(s.quick_shares.is_empty() && !s.host_auto);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

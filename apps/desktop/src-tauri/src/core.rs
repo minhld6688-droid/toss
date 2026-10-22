@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     time::Duration,
 };
@@ -26,8 +26,14 @@ use toss_core::{
 use crate::{
     config,
     ipc::{AppState, HostConfig, JobLast, JobRecord, Root, TicketInfo, TicketSpec},
-    settings::{data_dir, Settings},
+    settings::{data_dir, QuickShare, Settings},
 };
+
+/// Alias prefix reserved for quick-share roots.
+pub const QS_PREFIX: &str = "qs-";
+
+/// Return folder (under `dest_dir`) when a quick share turns host mode on.
+const QS_RETURN_DIR: &str = "Tra-ve";
 
 /// Prefix of the error text the UI uses to detect "no admin ticket stored".
 pub const NO_ADMIN: &str = "no_admin_ticket: Chưa có máy tổng từ xa";
@@ -46,6 +52,8 @@ pub struct Core {
     /// Tickets of remote jobs fetched with `CtlClient::job_ticket` (they never
     /// change for a given id); cleared when the admin ticket changes.
     remote_tickets: StdMutex<HashMap<[u8; 16], String>>,
+    /// Serializes host-config changes (user `set_host`, quick share add/remove).
+    host_lock: Mutex<()>,
 }
 
 impl Core {
@@ -63,6 +71,7 @@ impl Core {
             start_lock: Mutex::new(()),
             ctl: Mutex::new(None),
             remote_tickets: StdMutex::new(HashMap::new()),
+            host_lock: Mutex::new(()),
         }
     }
 
@@ -129,7 +138,9 @@ impl Core {
     async fn start_node(&self) -> Result<Arc<Node>> {
         let (name, host) = {
             let s = self.settings.lock().unwrap_or_else(|p| p.into_inner());
-            (s.device_name.clone(), s.host.clone())
+            // User roots + quick-share roots (missing folders are tolerated here and
+            // picked up by the retry once their drive is mounted).
+            (s.device_name.clone(), effective_host(&s, false))
         };
         std::fs::create_dir_all(&self.data_dir).context("tạo thư mục dữ liệu")?;
         let cfg = NodeConfig {
@@ -206,7 +217,7 @@ impl Core {
                 tokio::time::sleep(HOST_RETRY).await;
                 let Some(node) = node.upgrade() else { return };
                 let core = app.state::<Arc<Core>>().inner().clone();
-                if core.settings().host.as_ref() != Some(&h) {
+                if effective_host(&core.settings(), false).as_ref() != Some(&h) {
                     return; // changed by the user meanwhile
                 }
                 if let Ok(c) = to_core_host(&h, false) {
@@ -315,10 +326,12 @@ impl Core {
             endpoint_id,
             device_name: s.device_name.clone(),
             dest_dir: s.dest_dir.clone(),
-            host: s.host.clone(),
+            host: user_host(&s),
             page_host: s.page_host(),
             autostart,
             first_run: s.first_run,
+            context_menu: s.context_menu,
+            auto_receive: s.auto_receive,
         })
     }
 
@@ -361,14 +374,43 @@ impl Core {
     }
 
     // ---- host mode ----------------------------------------------------------------
+    /// From the Settings UI: `config` holds the user's roots only. Quick-share roots
+    /// are merged in here (they keep working) and never stored in `host.roots`.
+    /// `None` turns host mode off; quick shares are kept but unreachable until host
+    /// mode is on again (a new quick share turns it back on).
     pub async fn set_host(&self, config: Option<HostConfig>) -> Result<()> {
+        let _g = self.host_lock.lock().await;
         let node = self.node().await?;
-        match &config {
-            Some(h) => node.set_host(Some(to_core_host(h, true)?)).await?,
+        let shares = self.settings().quick_shares;
+        let config = match config {
+            Some(mut h) => {
+                // Stale copies of quick-share roots are dropped, other `qs-` names refused.
+                h.roots
+                    .retain(|r| !shares.iter().any(|q| q.alias == r.alias));
+                if let Some(r) = h.roots.iter().find(|r| r.alias.starts_with(QS_PREFIX)) {
+                    bail!(
+                        "Tên gốc “{}” không dùng được (tiền tố “{QS_PREFIX}” dành cho chia sẻ nhanh)",
+                        r.alias
+                    );
+                }
+                to_core_host(&h, true)?; // the user's own roots must exist
+                Some(h)
+            }
+            None => None,
+        };
+        let merged = config
+            .as_ref()
+            .map(|h| merge_quick_shares(h, &shares, true));
+        match &merged {
+            Some(h) => node.set_host(Some(to_core_host(h, false)?)).await?,
             None => node.set_host(None).await?,
         }
         let want_port = config.as_ref().and_then(|h| h.bind_port);
-        self.update_settings(|s| s.host = config)?;
+        self.update_settings(|s| {
+            // Still "auto" only while the user has not added roots of their own.
+            s.host_auto = s.host_auto && config.as_ref().is_some_and(|h| h.roots.is_empty());
+            s.host = config;
+        })?;
         // The UDP port is bound when the node starts: restart to apply a new one
         // (deferred to the next launch while transfers are running).
         if want_port != node.bind_port() {
@@ -376,6 +418,154 @@ impl Core {
             self.restart_for_rename().await?;
         }
         Ok(())
+    }
+
+    // ---- quick share (v0.3) ------------------------------------------------------------
+    /// Right-click → "Tạo link Toss": serve `path` as a quick-share root (host mode is
+    /// turned on if needed) and create a get ticket for the whole folder. Clipboard and
+    /// notification are done by the command (needs the app handle).
+    pub async fn share_folder(&self, path: String, days: u32, put: bool) -> Result<TicketInfo> {
+        let _g = self.host_lock.lock().await;
+        let raw = path.trim();
+        let canon = toss_core::paths::canonicalize(Path::new(raw))
+            .map_err(|_| anyhow!("Không tìm thấy thư mục {raw}"))?;
+        if !canon.is_dir() {
+            bail!("“{raw}” không phải là thư mục");
+        }
+        let canon_s = canon.to_string_lossy().into_owned();
+        let alias = quick_share_alias(&canon_s);
+        let job = share_job_name(&canon);
+
+        // 1. settings: add/keep the root; turn host mode on if it is off.
+        let (added, auto_on, ret) = self.update_settings(|s| {
+            let added = !s.quick_shares.iter().any(|q| q.alias == alias);
+            if added {
+                s.quick_shares.push(QuickShare {
+                    alias: alias.clone(),
+                    path: canon_s.clone(),
+                    job_id: None,
+                });
+            }
+            let auto_on = s.host.is_none();
+            if auto_on {
+                s.host = Some(HostConfig {
+                    roots: Vec::new(),
+                    return_root: Path::new(&s.dest_dir)
+                        .join(QS_RETURN_DIR)
+                        .to_string_lossy()
+                        .into_owned(),
+                    max_parallel_jobs: 2,
+                    bind_port: None,
+                });
+                s.host_auto = true;
+            }
+            let ret = s.host.as_ref().map(|h| h.return_root.clone());
+            (added, auto_on, ret)
+        })?;
+        if let Some(ret) = ret.filter(|_| auto_on) {
+            let _ = std::fs::create_dir_all(ret);
+        }
+        // 2. apply; undo step 1 if the host cannot take it.
+        if let Err(e) = self.apply_host().await {
+            let _ = self.update_settings(|s| {
+                if added {
+                    s.quick_shares.retain(|q| q.alias != alias);
+                }
+                if auto_on {
+                    s.host = None;
+                    s.host_auto = false;
+                }
+            });
+            let _ = self.apply_host().await;
+            return Err(e.context("không bật được chia sẻ"));
+        }
+        // 3. ticket for the whole folder.
+        let info = self
+            .create_ticket(TicketSpec {
+                job,
+                root: alias.clone(),
+                path: String::new(),
+                ret: String::new(),
+                get: true,
+                put,
+                days,
+            })
+            .await?;
+        self.update_settings(|s| {
+            if let Some(q) = s.quick_shares.iter_mut().find(|q| q.alias == alias) {
+                q.job_id = Some(info.id.clone());
+            }
+        })?;
+        Ok(info)
+    }
+
+    pub fn list_quick_shares(&self) -> Vec<QuickShare> {
+        self.settings().quick_shares
+    }
+
+    /// Revokes every ticket of the quick share, drops its root and re-applies host
+    /// mode (turned off if it was only on for quick shares and none remain).
+    pub async fn remove_quick_share(&self, alias: String) -> Result<()> {
+        let _g = self.host_lock.lock().await;
+        let Some(qs) = self
+            .settings()
+            .quick_shares
+            .into_iter()
+            .find(|q| q.alias == alias)
+        else {
+            bail!("Không tìm thấy chia sẻ “{alias}”");
+        };
+        let node = self.node().await?;
+        let mut ids: Vec<[u8; 16]> = node
+            .list_jobs()
+            .into_iter()
+            .filter(|j| j.root == qs.alias && !j.revoked)
+            .map(|j| j.id)
+            .collect();
+        if let Some(id) = qs.job_id.as_deref().and_then(|i| parse_id(i).ok()) {
+            if !ids.contains(&id) && node.list_jobs().iter().any(|j| j.id == id && !j.revoked) {
+                ids.push(id);
+            }
+        }
+        for id in ids {
+            node.revoke(id)?;
+        }
+        drop(node);
+        self.update_settings(|s| {
+            s.quick_shares.retain(|q| q.alias != alias);
+            let only_auto = s.host_auto && s.host.as_ref().is_some_and(|h| h.roots.is_empty());
+            if s.quick_shares.is_empty() && only_auto {
+                s.host = None;
+                s.host_auto = false;
+            }
+        })?;
+        self.apply_host().await
+    }
+
+    /// Re-applies the saved host config (user roots + existing quick-share folders).
+    async fn apply_host(&self) -> Result<()> {
+        let node = self.node().await?;
+        match effective_host(&self.settings(), true) {
+            Some(h) => node.set_host(Some(to_core_host(&h, false)?)).await,
+            None => node.set_host(None).await,
+        }
+    }
+
+    pub fn set_auto_receive(&self, on: bool) -> Result<()> {
+        self.update_settings(|s| s.auto_receive = on)
+    }
+
+    /// Registers / removes the OS right-click entry, then saves the choice.
+    pub async fn set_context_menu(&self, on: bool) -> Result<()> {
+        tokio::task::spawn_blocking(move || crate::ctxmenu::apply(on))
+            .await?
+            .map_err(|e| {
+                anyhow!(
+                    "Không {} được menu chuột phải: {e:#}",
+                    if on { "bật" } else { "tắt" }
+                )
+            })?;
+        self.update_settings(|s| s.context_menu = on)
     }
 
     pub async fn host_status(&self) -> Result<Value> {
@@ -806,6 +996,60 @@ fn available_roots(h: &HostConfig) -> Option<HostConfig> {
         .cloned()
         .collect();
     (!roots.is_empty() && roots.len() < h.roots.len()).then(|| HostConfig { roots, ..h.clone() })
+}
+
+/// `qs-` + first 8 hex chars of blake3(canonical path).
+pub fn quick_share_alias(canonical: &str) -> String {
+    let h = blake3::hash(canonical.as_bytes());
+    format!("{QS_PREFIX}{}", &h.to_hex()[..8])
+}
+
+/// Job name for a shared folder: its (sanitized) name; a drive root uses the path.
+fn share_job_name(p: &Path) -> String {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            p.to_string_lossy()
+                .trim_end_matches(['/', '\\'])
+                .to_string()
+        });
+    toss_core::paths::sanitize_component(&name, "Toss")
+}
+
+/// Host config as the UI sees it: quick-share roots stripped.
+fn user_host(s: &Settings) -> Option<HostConfig> {
+    s.host.clone().map(|mut h| {
+        h.roots
+            .retain(|r| !s.quick_shares.iter().any(|q| q.alias == r.alias));
+        h
+    })
+}
+
+/// `h` (user roots) + quick-share roots. `existing_only`: skip quick shares whose
+/// folder is gone (interactive changes must not fail because of them).
+fn merge_quick_shares(h: &HostConfig, shares: &[QuickShare], existing_only: bool) -> HostConfig {
+    let mut out = h.clone();
+    out.roots
+        .retain(|r| !shares.iter().any(|q| q.alias == r.alias));
+    for q in shares {
+        if existing_only && !Path::new(&q.path).is_dir() {
+            tracing::warn!("chia sẻ nhanh {}: không thấy {}", q.alias, q.path);
+            continue;
+        }
+        out.roots.push(Root {
+            alias: q.alias.clone(),
+            path: q.path.clone(),
+        });
+    }
+    out
+}
+
+/// The config host mode actually runs with (None = host mode off).
+fn effective_host(s: &Settings, existing_only: bool) -> Option<HostConfig> {
+    s.host
+        .as_ref()
+        .map(|h| merge_quick_shares(h, &s.quick_shares, existing_only))
 }
 
 fn is_active(v: &Value) -> bool {
@@ -1259,6 +1503,209 @@ mod tests {
             vec!["A".to_string(), "B".to_string()]
         );
         drop(node);
+        core.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quick_share_alias_is_stable_and_valid() {
+        let a = quick_share_alias("/Users/minh/Ảnh/12A3");
+        assert_eq!(a, quick_share_alias("/Users/minh/Ảnh/12A3"));
+        assert_ne!(a, quick_share_alias("/Users/minh/Ảnh/12A4"));
+        assert!(
+            a.starts_with("qs-") && a.len() == 11 && valid_alias(&a),
+            "{a}"
+        );
+        let hex = &blake3::hash("/x".as_bytes()).to_hex()[..8];
+        assert_eq!(quick_share_alias("/x"), format!("qs-{hex}"));
+        assert_eq!(share_job_name(Path::new("/a/Lớp 12A3")), "Lớp 12A3");
+        assert_eq!(share_job_name(Path::new("/a/x:y")), "x_y");
+    }
+
+    #[test]
+    fn quick_share_roots_are_merged_and_hidden() {
+        let qs = QuickShare {
+            alias: "qs-00000000".into(),
+            path: std::env::temp_dir().to_string_lossy().into_owned(),
+            job_id: None,
+        };
+        let gone = QuickShare {
+            alias: "qs-11111111".into(),
+            path: "/definitely/not/here".into(),
+            job_id: None,
+        };
+        let user = HostConfig {
+            roots: vec![Root {
+                alias: "RAW".into(),
+                path: "/raw".into(),
+            }],
+            return_root: "/ret".into(),
+            max_parallel_jobs: 2,
+            bind_port: None,
+        };
+        let s = Settings {
+            host: Some(user.clone()),
+            quick_shares: vec![qs.clone(), gone.clone()],
+            ..Settings::default()
+        };
+        let aliases = |h: &HostConfig| h.roots.iter().map(|r| r.alias.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            aliases(&effective_host(&s, false).unwrap()),
+            ["RAW", "qs-00000000", "qs-11111111"]
+        );
+        assert_eq!(
+            aliases(&effective_host(&s, true).unwrap()),
+            ["RAW", "qs-00000000"]
+        );
+        assert_eq!(user_host(&s), Some(user));
+        let off = Settings { host: None, ..s };
+        assert_eq!(effective_host(&off, false), None);
+    }
+
+    /// Roots the running host serves (empty = host mode off).
+    async fn roots(core: &Core) -> Vec<String> {
+        core.node()
+            .await
+            .unwrap()
+            .host_status()
+            .map(|h| h.roots)
+            .unwrap_or_default()
+    }
+
+    /// Right-click share against the real core, offline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn share_folder_end_to_end() {
+        let dir = tmpdir("quick-share");
+        let (data, dest, raw) = (dir.join("data"), dir.join("dest"), dir.join("raw"));
+        let folder = dir.join("photos").join("Lớp 12A3");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::write(folder.join("a.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("file.txt"), b"x").unwrap();
+        let core = Core::with_dir(data.clone());
+        core.update_settings(|s| s.dest_dir = dest.to_string_lossy().into_owned())
+            .unwrap();
+        let canon = toss_core::paths::canonicalize(&folder).unwrap();
+        let alias = quick_share_alias(&canon.to_string_lossy());
+
+        // 1. host mode off -> share turns it on with only the quick-share root.
+        assert!(core.settings().host.is_none());
+        let info = core
+            .share_folder(folder.to_string_lossy().into_owned(), 7, false)
+            .await
+            .unwrap();
+        assert_eq!(info.root, alias);
+        assert_eq!((info.job.as_str(), info.path.as_str()), ("Lớp 12A3", ""));
+        assert!(info.get && !info.put && !info.admin && info.exp > 0);
+        let parsed = core.parse_ticket(&info.web_url).unwrap();
+        assert_eq!(
+            (parsed.id.as_str(), parsed.root.as_str()),
+            (info.id.as_str(), alias.as_str())
+        );
+        let s = core.settings();
+        assert!(s.host_auto);
+        let h = s.host.clone().unwrap();
+        assert!(
+            h.roots.is_empty(),
+            "quick-share roots never stored in host.roots"
+        );
+        assert_eq!(PathBuf::from(&h.return_root), dest.join("Tra-ve"));
+        assert!(dest.join("Tra-ve").is_dir());
+        assert_eq!(roots(&core).await, vec![alias.clone()]);
+        assert!(core.state().await.unwrap().host.unwrap().roots.is_empty());
+        assert_eq!(
+            core.list_quick_shares(),
+            vec![QuickShare {
+                alias: alias.clone(),
+                path: canon.to_string_lossy().into_owned(),
+                job_id: Some(info.id.clone()),
+            }]
+        );
+        let jobs = core.list_jobs().await.unwrap();
+        assert!(jobs
+            .iter()
+            .any(|j| j.id == info.id && j.root == alias && j.get));
+        let listed = core.list_dir(alias.clone(), String::new()).await.unwrap();
+        assert_eq!(listed[0]["name"], "a.jpg");
+
+        // 2. re-share: fresh ticket, still one root.
+        let again = core
+            .share_folder(format!("{}/", folder.to_string_lossy()), 3, true)
+            .await
+            .unwrap();
+        assert_ne!(again.id, info.id);
+        assert!(again.put);
+        assert_eq!(core.list_quick_shares().len(), 1);
+        assert_eq!(
+            core.list_quick_shares()[0].job_id.as_deref(),
+            Some(again.id.as_str())
+        );
+        assert_eq!(roots(&core).await, vec![alias.clone()]);
+
+        // not a folder
+        assert!(core
+            .share_folder(
+                dir.join("file.txt").to_string_lossy().into_owned(),
+                7,
+                false
+            )
+            .await
+            .is_err());
+        assert!(core
+            .share_folder(dir.join("nope").to_string_lossy().into_owned(), 7, false)
+            .await
+            .is_err());
+
+        // 3. remove: every ticket revoked, host mode back off.
+        core.remove_quick_share(alias.clone()).await.unwrap();
+        let jobs = core.list_jobs().await.unwrap();
+        assert!(jobs.iter().filter(|j| j.root == alias).all(|j| j.revoked));
+        assert_eq!(jobs.iter().filter(|j| j.root == alias).count(), 2);
+        assert!(core.list_quick_shares().is_empty());
+        let s = core.settings();
+        assert!(s.host.is_none() && !s.host_auto);
+        assert!(core.node().await.unwrap().host_status().is_none());
+        assert!(core.remove_quick_share(alias.clone()).await.is_err());
+
+        // 4. user host mode + quick share: the UI's set_host keeps the quick-share root.
+        let user = HostConfig {
+            roots: vec![Root {
+                alias: "RAW".into(),
+                path: raw.to_string_lossy().into_owned(),
+            }],
+            return_root: dir.join("ret").to_string_lossy().into_owned(),
+            max_parallel_jobs: 2,
+            bind_port: None,
+        };
+        core.set_host(Some(user.clone())).await.unwrap();
+        core.share_folder(folder.to_string_lossy().into_owned(), 7, false)
+            .await
+            .unwrap();
+        assert!(!core.settings().host_auto, "host mode belongs to the user");
+        assert_eq!(roots(&core).await, vec!["RAW".to_string(), alias.clone()]);
+        core.set_host(Some(user.clone())).await.unwrap(); // Settings UI save
+        assert_eq!(roots(&core).await, vec!["RAW".to_string(), alias.clone()]);
+        assert_eq!(core.settings().host, Some(user.clone()));
+        assert_eq!(core.state().await.unwrap().host, Some(user.clone()));
+        let bad = HostConfig {
+            roots: vec![Root {
+                alias: "qs-mine".into(),
+                path: raw.to_string_lossy().into_owned(),
+            }],
+            ..user.clone()
+        };
+        assert!(core.set_host(Some(bad)).await.is_err());
+
+        // 5. quick-share roots survive a restart.
+        core.shutdown().await;
+        drop(core);
+        let core = Core::with_dir(data.clone());
+        assert_eq!(roots(&core).await, vec!["RAW".to_string(), alias.clone()]);
+        // removing it keeps the user's host mode on
+        core.remove_quick_share(alias.clone()).await.unwrap();
+        assert_eq!(roots(&core).await, vec!["RAW".to_string()]);
+        assert_eq!(core.settings().host, Some(user));
+
         core.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

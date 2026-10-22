@@ -62,6 +62,26 @@ for (const scheme of ["light", "dark"]) {
     await page.waitForTimeout(500);
     await shot(page, "08-settings-remote.png");
   }
+  // v0.3 quick share: shell emits `share {path}` (right-click menu) -> Share view, link already created + copied
+  {
+    const sp = await ctx.newPage();
+    await sp.goto(base + "?share=1");
+    await sp.getByText("Đã copy vào clipboard").waitFor({ timeout: 8000 });
+    await sp.waitForTimeout(500);
+    await shot(sp, `09-share${sfx}.png`);
+    if (scheme === "light") {
+      await sp.locator("select").selectOption("30");
+      await sp.getByRole("checkbox").check();
+      await shot(sp, "09-share-redo.png");
+    }
+    await sp.close();
+  }
+  if (scheme === "light") {
+    // settings: auto-receive / context menu toggles + list of shared folders
+    await page.getByText("Folder đang chia sẻ", { exact: true }).evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await page.waitForTimeout(400);
+    await shot(page, "10-settings-shares.png");
+  }
   if (scheme === "light") {
     await page.goto(base + "?wizard=1");
     await page.getByText("Tên máy của bạn").waitFor();

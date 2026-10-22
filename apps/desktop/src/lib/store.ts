@@ -8,6 +8,12 @@ export interface Recent {
   ticket: string; job: string; get: boolean; put: boolean; admin: boolean; exp: number; at: number;
 }
 
+/** Why the confirm sheet is shown instead of the transfer starting by itself (auto-receive). */
+export interface SheetNote { kind: "exists" | "error"; text: string }
+
+/** Heuristic: does a start_get rejection mean "this job is already downloaded"? (shell wording unknown) */
+const EXISTS_RE = /already|exist|complete|đã (có|xong|nhận|tồn tại|đầy đủ)|hoàn tất/i;
+
 interface Toast { id: number; text: string; kind: "info" | "error" }
 
 interface Store {
@@ -16,6 +22,13 @@ interface Store {
   transfers: Record<string, TransferState>;
   /** ticket currently shown in the confirm sheet */
   sheet: TicketInfo | null;
+  sheetNote: SheetNote | null;
+  /** Share view ("Tạo link"): folder being shared; nonce remounts the view for a new request */
+  share: { path: string; nonce: number } | null;
+  /** folder dropped on the window, waiting for "Tạo link chia sẻ folder này?" */
+  shareAsk: string | null;
+  /** bumped after every share / remove so the settings list reloads */
+  sharesRev: number;
   recents: Recent[];
   toasts: Toast[];
   hostStatus: HostStatus | null;
@@ -25,7 +38,13 @@ interface Store {
   setApp(a: AppState): void;
   patchApp(p: Partial<AppState>): void;
   openTicket(text: string): Promise<boolean>;
+  /** deep-link entry: honours app.auto_receive */
+  receiveLink(text: string): Promise<void>;
   closeSheet(): void;
+  openShare(path: string): void;
+  closeShare(): void;
+  askShare(path: string | null): void;
+  bumpShares(): void;
   toast(text: string, kind?: "info" | "error"): void;
   refreshTransfers(): Promise<void>;
   applyEvent(ev: TransferEvent): void;
@@ -43,11 +62,32 @@ function saveRecents(r: Recent[]) {
 
 let toastSeq = 1;
 
+/** parse_ticket + remember in "Gần đây". Toasts and returns null on a bad link. */
+async function parseAndRemember(text: string): Promise<TicketInfo | null> {
+  try {
+    const info = await api.parse_ticket({ text });
+    if (!info.admin) {
+      const rec: Recent = { ticket: info.ticket, job: info.job, get: info.get, put: info.put, admin: info.admin, exp: info.exp, at: Date.now() };
+      const recents = [rec, ...useStore.getState().recents.filter((r) => r.ticket !== info.ticket)].slice(0, 12);
+      saveRecents(recents);
+      useStore.setState({ recents });
+    }
+    return info;
+  } catch (e) {
+    useStore.getState().toast(`Link không hợp lệ: ${errorMessage(e)}`, "error");
+    return null;
+  }
+}
+
 export const useStore = create<Store>((set, get) => ({
   screen: "home",
   app: null,
   transfers: {},
   sheet: null,
+  sheetNote: null,
+  share: null,
+  shareAsk: null,
+  sharesRev: 0,
   recents: loadRecents(),
   toasts: [],
   hostStatus: null,
@@ -60,22 +100,40 @@ export const useStore = create<Store>((set, get) => ({
   setHostStatus: (hostStatus) => set({ hostStatus }),
 
   async openTicket(text) {
+    const info = await parseAndRemember(text);
+    if (!info) return false;
+    set({ sheet: info, sheetNote: null, share: null, shareAsk: null, screen: "home" });
+    return true;
+  },
+
+  async receiveLink(text) {
+    const info = await parseAndRemember(text);
+    if (!info) return;
+    const exp = info.exp && info.exp <= Date.now() / 1000;
+    if (!get().app?.auto_receive || !info.get || info.admin || exp) {
+      set({ sheet: info, sheetNote: null, share: null, shareAsk: null, screen: "home" });
+      return;
+    }
     try {
-      const info = await api.parse_ticket({ text });
-      const rec: Recent = { ticket: info.ticket, job: info.job, get: info.get, put: info.put, admin: info.admin, exp: info.exp, at: Date.now() };
-      if (!info.admin) {
-        const recents = [rec, ...get().recents.filter((r) => r.ticket !== info.ticket)].slice(0, 12);
-        saveRecents(recents);
-        set({ recents });
-      }
-      set({ sheet: info, screen: "home" });
-      return true;
+      await api.start_get({ ticket: info.ticket });
+      await get().refreshTransfers();
+      set({ sheet: null, sheetNote: null, share: null, shareAsk: null, screen: "transfers" });
+      get().toast(`Đang nhận ${info.job}…`);
     } catch (e) {
-      get().toast(`Link không hợp lệ: ${errorMessage(e)}`, "error");
-      return false;
+      const msg = errorMessage(e);
+      if (EXISTS_RE.test(msg)) {
+        set({ share: null, shareAsk: null, sheet: info, sheetNote: { kind: "exists", text: "Job này đã nhận xong trước đó. Bấm Tải lại nếu muốn nhận lại." }, screen: "home" });
+      } else {
+        // unknown rejection: show the sheet so the user can retry by hand, and say why
+        set({ share: null, shareAsk: null, sheet: info, sheetNote: { kind: "error", text: msg }, screen: "home" });
+      }
     }
   },
-  closeSheet: () => set({ sheet: null }),
+  closeSheet: () => set({ sheet: null, sheetNote: null }),
+  openShare: (path) => set({ share: { path, nonce: Date.now() }, shareAsk: null, sheet: null, sheetNote: null }),
+  closeShare: () => set({ share: null, screen: "home" }),
+  askShare: (shareAsk) => set({ shareAsk }),
+  bumpShares: () => set((s) => ({ sharesRev: s.sharesRev + 1 })),
 
   toast(text, kind = "info") {
     const id = toastSeq++;

@@ -102,6 +102,8 @@ const state: AppState = {
   page_host: "minhld6688-droid.github.io/toss",
   autostart: true,
   first_run: wizard,
+  context_menu: true,
+  auto_receive: params.get("auto") !== "0",
 };
 let adminTicket: string | null = params.get("remote") === "1" ? "toss1mockadmin" + "abcdefghijklmnopqrstuvwxyz234567" : null;
 
@@ -240,6 +242,20 @@ function hostStatus(): HostStatus {
 const remoteDevice = () => (adminTicket ? "Máy tổng - Studio" : state.device_name);
 
 let pickN = 0;
+let uiReadyDone = false;
+
+// ---- v0.3 quick share ------------------------------------------------------
+const baseOf = (p: string) => p.split(/[\\/]+/).filter(Boolean).pop() ?? p;
+const quickShares: { alias: string; path: string; job_id: string | null }[] = [];
+function seedShares() {
+  for (const [path, put] of [["/Users/minh/Pictures/Giao hàng/12A3 - RAW", false], ["D:\\Studio\\Chon\\11B2", true]] as const) {
+    const info = makeInfo({ id: hex(32), host: HOST_ID, job: baseOf(path), root: "qs-x", path: "", ret: baseOf(path), get: true, put, admin: false, exp: now() + 5 * 86400 });
+    issued.set(info.ticket, info);
+    quickShares.push({ alias: `qs-${hex(8)}`, path, job_id: info.id });
+  }
+}
+// jobs already refused once by start_get ("đã nhận xong"); the second try (sheet "Tải lại") goes through
+const reloadOk = new Set<string>();
 
 // ---- api -----------------------------------------------------------------
 export const mockApi: Commands & ExtraCommands = {
@@ -271,7 +287,15 @@ export const mockApi: Commands & ExtraCommands = {
   },
 
   async parse_ticket({ text }) { await sleep(60); return decodeTicket(text); },
-  async start_get({ ticket }) { return launch(decodeTicket(ticket), "get"); },
+  async start_get({ ticket }) {
+    const info = decodeTicket(ticket);
+    const dup = [...transfers.values()].some((t) => t.op === "get" && t.status === "done" && t.job === info.job);
+    if (dup && !reloadOk.has(info.job)) {
+      reloadOk.add(info.job);
+      throw new Error("Job này đã nhận xong, folder đã có đầy đủ file");
+    }
+    return launch(info, "get");
+  },
   async start_put({ ticket, paths }) { return launch(decodeTicket(ticket), "put", paths); },
   async list_transfers() { return structuredClone([...transfers.values()]).sort((a, b) => b.started_at - a.started_at); },
   async pause({ id }) {
@@ -306,9 +330,45 @@ export const mockApi: Commands & ExtraCommands = {
   async remote_list_jobs() { await sleep(150); return structuredClone(jobs); },
   async remote_revoke({ id }) { const j = jobs.find((x) => x.id === id); if (j) j.revoked = true; },
 
+  async share_folder({ path, days, put }) {
+    await sleep(600);
+    if (!path.trim()) throw new Error("Thiếu đường dẫn folder");
+    if (/FAIL/.test(path)) throw new Error("Không đọc được folder này (không có quyền truy cập)");
+    if (!state.host) state.host = { roots: [], return_root: `${state.dest_dir}/Tra-ve`, max_parallel_jobs: 2 };
+    const info = doCreate({ job: baseOf(path), root: "qs-x", path: "", ret: baseOf(path), get: true, put, days }, false);
+    // same folder shared again: the old quick-share entry is replaced (its previous ticket stays valid until it expires)
+    const at = quickShares.findIndex((q) => q.path === path);
+    if (at >= 0) quickShares.splice(at, 1);
+    quickShares.unshift({ alias: `qs-${hex(8)}`, path, job_id: info.id });
+    try { await navigator.clipboard.writeText(info.web_url); } catch { /* the real shell copies natively */ }
+    return info;
+  },
+  async list_quick_shares() { await sleep(60); return structuredClone(quickShares); },
+  async remove_quick_share({ alias }) {
+    const at = quickShares.findIndex((q) => q.alias === alias);
+    if (at < 0) throw new Error("Không tìm thấy folder đang chia sẻ");
+    const [q] = quickShares.splice(at, 1);
+    const j = jobs.find((x) => x.id === q.job_id); if (j) j.revoked = true;
+  },
+  async set_context_menu({ on }) { state.context_menu = on; },
+  async set_auto_receive({ on }) { state.auto_receive = on; },
+
   async qr_svg({ text }) { return fakeQr(text); },
   async copy_text({ text }) { try { await navigator.clipboard.writeText(text); } catch { /* ignore */ } },
-  async ui_ready() { /* nothing queued in mock */ },
+  async ui_ready() {
+    if (uiReadyDone) return; // React StrictMode runs the App effect twice in dev; the real shell flushes its queue once
+    uiReadyDone = true;
+    // URL switches to exercise shell-initiated events: ?share=1 (right-click menu), ?deeplink=1 (new job) / ?deeplink=exists (already downloaded)
+    if (params.get("share") === "1") setTimeout(() => emit("share", { path: params.get("path") ?? "/Users/minh/Pictures/Giao hàng/12A3 - RAW" }), 150);
+    if (params.get("shareerror") === "1") setTimeout(() => emit("share:error", { msg: "Không mở được folder để chia sẻ" }), 150);
+    const dl = params.get("deeplink");
+    if (dl) {
+      const job = dl === "exists" ? "11B2 - RAW" : "12B1 - RAW";
+      const info = makeInfo({ id: hex(32), host: HOST_ID, job, root: "RAW", path: "2026/" + job, ret: job, get: true, put: false, admin: false, exp: now() + 6 * 86400 });
+      issued.set(info.ticket, info);
+      setTimeout(() => emit("deep-link", { ticket: info.deep_link }), 150);
+    }
+  },
   async has_admin_ticket() { return adminTicket !== null; },
 };
 
@@ -334,3 +394,4 @@ function fakeQr(text: string): string {
 // ---- seed + background simulation ------------------------------------------
 seed();
 seedJobs();
+seedShares();

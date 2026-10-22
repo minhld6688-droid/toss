@@ -35,7 +35,16 @@ hex = "0.4"
 data-encoding = { workspace = true }
 hostname = "0.4"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+blake3 = { workspace = true }
 
 # Pin: tauri-plugin-deep-link 2.6.2 does not compile against rust-ini 0.21.3 (new ParseOption fields).
 # Unused here; it only constrains resolution. Remove once the plugin is fixed upstream.
 rust-ini = ">=0.21.0, <0.21.3"
+
+[target.'cfg(windows)'.dependencies]
+# Per-user Explorer context menu (HKCU\Software\Classes\Directory\shell\Toss).
+winreg = "0.56"
+
+[dev-dependencies]
+# Tests check that the generated macOS Quick Action files are valid plists.
+plist = "1"

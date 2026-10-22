@@ -2,7 +2,7 @@ import { ReactNode, useEffect } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowDown, ArrowLeft, ArrowsDownUp, ArrowUp, ArrowUpRight, ArrowsClockwise, Check, Copy, Folder, FileText, GearSix, House, Link as LinkIcon,
-  Pause, Play, Plus, ShieldCheck, Trash, X,
+  Pause, Play, Plus, ShareNetwork, ShieldCheck, Trash, X,
 } from "@phosphor-icons/react";
 
 const EASE = [0.32, 0.72, 0, 1] as const;
@@ -87,11 +87,34 @@ export function Sheet({ children, onClose, title }: { children: ReactNode; onClo
   );
 }
 
+/** Full-height sheet: covers the whole window (incl. the tab bar), same aura backdrop and motion as Sheet. */
+export function FullSheet({ children, onClose, title }: { children: ReactNode; onClose: () => void; title?: string }) {
+  const reduce = useReducedMotion();
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  return (
+    <motion.div
+      className="fixed inset-0 z-40 flex flex-col bg-bg"
+      role="dialog" aria-label={title}
+      initial={reduce ? false : { y: 40, opacity: 0, filter: "blur(6px)" }}
+      animate={{ y: 0, opacity: 1, filter: "blur(0px)" }}
+      exit={reduce ? undefined : { y: 24, opacity: 0, filter: "blur(4px)" }}
+      transition={{ duration: 0.6, ease: EASE }}
+    >
+      <div className="aura" /><div className="grain" />
+      {children}
+    </motion.div>
+  );
+}
+
 export { AnimatePresence };
 
 const ICONS = {
   home: House, transfer: ArrowsDownUp, settings: GearSix, folder: Folder, file: FileText, down: ArrowDown, up: ArrowUp, pause: Pause, play: Play,
-  x: X, copy: Copy, trash: Trash, check: Check, link: LinkIcon, plus: Plus, back: ArrowLeft, refresh: ArrowsClockwise, shield: ShieldCheck, go: ArrowUpRight,
+  x: X, copy: Copy, trash: Trash, check: Check, link: LinkIcon, plus: Plus, back: ArrowLeft, refresh: ArrowsClockwise, shield: ShieldCheck, go: ArrowUpRight, share: ShareNetwork,
 } as const;
 export type IconName = keyof typeof ICONS;
 

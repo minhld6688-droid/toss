@@ -29,6 +29,10 @@ pub struct AppState {
     pub page_host: String,
     pub autostart: bool,
     pub first_run: bool,
+    /// v0.3: "Tạo link Toss" registered in the OS right-click menu.
+    pub context_menu: bool,
+    /// v0.3: clicked `get` links start downloading immediately.
+    pub auto_receive: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]

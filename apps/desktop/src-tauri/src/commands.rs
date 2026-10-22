@@ -8,11 +8,13 @@ use serde_json::Value;
 use tauri::{AppHandle, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use tauri_plugin_dialog::DialogExt as _;
+use tauri_plugin_notification::NotificationExt as _;
 use tauri_plugin_opener::OpenerExt as _;
 
 use crate::{
     core::{self, Core},
     ipc::{AppState, HostConfig, JobRecord, TicketInfo, TicketSpec},
+    settings::QuickShare,
     shell::Shell,
 };
 
@@ -58,6 +60,52 @@ pub async fn set_dest_dir(core: C<'_>, path: String) -> Res<()> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_autostart(core: C<'_>, on: bool) -> Res<()> {
     Ok(core.set_autostart(on)?)
+}
+
+// ---- quick share (v0.3) ----------------------------------------------------------------------
+/// Shares a folder (quick-share root + get ticket), copies the web link to the
+/// clipboard and confirms with a system notification.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn share_folder(
+    app: AppHandle,
+    core: C<'_>,
+    path: String,
+    days: u32,
+    put: bool,
+) -> Res<TicketInfo> {
+    let info = core.share_folder(path, days, put).await?;
+    match app.clipboard().write_text(info.web_url.clone()) {
+        Ok(()) => {
+            let _ = app
+                .notification()
+                .builder()
+                .title("Toss")
+                .body(format!("Đã copy link Toss cho {}", info.job))
+                .show();
+        }
+        Err(e) => tracing::warn!("clipboard: {e}"),
+    }
+    Ok(info)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_quick_shares(core: C<'_>) -> Res<Vec<QuickShare>> {
+    Ok(core.list_quick_shares())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remove_quick_share(core: C<'_>, alias: String) -> Res<()> {
+    Ok(core.remove_quick_share(alias).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_context_menu(core: C<'_>, on: bool) -> Res<()> {
+    Ok(core.set_context_menu(on).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_auto_receive(core: C<'_>, on: bool) -> Res<()> {
+    Ok(core.set_auto_receive(on)?)
 }
 
 /// Native folder dialog. `None` = cancelled.

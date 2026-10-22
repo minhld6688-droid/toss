@@ -16,6 +16,7 @@ const COMMAND_NAMES: (keyof AllCommands)[] = [
   "parse_ticket", "start_get", "start_put", "list_transfers", "pause", "resume", "cancel", "clear_finished",
   "set_admin_ticket", "remote_status", "remote_list_dir", "remote_create_ticket", "remote_list_jobs", "remote_revoke",
   "qr_svg", "copy_text", "ui_ready", "has_admin_ticket",
+  "share_folder", "list_quick_shares", "remove_quick_share", "set_context_menu", "set_auto_receive",
 ];
 
 function errText(e: unknown): string {
