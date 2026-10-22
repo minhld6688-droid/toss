@@ -1,0 +1,73 @@
+name: relay-build
+
+# Builds the iroh-relay binary used by hub/relay/install.sh on ubuntu-22.04 (glibc 2.35,
+# runs on Ubuntu 22.04 and 24.04 VPS) so the owner does not have to compile for 10+ minutes
+# on a small VPS. Manual only. Result: workflow artifact, and optionally a GitHub release.
+#
+#   gh workflow run relay-build.yml -f publish=true
+#   -> release "relay-iroh-relay-1.4.1" with asset iroh-relay-linux-x86_64 (+ .sha256)
+#   sudo TOSS_RELAY_BIN_URL=<asset url> TOSS_RELAY_BIN_SHA256=<hash> ./install.sh relay.example.vn me@example.vn
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: iroh-relay crate version (must match the iroh version Toss uses)
+        required: true
+        default: "1.4.1"
+        type: string
+      publish:
+        description: Also attach the binary to a GitHub release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build iroh-relay
+        run: |
+          set -euo pipefail
+          cargo install iroh-relay --version "$VERSION" --features server --locked --root "$RUNNER_TEMP/out"
+          mkdir -p dist
+          cp "$RUNNER_TEMP/out/bin/iroh-relay" dist/iroh-relay-linux-x86_64
+          strip dist/iroh-relay-linux-x86_64 || true
+          (cd dist && sha256sum iroh-relay-linux-x86_64 | tee iroh-relay-linux-x86_64.sha256)
+          ./dist/iroh-relay-linux-x86_64 --version
+          ./dist/iroh-relay-linux-x86_64 --help | head -20
+      - name: Smoke test (dev mode, plain HTTP)
+        run: |
+          set -euo pipefail
+          ./dist/iroh-relay-linux-x86_64 --dev > relay-dev.log 2>&1 &
+          pid=$!
+          ok=0
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3340/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          cat relay-dev.log || true
+          test "$ok" = 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iroh-relay-linux-x86_64
+          path: dist/*
+          retention-days: 30
+      - name: Publish release asset
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="relay-iroh-relay-$VERSION"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "Toss relay binary (iroh-relay $VERSION)" \
+            --notes "Prebuilt iroh-relay $VERSION for hub/relay/install.sh (Linux x86_64, glibc 2.35+)."
+          gh release upload "$tag" dist/iroh-relay-linux-x86_64 dist/iroh-relay-linux-x86_64.sha256 --clobber
+          echo "Asset: https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/iroh-relay-linux-x86_64"
