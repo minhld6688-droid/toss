@@ -3,7 +3,7 @@ import type { HostConfig, HostStatus, TicketInfo } from "../lib/ipc-types";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { midTruncate, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Icon, Nest, Row, Section, Toggle } from "../components/ui";
+import { Icon, Nest, Row, Section, Toggle, Words } from "../components/ui";
 import { LinkMaker, LinkBackend } from "../components/LinkMaker";
 import { JobList } from "../components/JobList";
 import { QrLink } from "../components/QrLink";
@@ -392,7 +392,7 @@ export function Settings() {
   if (!app) return null;
   return (
     <div className="p-4">
-      <h1 className="text-2xl font-semibold tracking-tight mb-4">Cài đặt</h1>
+      <Words text="Cài đặt" accent={["đặt"]} className="text-[30px] mb-4" />
       <DeviceSection />
       <ShareSection />
       <HostEditor />

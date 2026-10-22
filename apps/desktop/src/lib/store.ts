@@ -33,6 +33,10 @@ interface Store {
   toasts: Toast[];
   hostStatus: HostStatus | null;
   dropHover: boolean;
+  /** comets in flight toward the "Chuyển file" tab (pure decoration) */
+  flights: { id: number; x: number; y: number }[];
+  /** bumped when a comet lands, the tab answers with a pulse */
+  navPulse: number;
 
   setScreen(s: Screen): void;
   setApp(a: AppState): void;
@@ -50,6 +54,8 @@ interface Store {
   applyEvent(ev: TransferEvent): void;
   setDropHover(on: boolean): void;
   setHostStatus(h: HostStatus | null): void;
+  fly(from?: { x: number; y: number }): void;
+  land(id: number): void;
 }
 
 const RECENT_KEY = "toss.recents.v1";
@@ -61,6 +67,7 @@ function saveRecents(r: Recent[]) {
 }
 
 let toastSeq = 1;
+let flightSeq = 1;
 
 /** parse_ticket + remember in "Gần đây". Toasts and returns null on a bad link. */
 async function parseAndRemember(text: string): Promise<TicketInfo | null> {
@@ -92,12 +99,19 @@ export const useStore = create<Store>((set, get) => ({
   toasts: [],
   hostStatus: null,
   dropHover: false,
+  flights: [],
+  navPulse: 0,
 
   setScreen: (screen) => set({ screen }),
   setApp: (app) => set({ app }),
   patchApp: (p) => set((s) => (s.app ? { app: { ...s.app, ...p } } : s)),
   setDropHover: (dropHover) => set({ dropHover }),
   setHostStatus: (hostStatus) => set({ hostStatus }),
+  fly(from) {
+    const p = from ?? { x: window.innerWidth / 2, y: window.innerHeight * 0.32 };
+    set((s) => ({ flights: [...s.flights, { id: flightSeq++, ...p }].slice(-4) }));
+  },
+  land: (id) => set((s) => ({ flights: s.flights.filter((f) => f.id !== id), navPulse: s.navPulse + 1 })),
 
   async openTicket(text) {
     const info = await parseAndRemember(text);
@@ -117,6 +131,7 @@ export const useStore = create<Store>((set, get) => ({
     try {
       await api.start_get({ ticket: info.ticket });
       await get().refreshTransfers();
+      get().fly();
       set({ sheet: null, sheetNote: null, share: null, shareAsk: null, screen: "transfers" });
       get().toast(`Đang nhận ${info.job}…`);
     } catch (e) {

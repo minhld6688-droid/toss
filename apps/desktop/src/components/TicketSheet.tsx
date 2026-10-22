@@ -4,6 +4,7 @@ import { api, errorMessage, isMock } from "../lib/ipc";
 import { fmtExpiry, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Badge, Icon, Nest, Sheet } from "./ui";
+import { centerOf } from "./Comet";
 
 export function TicketSheet({ info }: { info: TicketInfo }) {
   const close = useStore((s) => s.closeSheet);
@@ -16,11 +17,15 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
   const [busy, setBusy] = useState(false);
   const exp = fmtExpiry(info.exp);
 
-  async function run(fn: () => Promise<unknown>, okText: string) {
+  const fly = useStore((s) => s.fly);
+
+  async function run(fn: () => Promise<unknown>, okText: string, from?: Element | null) {
     setBusy(true);
+    const origin = from ? centerOf(from) : undefined;
     try {
       await fn();
       await refresh();
+      fly(origin);
       close();
       setScreen("transfers");
       toast(okText);
@@ -31,8 +36,8 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
     }
   }
 
-  const doGet = () => run(() => api.start_get({ ticket: info.ticket }), "Đang nhận file…");
-  const doPut = (paths: string[]) => run(() => api.start_put({ ticket: info.ticket, paths }), "Đang trả file…");
+  const doGet = (e?: { currentTarget: Element }) => run(() => api.start_get({ ticket: info.ticket }), "Đang nhận file…", e?.currentTarget);
+  const doPut = (paths: string[], from?: Element | null) => run(() => api.start_put({ ticket: info.ticket, paths }), "Đang trả file…", from);
   async function pick() {
     const p = await api.pick_folder({ title: "Chọn folder để trả" });
     if (p) await doPut([p]);
@@ -41,7 +46,7 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
   if (info.admin) {
     return (
       <Sheet onClose={close} title="Link admin">
-        <div className="flex items-center gap-2.5 mb-1"><span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="shield" className="w-5 h-5" /></span><div className="text-lg font-semibold tracking-tight">Link admin</div></div>
+        <div className="flex items-center gap-2.5 mb-1"><span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="shield" className="w-5 h-5" /></span><div className="title text-[22px]">Link <em>admin</em></div></div>
         <p className="text-sm text-mute mb-3">
           Link này cho phép máy này xem folder và tạo link nhận/trả file trên máy tổng <span className="mono">{shortId(info.host, 8)}</span>. Chỉ dùng trên máy tin cậy.
         </p>
@@ -61,7 +66,7 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
     <Sheet onClose={close} title={info.job}>
       <div className="flex items-start justify-between gap-2 mb-1">
         <div className="min-w-0">
-          <div className="text-xl font-semibold tracking-tight break-words">{info.job}</div>
+          <div className="title text-[26px] break-words">{info.job}</div>
           <div className="text-xs text-mute">Máy tổng <span className="mono">{shortId(info.host, 8)}</span></div>
         </div>
         <div className="flex gap-1 shrink-0">
@@ -78,7 +83,7 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
       )}
 
       {info.get && (
-        <button className="btn btn-primary btn-lg w-full" disabled={busy || exp.expired} onClick={doGet}>
+        <button className="btn btn-primary btn-lg w-full magnet" disabled={busy || exp.expired} onClick={doGet}>
           {note?.kind === "exists" ? "Tải lại" : "Nhận"}<Nest name={note?.kind === "exists" ? "refresh" : "down"} />
         </button>
       )}
@@ -97,7 +102,7 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
             void doPut(names.length ? names : ["Folder demo"]);
           } : undefined}
         >
-          <span className="mx-auto mb-2 grid place-items-center w-10 h-10 rounded-full bg-ok/15 text-ok"><Icon name="up" className="w-5 h-5" /></span>
+          <span className={`mx-auto mb-2 grid place-items-center w-10 h-10 rounded-full bg-ok/15 text-ok transition-transform duration-500 ${dropHover ? "drip up scale-110" : ""}`} style={{ transitionTimingFunction: "var(--spring)" }}><Icon name="up" className="w-5 h-5" weight="bold" /></span>
           <div className="text-base font-medium">Kéo folder vào để trả</div>
           <div className="text-xs text-mute mb-2">Thả folder hoặc file vào cửa sổ này</div>
           <button className="btn" disabled={busy} onClick={pick}><Icon name="folder" />Chọn folder…</button>

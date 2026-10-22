@@ -1,8 +1,10 @@
+import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { extractTicket } from "../lib/ticket";
 import { fmtExpiry } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Badge, Icon, Nest } from "../components/ui";
+import { Badge, Icon, Nest, Words } from "../components/ui";
+import { TossMark } from "../components/TossMark";
 import { api, errorMessage, isMock } from "../lib/ipc";
 
 export function Home() {
@@ -12,6 +14,8 @@ export function Home() {
   const toast = useStore((s) => s.toast);
   const openShare = useStore((s) => s.openShare);
   const askShare = useStore((s) => s.askShare);
+  const deviceName = useStore((s) => s.app?.device_name ?? "");
+  const hostOn = useStore((s) => !!s.app?.host);
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -56,7 +60,7 @@ export function Home() {
     <div className="p-4 pb-2">
       <div className={`shell rise transition-colors duration-500 ease-aura ${dropHover ? "bg-accent/10" : ""}`}>
         <div
-          className={`core relative overflow-hidden px-4 py-7 text-center transition-colors duration-500 ease-aura ${dropHover ? "border-accent/60" : ""}`}
+          className={`core relative overflow-hidden px-4 pt-5 pb-6 text-center transition-colors duration-500 ease-aura ${dropHover ? "border-accent/60" : ""}`}
           onDragOver={isMock ? (e) => e.preventDefault() : undefined}
           onDrop={isMock ? (e) => {
             e.preventDefault();
@@ -65,19 +69,21 @@ export function Home() {
           } : undefined}
         >
           <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-72 h-48 rounded-full bg-accent/20 blur-3xl" />
-          <div className="relative mx-auto w-14 h-14 rounded-full grid place-items-center mb-3 bg-accent/12 text-accent" style={{ boxShadow: "inset 0 1px 0 rgb(255 255 255 / 0.2), 0 0 0 6px rgb(var(--accent) / 0.06)" }}>
-            <Icon name="link" className="w-6 h-6" />
+          <div className="relative inline-flex items-center gap-2 h-6 pl-2 pr-2.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.2em] text-mute bg-line/[0.06] hair max-w-full">
+            <span className={`pulse-dot w-1.5 h-1.5 rounded-full shrink-0 ${hostOn ? "bg-warn" : "bg-ok"}`} />
+            <span className="truncate">{hostOn ? "Máy tổng đang mở" : deviceName || "Sẵn sàng"}</span>
           </div>
-          <div className="relative text-lg font-semibold tracking-tight">Dán link hoặc kéo folder vào đây</div>
-          <div className="relative text-sm text-mute mt-1 mb-4">Link để nhận/trả file · folder để tạo link chia sẻ</div>
+          <TossMark className={`relative mx-auto w-[180px] -mt-1 -mb-3 transition-transform duration-700 ease-aura ${dropHover ? "scale-110" : ""}`} speed={dropHover ? 1.8 : 1} />
+          <Words as="div" text="Dán link hoặc kéo folder vào đây" accent={["link", "folder"]} className="relative text-[24px] px-2" delay={0.1} />
+          <div className="relative text-sm text-mute mt-2 mb-5">Link để nhận/trả file · folder để tạo link chia sẻ</div>
           <div className="relative flex flex-wrap justify-center gap-2">
-            <button className="btn btn-primary" onClick={pasteFromClipboard}>Dán từ clipboard<Nest name="copy" /></button>
-            <button className="btn" onClick={shareFolder}><Icon name="share" />Chia sẻ folder…</button>
+            <button className="btn btn-primary btn-lg magnet" onClick={pasteFromClipboard}>Dán từ clipboard<Nest name="copy" /></button>
+            <button className="btn btn-lg" onClick={shareFolder}><Icon name="share" />Chia sẻ folder…</button>
           </div>
         </div>
       </div>
 
-      <div className="mt-3">
+      <div className="mt-3 rise" style={{ "--i": 1 } as React.CSSProperties}>
         <input
           ref={inputRef}
           className="input"
@@ -94,23 +100,24 @@ export function Home() {
         />
       </div>
 
-      <div className="mt-6">
+      <div className="mt-6 rise" style={{ "--i": 2 } as React.CSSProperties}>
         <h2 className="h-section">Gần đây</h2>
         {recents.length === 0 ? (
           <div className="text-sm text-mute px-1">Chưa có job nào. Link bạn mở sẽ hiện ở đây.</div>
         ) : (
-          <ul className="card divide-y divide-line/10 overflow-hidden rise">
-            {recents.map((r) => {
+          <ul className="card divide-y divide-line/10 overflow-hidden">
+            {recents.map((r, i) => {
               const exp = fmtExpiry(r.exp);
               return (
-                <li key={r.ticket}>
-                  <button className="w-full text-left px-3.5 py-2.5 hover:bg-line/[0.06] transition-colors duration-500 ease-aura flex items-center gap-2" onClick={() => void openTicket(r.ticket)}>
+                <li key={r.ticket} className="rise" style={{ "--i": 3 + i } as React.CSSProperties}>
+                  <button className="group w-full text-left px-3.5 py-2.5 hover:bg-line/[0.05] transition-colors duration-500 ease-aura flex items-center gap-2" onClick={() => void openTicket(r.ticket)}>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-base font-medium">{r.job}</div>
+                      <div className="truncate text-base font-medium transition-transform duration-500 ease-aura group-hover:translate-x-1">{r.job}</div>
                       <div className={`text-xs ${exp.expired ? "text-bad" : "text-mute"}`}>{exp.text}</div>
                     </div>
                     {r.get && <Badge tone="accent">Nhận</Badge>}
                     {r.put && <Badge tone="ok">Trả</Badge>}
+                    <Icon name="go" className="w-4 h-4 text-mute -ml-1 opacity-0 -translate-x-1 transition-all duration-500 ease-aura group-hover:opacity-100 group-hover:translate-x-0" />
                   </button>
                 </li>
               );

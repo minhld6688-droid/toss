@@ -3,7 +3,9 @@ import type { ConnPath, TransferState } from "../lib/ipc-types";
 import { api, errorMessage } from "../lib/ipc";
 import { fmtBytes, fmtEta, fmtSpeed } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Badge, Icon, Progress } from "../components/ui";
+import { Badge, EASE, Icon, Progress, Words, motion } from "../components/ui";
+import { TossMark } from "../components/TossMark";
+import type React from "react";
 
 const pathLabel: Record<ConnPath, string | null> = { direct: "Trực tiếp", relay: "Relay", mixed: "Hỗn hợp", unknown: null };
 
@@ -18,7 +20,7 @@ function statusLine(t: TransferState): string {
   }
 }
 
-function Item({ t }: { t: TransferState }) {
+function Item({ t, i }: { t: TransferState; i: number }) {
   const toast = useStore((s) => s.toast);
   const call = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { toast(errorMessage(e), "error"); } };
   const frac = t.bytes_total > 0 ? t.bytes_done / t.bytes_total : t.status === "done" ? 1 : 0;
@@ -27,9 +29,25 @@ function Item({ t }: { t: TransferState }) {
   const pl = pathLabel[t.path];
   const isHostSide = t.side === "host";
   return (
-    <li className="shell rise"><div className="core p-3.5">
+    <motion.li
+      layout="position" className="shell rise" style={{ "--i": i } as React.CSSProperties}
+      transition={{ layout: { duration: 0.6, ease: EASE } }}
+    ><div className="core p-3.5">
       <div className="flex items-start gap-2.5">
-        <div className={`grid place-items-center w-8 h-8 rounded-full shrink-0 ${t.op === "get" ? "bg-accent/15 text-accent" : "bg-ok/15 text-ok"}`}><Icon name={t.op === "get" ? "down" : "up"} className="w-4 h-4" weight="bold" /></div>
+        <div className={`relative grid place-items-center w-8 h-8 rounded-full shrink-0 ${t.status === "done" ? "bg-ok/15 text-ok" : t.op === "get" ? "bg-accent/15 text-accent" : "bg-ok/15 text-ok"} ${t.status === "running" ? `drip ${t.op === "put" ? "up" : ""}` : ""}`}>
+          {t.status === "done" ? (
+            <motion.span
+              key="done" className="grid place-items-center"
+              initial={{ scale: 0, rotate: -40 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 520, damping: 16 }}
+            ><Icon name="check" className="w-4 h-4" weight="bold" /></motion.span>
+          ) : <Icon name={t.op === "get" ? "down" : "up"} className="w-4 h-4" weight="bold" />}
+          {t.status === "done" && (
+            <motion.span
+              className="absolute inset-0 rounded-full border-2 border-ok pointer-events-none"
+              initial={{ scale: 1, opacity: 0.8 }} animate={{ scale: 2.2, opacity: 0 }} transition={{ duration: 0.8, ease: EASE }}
+            />
+          )}
+        </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-base font-semibold tracking-tight" title={t.job}>{t.job}</div>
           <div className="text-xs text-mute truncate">
@@ -59,7 +77,7 @@ function Item({ t }: { t: TransferState }) {
         {active && <button className="btn btn-danger" onClick={() => call(() => api.cancel({ id: t.id }))}><Icon name="x" />Huỷ</button>}
         {t.status === "done" && t.dest && <button className="btn" onClick={() => call(() => api.open_path({ path: t.dest! }))}><Icon name="folder" />Mở folder</button>}
       </div>
-    </div></li>
+    </div></motion.li>
   );
 }
 
@@ -76,7 +94,7 @@ export function Transfers() {
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
-        <h1 className="text-2xl font-semibold tracking-tight">Chuyển file</h1>
+        <Words text="Chuyển file" accent={["file"]} className="text-[30px]" />
         <button
           className="btn" disabled={!hasFinished}
           onClick={async () => { try { await api.clear_finished(); await refresh(); } catch (e) { toast(errorMessage(e), "error"); } }}
@@ -84,12 +102,12 @@ export function Transfers() {
       </div>
       {list.length === 0 ? (
         <div className="text-center text-mute py-16 rise">
-          <span className="mx-auto mb-3 grid place-items-center w-14 h-14 rounded-full bg-line/[0.06] text-mute"><Icon name="transfer" className="w-7 h-7" weight="light" /></span>
-          <div className="text-base">Chưa có lượt chuyển nào</div>
+          <TossMark className="mx-auto w-40 mb-2 opacity-80" speed={0.6} />
+          <div className="title text-xl text-ink">Chưa có lượt <em>chuyển</em> nào</div>
           <div className="text-sm">Dán link ở Trang chính để bắt đầu.</div>
         </div>
       ) : (
-        <ul className="space-y-3">{list.map((t) => <Item key={t.id} t={t} />)}</ul>
+        <ul className="space-y-3">{list.map((t, i) => <Item key={t.id} t={t} i={i} />)}</ul>
       )}
     </div>
   );

@@ -1,9 +1,10 @@
+import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TicketInfo } from "../lib/ipc-types";
 import { api, errorMessage } from "../lib/ipc";
 import { baseName, midTruncate } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Badge, FullSheet, Icon, Nest, Sheet } from "./ui";
+import { Badge, FullSheet, Icon, Nest, Sheet, Words } from "./ui";
 
 const DAYS = [
   { v: 1, label: "1 ngày" }, { v: 3, label: "3 ngày" }, { v: 7, label: "7 ngày" }, { v: 30, label: "30 ngày" }, { v: 0, label: "Không hết hạn" },
@@ -82,7 +83,7 @@ export function ShareView({ path }: { path: string }) {
     <FullSheet onClose={close} title="Tạo link">
       <div className="relative z-10 flex-1 min-h-0 overflow-y-auto px-4 pt-4 pb-2">
         <div className="flex items-center justify-between mb-2.5">
-          <h1 className="text-xl font-semibold tracking-tight">Tạo link</h1>
+          <Words text="Tạo link" accent={["link"]} className="text-[28px]" />
           {creating ? <Badge>Đang tạo…</Badge> : phase === "ready" ? <Badge tone="ok">Sẵn sàng</Badge> : <Badge tone="bad">Lỗi</Badge>}
         </div>
 
@@ -96,7 +97,7 @@ export function ShareView({ path }: { path: string }) {
         </div>
 
         {/* result */}
-        <div className="shell mb-2.5 rise"><div className="core p-3.5">
+        <div className="shell mb-2.5 rise" style={{ "--i": 1 } as React.CSSProperties}><div className="core p-3.5">
           {phase === "error" ? (
             <div className="py-6 text-center">
               <span className="mx-auto mb-2 grid place-items-center w-10 h-10 rounded-full bg-bad/15 text-bad"><Icon name="x" className="w-5 h-5" weight="bold" /></span>
@@ -134,7 +135,7 @@ export function ShareView({ path }: { path: string }) {
         </div></div>
 
         {/* options */}
-        <div className="card mb-1 rise px-3.5">
+        <div className="card mb-1 rise px-3.5" style={{ "--i": 2 } as React.CSSProperties}>
           <div className="flex items-center justify-between gap-3 min-h-[42px]">
             <label htmlFor="share-days" className="text-base">Hạn</label>
             <select id="share-days" className="input !w-40" value={days} disabled={creating} onChange={(e) => setDays(Number(e.target.value))}>
@@ -169,13 +170,13 @@ export function ShareAsk({ path }: { path: string }) {
     <Sheet onClose={close} title="Tạo link chia sẻ folder này?">
       <div className="flex items-center gap-2.5 mb-1">
         <span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="share" className="w-5 h-5" /></span>
-        <div className="text-lg font-semibold tracking-tight">Tạo link chia sẻ folder này?</div>
+        <div className="title text-[22px]">Tạo link <em>chia sẻ</em> folder này?</div>
       </div>
       <div className="rounded-[14px] hair bg-line/[0.04] px-3 py-2.5 my-3">
         <div className="truncate text-base font-medium">{baseName(path)}</div>
         <div className="mono text-xs text-mute selectable whitespace-nowrap overflow-hidden" title={path}>{midTruncate(path, 24, 24)}</div>
       </div>
-      <button className="btn btn-primary btn-lg w-full" onClick={() => open(path)}>Tạo link<Nest /></button>
+      <button className="btn btn-primary btn-lg w-full magnet" onClick={() => open(path)}>Tạo link<Nest /></button>
       <button className="btn btn-ghost w-full mt-2" onClick={close}>Huỷ</button>
     </Sheet>
   );

@@ -29,6 +29,7 @@ jobs:
         run: |
           mkdir -p _site
           cp web/index.html _site/index.html
+          cp -r web/fonts _site/fonts
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
