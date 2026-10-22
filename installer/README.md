@@ -4,8 +4,8 @@ Platform hooks consumed by the Tauri bundler, plus the studio host setup script.
 
 | Path | Used by |
 | --- | --- |
-| `windows/hooks.nsh` | NSIS installer (firewall rule on install, removed on uninstall) |
-| `macos/entitlements.plist` | macOS code signing (hardened runtime entitlements) |
+| `apps/desktop/src-tauri/bundle/hooks.nsh` | NSIS installer (firewall rule on install, removed on uninstall) |
+| `apps/desktop/src-tauri/bundle/entitlements.plist` | macOS code signing (hardened runtime entitlements) |
 | `host-setup/windows-host.ps1` | run once on the unattended studio host (see `host-setup/README.md`) |
 
 ## tauri.conf.json wiring (coordinator / desktop agent)
@@ -21,12 +21,12 @@ Paths are relative to `apps/desktop/src-tauri/` (where `tauri.conf.json` lives).
     "targets": ["nsis", "dmg", "app"],   // no MSI: the release workflow looks for *-setup.exe and *.dmg
     "windows": {
       "nsis": {
-        "installerHooks": "../../installer/windows/hooks.nsh",
+        "installerHooks": "bundle/hooks.nsh",
         "installMode": "both"            // lets the host install per-machine (UAC) so the firewall rule applies
       }
     },
     "macOS": {
-      "entitlements": "../../installer/macos/entitlements.plist",
+      "entitlements": "bundle/entitlements.plist",
       "minimumSystemVersion": "11.0"
     }
   },

@@ -48,12 +48,12 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "entitlements": "../../installer/macos/entitlements.plist",
+      "entitlements": "bundle/entitlements.plist",
       "minimumSystemVersion": "11.0"
     },
     "windows": {
       "nsis": {
-        "installerHooks": "../../installer/windows/hooks.nsh",
+        "installerHooks": "bundle/hooks.nsh",
         "installMode": "both",
         "languages": [
           "English"
