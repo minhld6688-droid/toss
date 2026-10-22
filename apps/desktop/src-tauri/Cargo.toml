@@ -36,6 +36,9 @@ data-encoding = { workspace = true }
 hostname = "0.4"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 blake3 = { workspace = true }
+# v0.4 diagnostics: rolling log file + "Xuất log" zip.
+tracing-appender = "0.2"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # Pin: tauri-plugin-deep-link 2.6.2 does not compile against rust-ini 0.21.3 (new ParseOption fields).
 # Unused here; it only constrains resolution. Remove once the plugin is fixed upstream.
