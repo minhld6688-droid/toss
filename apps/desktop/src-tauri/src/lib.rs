@@ -2,7 +2,9 @@
 
 mod commands;
 pub mod config;
+mod contacts;
 mod core;
+mod core_v05;
 mod ctxmenu;
 mod firewall;
 mod ipc;
@@ -89,6 +91,18 @@ pub fn run() {
             commands::test_connect,
             commands::set_net,
             commands::export_logs,
+            commands::list_contacts,
+            commands::create_invite,
+            commands::revoke_invites,
+            commands::parse_invite,
+            commands::accept_invite,
+            commands::rename_contact,
+            commands::set_contact_auto_accept,
+            commands::remove_contact,
+            commands::send_to_contact,
+            commands::list_incoming_pushes,
+            commands::answer_push,
+            commands::open_local_network_settings,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -112,16 +126,12 @@ pub fn run() {
                 let h = handle.clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        if let Some(t) = shell::ticket_from_url(url.as_str()) {
-                            shell::deliver_ticket(&h, t);
-                        }
+                        shell::deliver_url(&h, url.as_str());
                     }
                 });
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     for url in urls {
-                        if let Some(t) = shell::ticket_from_url(url.as_str()) {
-                            shell::deliver_ticket(&handle, t);
-                        }
+                        shell::deliver_url(&handle, url.as_str());
                     }
                 }
             }
@@ -153,25 +163,32 @@ pub fn run() {
                         api.prevent_close();
                         let _ = w.hide();
                     }
-                    WindowEvent::DragDrop(DragDropEvent::Enter { .. }) => {
-                        let _ = h.emit("drop:hover", serde_json::json!({ "on": true }));
+                    // Positions (CSS px, window-relative) let the UI hit-test the contact rows (v0.5).
+                    WindowEvent::DragDrop(DragDropEvent::Enter { position, .. }) => {
+                        let (x, y) = shell::css_pos(&w, position);
+                        let _ = h.emit("drop:hover", serde_json::json!({ "on": true, "x": x, "y": y }));
+                    }
+                    WindowEvent::DragDrop(DragDropEvent::Over { position }) => {
+                        let (x, y) = shell::css_pos(&w, position);
+                        let _ = h.emit("drop:over", serde_json::json!({ "x": x, "y": y }));
                     }
                     WindowEvent::DragDrop(DragDropEvent::Leave) => {
                         let _ = h.emit("drop:hover", serde_json::json!({ "on": false }));
                     }
-                    WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
+                    WindowEvent::DragDrop(DragDropEvent::Drop { paths, position }) => {
                         let _ = h.emit("drop:hover", serde_json::json!({ "on": false }));
+                        let (x, y) = shell::css_pos(&w, position);
                         let mut files = Vec::new();
                         for p in paths {
                             let s = p.to_string_lossy().into_owned();
                             match shell::ticket_from_file(&s) {
-                                // a dropped .toss file behaves like a deep link
-                                Some(t) => shell::deliver_ticket(&h, t),
+                                // a dropped .toss file behaves like a deep link (ticket or invite)
+                                Some(t) => shell::deliver_link(&h, t),
                                 None => files.push(s),
                             }
                         }
                         if !files.is_empty() {
-                            let _ = h.emit("drop", serde_json::json!({ "paths": files }));
+                            let _ = h.emit("drop", serde_json::json!({ "paths": files, "x": x, "y": y }));
                         }
                     }
                     _ => {}

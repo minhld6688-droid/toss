@@ -27,7 +27,7 @@ use toss_core::{
 };
 
 use crate::{
-    config, firewall,
+    config, core_v05, firewall,
     ipc::{AppState, HostConfig, JobLast, JobRecord, NetDiagUi, Root, TicketInfo, TicketSpec},
     logs,
     settings::{data_dir, QuickShare, Settings},
@@ -188,6 +188,7 @@ impl Core {
             Err(e) => return Err(e),
         };
         let node = Arc::new(node);
+        core_v05::set_inbox_dir(&node, PathBuf::from(self.settings().dest_dir));
         // Forward events before host mode starts emitting them.
         self.spawn_forwarder(&node);
         if let Some(h) = host {
@@ -350,6 +351,8 @@ impl Core {
                         for v in resync_events(&snaps, &seen) {
                             forward(&app, &mut seen, v);
                         }
+                        // the lag may have eaten contact / presence / push events too
+                        let _ = app.emit("contacts:changed", serde_json::json!({}));
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -408,7 +411,14 @@ impl Core {
 
     pub fn set_dest_dir(&self, path: String) -> Result<()> {
         std::fs::create_dir_all(&path).with_context(|| format!("không tạo được thư mục {path}"))?;
-        self.update_settings(|s| s.dest_dir = path)
+        self.update_settings(|s| s.dest_dir = path.clone())?;
+        // v0.5: files pushed by contacts land under the same folder.
+        if let Ok(guard) = self.node.try_read() {
+            if let Some(n) = guard.as_ref() {
+                core_v05::set_inbox_dir(n, PathBuf::from(path));
+            }
+        }
+        Ok(())
     }
 
     pub fn set_autostart(&self, on: bool) -> Result<()> {
@@ -1321,6 +1331,21 @@ fn resync_events(snaps: &[Value], seen: &Seen) -> Vec<Value> {
 /// Emit one core event to the UI (+ derived `host:status`, + native notifications).
 fn forward(app: &AppHandle, seen: &mut Seen, v: Value) {
     let _ = app.emit("transfer:event", &v);
+    // v0.5: contacts / presence / pushes / Local Network events also get their own UI event name.
+    if let Some((name, payload)) = v05_event(&v) {
+        if name == "push:incoming" {
+            notify(
+                app,
+                &format!(
+                    "{} muốn gửi {}",
+                    payload["from_name"].as_str().unwrap_or("Một máy"),
+                    payload["job"].as_str().unwrap_or("file")
+                ),
+            );
+        }
+        let _ = app.emit(name, payload);
+        return;
+    }
     if v["type"] == "host_status" {
         let mut p = v.clone();
         if let Some(o) = p.as_object_mut() {
@@ -1331,6 +1356,29 @@ fn forward(app: &AppHandle, seen: &mut Seen, v: Value) {
     }
     if let Some(body) = seen.track(&v) {
         notify(app, &body);
+    }
+}
+
+/// Maps a v0.5 core event (serde tag `type`) to the UI event of contracts/contacts-v0.5.md §4.
+/// None for every other event (transfer / host events keep their old route).
+fn v05_event(v: &Value) -> Option<(&'static str, Value)> {
+    use serde_json::json;
+    let without_type = || {
+        let mut p = v.clone();
+        if let Some(o) = p.as_object_mut() {
+            o.remove("type");
+        }
+        p
+    };
+    match v["type"].as_str()? {
+        "contacts_changed" => Some(("contacts:changed", json!({}))),
+        "contact_presence" => Some((
+            "contact:presence",
+            json!({ "id": v["id"], "online": v["online"], "rtt_ms": v["rtt_ms"] }),
+        )),
+        "push_incoming" => Some(("push:incoming", without_type())),
+        "lan_blocked" => Some(("net:lan_blocked", json!({ "blocked": v["blocked"] }))),
+        _ => None,
     }
 }
 
@@ -2012,5 +2060,30 @@ mod tests {
             .track(&serde_json::json!({"type": "error", "id": "c", "code": "cancelled", "retry_in_s": null, "msg": ""}))
             .is_none());
         assert!(seen.finished.contains("c"));
+    }
+
+    #[test]
+    fn v05_events_get_their_own_ui_event() {
+        use serde_json::json;
+        assert_eq!(
+            v05_event(&json!({"type": "contacts_changed"})),
+            Some(("contacts:changed", json!({})))
+        );
+        assert_eq!(
+            v05_event(&json!({"type": "contact_presence", "id": "ab", "online": true, "rtt_ms": 12})),
+            Some(("contact:presence", json!({"id": "ab", "online": true, "rtt_ms": 12})))
+        );
+        let (name, p) = v05_event(&json!({
+            "type": "push_incoming", "push_id": "p", "from_id": "ab", "from_name": "Đạt",
+            "job": "12A3", "files": 3, "bytes": 9, "at": 1
+        }))
+        .unwrap();
+        assert_eq!(name, "push:incoming");
+        assert!(p.get("type").is_none() && p["job"] == "12A3");
+        assert_eq!(
+            v05_event(&json!({"type": "lan_blocked", "blocked": true})),
+            Some(("net:lan_blocked", json!({"blocked": true})))
+        );
+        assert_eq!(v05_event(&json!({"type": "progress", "id": "x"})), None);
     }
 }

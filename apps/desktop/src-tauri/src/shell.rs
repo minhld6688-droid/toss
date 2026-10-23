@@ -175,8 +175,70 @@ pub fn ticket_from_url(url: &str) -> Option<String> {
         .strip_prefix("t/")
         .or_else(|| body.strip_prefix("T/"))
         .unwrap_or(body);
+    // toss://i/<invite> (and a bare toss://tossinv1…) is a pairing invite, not a ticket.
+    let is_invite_path = body
+        .get(..2)
+        .is_some_and(|p| p.eq_ignore_ascii_case("i/"));
+    if is_invite_path || starts_with_invite(body) {
+        return None;
+    }
     let body = body.trim_matches('/').trim();
     (!body.is_empty()).then(|| body.to_string())
+}
+
+const INVITE_PREFIX: &str = "tossinv1";
+
+fn starts_with_invite(s: &str) -> bool {
+    s.get(..INVITE_PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(INVITE_PREFIX))
+}
+
+/// Pairing invite (`tossinv1…`) inside a `toss://i/…` deep link, a bare toss://tossinv1…, a web link
+/// `https://host/#tossinv1…` or pasted text. Returns it lower-cased (base32); None for anything else.
+pub fn invite_from_url(text: &str) -> Option<String> {
+    let lower = text.trim().to_ascii_lowercase();
+    let at = lower.find(INVITE_PREFIX)?;
+    let before = &lower[..at];
+    if !(before.is_empty() || before == "toss://i/" || before == "toss://" || before.ends_with('#')) {
+        return None;
+    }
+    let rest: String = lower[at + INVITE_PREFIX.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_lowercase() || ('2'..='7').contains(c))
+        .collect();
+    (rest.len() >= 16).then(|| format!("{INVITE_PREFIX}{rest}"))
+}
+
+/// Hand an invite to the UI (`invite {invite}`), queued until the UI is ready.
+pub fn deliver_invite(app: &AppHandle, invite: String) {
+    if !app.state::<Shell>().first_delivery(&invite) {
+        return;
+    }
+    show_main(app);
+    deliver(app, "invite", json!({ "invite": invite }));
+}
+
+/// Route a deep-link URL: invite -> `invite`, ticket -> `deep-link`; anything else is ignored.
+pub fn deliver_url(app: &AppHandle, url: &str) {
+    if let Some(i) = invite_from_url(url) {
+        deliver_invite(app, i);
+    } else if let Some(t) = ticket_from_url(url) {
+        deliver_ticket(app, t);
+    }
+}
+
+/// Same for text that is already unwrapped (the content of a dropped `.toss` file).
+pub fn deliver_link(app: &AppHandle, text: String) {
+    match invite_from_url(&text) {
+        Some(i) => deliver_invite(app, i),
+        None => deliver_ticket(app, text),
+    }
+}
+
+/// Window-relative drag position in CSS pixels (what `elementFromPoint` wants).
+pub fn css_pos(w: &tauri::WebviewWindow, p: &tauri::PhysicalPosition<f64>) -> (f64, f64) {
+    let f = w.scale_factor().unwrap_or(1.0).max(0.1);
+    ((p.x / f).round(), (p.y / f).round())
 }
 
 /// Reads a `.toss` file (a text file containing a ticket or link).
@@ -205,8 +267,11 @@ pub fn handle_args(app: &AppHandle, args: &[String], cwd: &Path) -> bool {
         return true;
     }
     for a in args.iter().skip(1) {
-        if let Some(t) = ticket_from_url(a).or_else(|| ticket_from_file(a)) {
-            deliver_ticket(app, t);
+        if let Some(i) = invite_from_url(a) {
+            deliver_invite(app, i);
+            handled = true;
+        } else if let Some(t) = ticket_from_url(a).or_else(|| ticket_from_file(a)) {
+            deliver_link(app, t);
             handled = true;
         }
     }
@@ -300,6 +365,25 @@ mod tests {
         assert_eq!(ticket_from_url("toss://t/"), None);
         assert_eq!(ticket_from_url("https://x/#toss1abc"), None);
         assert_eq!(ticket_from_url("--hidden"), None);
+    }
+
+    #[test]
+    fn invites_are_not_tickets() {
+        let inv = "tossinv1mfrggzdfmz2gq5dsnfxgo3tp";
+        assert_eq!(invite_from_url(&format!("toss://i/{inv}")), Some(inv.into()));
+        assert_eq!(invite_from_url(&format!("  TOSS://I/{}/  ", inv.to_uppercase())), Some(inv.into()));
+        assert_eq!(invite_from_url(inv), Some(inv.into()));
+        assert_eq!(
+            invite_from_url(&format!("https://host.dev/toss/#{inv}")),
+            Some(inv.into())
+        );
+        assert_eq!(invite_from_url("tossinv1abc"), None, "too short");
+        assert_eq!(invite_from_url("toss://t/toss1abcdefghijklmnop"), None);
+        assert_eq!(invite_from_url(&format!("xtossinv1{}", &inv[8..])), None);
+        // the ticket route must leave them alone
+        assert_eq!(ticket_from_url(&format!("toss://i/{inv}")), None);
+        assert_eq!(ticket_from_url(&format!("toss://{inv}")), None);
+        assert_eq!(ticket_from_url("toss://ỉ/Ảnh"), Some("ỉ/Ảnh".into()));
     }
 
     #[test]
