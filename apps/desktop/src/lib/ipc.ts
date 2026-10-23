@@ -1,11 +1,11 @@
 // Single entry point for UI <-> shell calls.
 //  - real mode: @tauri-apps/api invoke()/listen()
 //  - mock mode (VITE_MOCK=1, or no Tauri runtime present): in-memory simulation (./mock)
-import type { Commands, CommandsV05, Events, EventsV05 } from "./ipc-types";
+import type { Commands, CommandsV05, CommandsV051, Events, EventsV05, EventsV051 } from "./ipc-types";
 import type { ExtraCommands, ExtraEvents } from "./ipc-extra";
 
-export type AllCommands = Commands & CommandsV05 & ExtraCommands;
-export type AllEvents = Events & EventsV05 & ExtraEvents;
+export type AllCommands = Commands & CommandsV05 & CommandsV051 & ExtraCommands;
+export type AllEvents = Events & EventsV05 & EventsV051 & ExtraEvents;
 
 const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 export const isMock: boolean = import.meta.env.VITE_MOCK === "1" || !hasTauri;
@@ -20,6 +20,7 @@ const COMMAND_NAMES: (keyof AllCommands)[] = [
   "get_diagnostics", "add_firewall_rule", "test_connect", "set_net", "export_logs",
   "list_contacts", "create_invite", "revoke_invites", "accept_invite", "rename_contact", "set_contact_auto_accept",
   "remove_contact", "send_to_contact", "list_incoming_pushes", "answer_push", "open_local_network_settings", "parse_invite",
+  "check_update", "install_update", "set_auto_update", "remote_update",
 ];
 
 function errText(e: unknown): string {

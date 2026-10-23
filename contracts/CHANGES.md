@@ -129,3 +129,11 @@ Why: the real-network e2e (Windows host, macOS client) never connected: the clie
 - **lanprobe**: errno classification via `io::ErrorKind::{HostUnreachable, NetworkUnreachable, PermissionDenied}`; gateway from `netwatch::interfaces::HomeRouter` (new direct dep `netwatch 0.19.3`, already in the lock via iroh — no new crate). When no private gateway is known only the multicast send decides. Non-macOS: no probe task, always false.
 - `tests/nat.rs::diagnostics_json_shape` now expects the `lan_blocked` key (it failed on v0.5-base since day 0 added the field).
 - CLI: `toss-cli invite [--days 7] [--page-host H] [--wait [--inbox DIR]]` (default: signed offline with `cli-host.json` addresses for a running `toss-cli host`; `--wait` runs its own node and serves pairings/pushes until Ctrl-C), `toss-cli pair <invite>`, `toss-cli contacts` (offline, from contacts.json), `toss-cli send <id|id-prefix≥6|name> PATH...` (honours `--max-wait`). `toss-cli host` sets the inbox to `--return` and auto-accepts queued pushes; event lines for the new events.
+
+## 2026-10-23 WS-G (desktop) — v0.5.1 in-app updates (additive)
+
+- `contracts/ipc.ts`: `AppState.auto_update`, `UpdateInfo`, `CommandsV051` (`check_update`, `install_update`, `set_auto_update`, `remote_update`), `EventsV051` (`update:available`, `update:phase`, `update:progress`, `update:error`).
+- Settings: `auto_update: Option<bool>`; absent = on when host mode is configured, off otherwise.
+- The core event `update_requested {device}` (ctl `RequestUpdate` from an admin device) is consumed by the shell (not forwarded to the UI): notification "Cập nhật theo yêu cầu từ <device>", check, install after running transfers finish (≤ 10 min).
+- Before installing, the shell stops the node (`Node::shutdown`: transfers.json frozen as running, so client transfers resume after the restart).
+- `remote_update` reads `remote_status().version` first: < 0.5.1 → "Máy tổng đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này".

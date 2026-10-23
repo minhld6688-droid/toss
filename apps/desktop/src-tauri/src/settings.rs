@@ -32,6 +32,10 @@ pub struct Settings {
     pub host_auto: bool,
     /// v0.4: network settings (own relay, mDNS, port mapping, tuning). Old files load with defaults.
     pub net: toss_core::NetConfig,
+    /// v0.5.1: install updates by themselves. None (old files, never touched)
+    /// = on for a host (máy tổng, often unattended), off otherwise; see
+    /// [`Settings::auto_update`].
+    pub auto_update: Option<bool>,
 }
 
 /// One quick-shared folder (ipc.ts `list_quick_shares`).
@@ -61,6 +65,7 @@ impl Default for Settings {
             quick_shares: Vec::new(),
             host_auto: false,
             net: toss_core::NetConfig::default(),
+            auto_update: None,
         }
     }
 }
@@ -114,6 +119,11 @@ impl Settings {
         fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
         fs::rename(&tmp, Self::path(dir))?;
         Ok(())
+    }
+
+    /// Effective auto-update flag (default: on when host mode is configured).
+    pub fn auto_update(&self) -> bool {
+        self.auto_update.unwrap_or(self.host.is_some())
     }
 
     pub fn page_host(&self) -> String {
@@ -185,6 +195,26 @@ mod tests {
             toss_core::NetConfig::default(),
             "pre-0.4 files get the default net config"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_update_defaults_to_host_mode() {
+        let mut s = Settings::default();
+        assert!(!s.auto_update(), "a plain client does not update by itself");
+        s.host = Some(HostConfig::default());
+        assert!(
+            s.auto_update(),
+            "a host updates by itself unless turned off"
+        );
+        s.auto_update = Some(false);
+        assert!(!s.auto_update());
+        s.host = None;
+        s.auto_update = Some(true);
+        assert!(s.auto_update());
+        let dir = tmp("au");
+        s.save(&dir).unwrap();
+        assert_eq!(Settings::load(&dir).auto_update, Some(true));
         let _ = fs::remove_dir_all(&dir);
     }
 

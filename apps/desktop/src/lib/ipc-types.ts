@@ -23,6 +23,7 @@ export interface AppState {
   context_menu: boolean;        // "Tạo link Toss" registered in the OS right-click menu (v0.3)
   net: NetConfig;               // v0.4
   auto_receive: boolean;        // v0.3: a clicked link with `get` starts downloading immediately (default true)           // true until setup finished
+  auto_update: boolean;         // v0.5.1: updates install by themselves (default: on for a host, off otherwise)
 }
 
 export interface Root { alias: string; path: string }
@@ -193,3 +194,33 @@ export type TransferEventV05 =
   | { type: "contact_presence"; id: string; online: boolean; rtt_ms: number | null }
   | ({ type: "push_incoming" } & IncomingPush)
   | { type: "lan_blocked"; blocked: boolean };
+
+// ===========================================================================
+// ---- v0.5.1 in-app updates (tauri-plugin-updater, signed GitHub release feed) ----
+// Edited in place above: AppState.auto_update. Everything runs in Rust commands (no JS plugin API).
+export interface UpdateInfo {
+  available: boolean;           // a newer release than the running one exists
+  current: string;              // running version
+  version: string | null;       // the newer version
+  notes: string | null;         // release notes (may contain the "#force" marker)
+  forced: boolean;              // notes contain "#force": installs by itself (after running transfers finish)
+  date: string | null;
+}
+export type UpdatePhase = "waiting" | "downloading" | "installing";
+
+export interface CommandsV051 {
+  check_update(): Promise<UpdateInfo>;
+  // waits until no transfer is running (≤ 30 min), downloads (update:progress), pauses client transfers
+  // (they resume after the restart), installs, restarts. Rejects when there is nothing newer.
+  install_update(): Promise<void>;
+  set_auto_update(args: { on: boolean }): Promise<void>;
+  // asks the remote host (stored admin ticket) to update itself and restart; hosts < 0.5.1 → Vietnamese error
+  remote_update(): Promise<void>;
+}
+
+export type EventsV051 = {
+  "update:available": UpdateInfo;                                   // background check (60 s after start, then every 6 h)
+  "update:phase": { phase: UpdatePhase; active: number };           // active = transfers still running while "waiting"
+  "update:progress": { downloaded: number; total: number | null };  // bytes
+  "update:error": { msg: string };
+};

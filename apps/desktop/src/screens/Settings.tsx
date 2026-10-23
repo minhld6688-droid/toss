@@ -9,6 +9,7 @@ import { JobList } from "../components/JobList";
 import { QrLink } from "../components/QrLink";
 import { ConnectionSection } from "../components/Connection";
 import { FirewallSheet } from "../components/Firewall";
+import { RemoteUpdate, UpdateSection } from "../components/Update";
 
 const ALIAS_RE = /^[A-Za-z0-9_-]{1,32}$/;
 /** Host mode listens on this UDP port unless the user picks another (contracts/speed-v0.4.md §2). */
@@ -347,6 +348,8 @@ function RemotePanel() {
         <button className="btn btn-icon shrink-0" onClick={() => void loadStatus()}><Icon name="refresh" /></button>
       </div>
 
+      {status && <RemoteUpdate status={status} onStatus={setStatus} />}
+
       {status && (
         <>
           <div>
@@ -412,6 +415,7 @@ export function Settings() {
     <div className="p-4">
       <Words text="Cài đặt" accent={["đặt"]} className="text-[30px] mb-4" />
       <DeviceSection />
+      <UpdateSection />
       <ConnectionSection />
       <ShareSection />
       <HostEditor />

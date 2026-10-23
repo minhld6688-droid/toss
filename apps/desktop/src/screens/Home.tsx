@@ -7,6 +7,7 @@ import { Badge, Icon, Nest, Words } from "../components/ui";
 import { TossMark } from "../components/TossMark";
 import { ContactsSection } from "../components/Contacts";
 import { LanBlockedCard } from "../components/LanBlocked";
+import { UpdateBanner } from "../components/Update";
 import { api, errorMessage, isMock } from "../lib/ipc";
 
 export function Home() {
@@ -63,6 +64,7 @@ export function Home() {
 
   return (
     <div className="p-4 pb-2">
+      <UpdateBanner />
       <LanBlockedCard className="mb-4" />
       <ContactsSection />
       <div className={`shell rise transition-colors duration-500 ease-aura ${dropHover ? "bg-accent/10" : ""}`}>

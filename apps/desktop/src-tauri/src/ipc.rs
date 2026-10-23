@@ -35,6 +35,8 @@ pub struct AppState {
     pub auto_receive: bool,
     /// v0.4: network settings (own relay, mDNS, port mapping, tuning).
     pub net: toss_core::NetConfig,
+    /// v0.5.1: updates install by themselves (default: on for a host).
+    pub auto_update: bool,
 }
 
 /// v0.4 `get_diagnostics`: the core snapshot plus what only the shell can see.

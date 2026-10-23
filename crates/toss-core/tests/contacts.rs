@@ -1,7 +1,8 @@
 //! v0.5 "Danh bạ máy" (contracts/contacts-v0.5.md §6): invites, pairing,
 //! presence, pushes to contacts, transfer persistence across a restart, and
 //! the Local Network probe. Nodes talk over loopback (`add_peer_addr`); no
-//! internet needed.
+//! internet needed. The restart test writes ~300 MB under `TMPDIR`: on a
+//! nearly full disk it (and `write_data`) fail with "No space left on device".
 
 use std::{
     io::Write,
@@ -135,6 +136,23 @@ async fn wait_until(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
     let t0 = Instant::now();
     while !f() {
         assert!(t0.elapsed() < limit, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until client transfer `id` of `n` is `Done`; fails at once (with its
+/// state) when it ends otherwise, e.g. `No space left on device` on a full
+/// disk, instead of running into the timeout.
+async fn wait_done(n: &Node, id: &str, what: &str, limit: Duration) {
+    let t0 = Instant::now();
+    loop {
+        let st = n.transfer(&id.to_string()).expect("transfer listed");
+        match st.status {
+            Status::Done => return,
+            Status::Error | Status::Cancelled => panic!("{what} ended with {st:?}"),
+            _ => {}
+        }
+        assert!(t0.elapsed() < limit, "timed out waiting for {what}: {st:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -546,9 +564,12 @@ async fn restart_mid_get_resumes_from_transfers_json() {
         client.transfer(&tr.id).is_some()
     })
     .await;
-    wait_until("resumed transfer done", Duration::from_secs(150), || {
-        client.transfer(&tr.id).unwrap().status == Status::Done
-    })
+    wait_done(
+        &client,
+        &tr.id,
+        "resumed transfer",
+        Duration::from_secs(150),
+    )
     .await;
     assert!(std::fs::read(&fin).unwrap() == std::fs::read(&src).unwrap());
     assert!(!part.exists());
@@ -556,9 +577,12 @@ async fn restart_mid_get_resumes_from_transfers_json() {
     assert!(saved.contains("\"done\""), "{saved}");
     assert_eq!(client.transfer(&paused.id).unwrap().status, Status::Paused);
     client.resume(&paused.id).await.unwrap();
-    wait_until("resumed paused transfer", Duration::from_secs(150), || {
-        client.transfer(&paused.id).unwrap().status == Status::Done
-    })
+    wait_done(
+        &client,
+        &paused.id,
+        "resumed paused transfer",
+        Duration::from_secs(150),
+    )
     .await;
     assert!(std::fs::read(dest2.join("Big/clip.mov")).unwrap() == std::fs::read(&src).unwrap());
     client.shutdown().await;

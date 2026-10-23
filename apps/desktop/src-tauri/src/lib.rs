@@ -12,6 +12,7 @@ mod logs;
 mod services;
 mod settings;
 mod shell;
+mod updater;
 
 use std::sync::Arc;
 
@@ -46,6 +47,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // v0.5.1 in-app updates; everything runs in Rust commands (no JS permission needed).
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(core.clone())
         .manage(Shell::default())
         .invoke_handler(tauri::generate_handler![
@@ -103,6 +107,10 @@ pub fn run() {
             commands::list_incoming_pushes,
             commands::answer_push,
             commands::open_local_network_settings,
+            commands::check_update,
+            commands::install_update,
+            commands::set_auto_update,
+            commands::remote_update,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -149,6 +157,9 @@ pub fn run() {
             });
 
             shell::build_tray(&handle)?;
+
+            // v0.5.1: update checks (60 s after start, then every 6 h).
+            updater::spawn_background(&handle);
 
             if let Some(win) = app.get_webview_window(config::MAIN_WINDOW) {
                 // Hidden start (autostart on a host machine) unless the setup wizard still has to run.

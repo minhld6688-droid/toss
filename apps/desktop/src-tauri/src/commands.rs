@@ -21,6 +21,7 @@ use crate::{
     },
     settings::QuickShare,
     shell::Shell,
+    updater,
 };
 
 /// Errors cross the IPC boundary as plain strings (Vietnamese where user-facing).
@@ -359,6 +360,36 @@ pub async fn answer_push(core: C<'_>, push_id: String, accept: bool) -> Res<()> 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn open_local_network_settings() -> Res<()> {
     Ok(contacts::open_local_network_settings()?)
+}
+
+// ---- v0.5.1 updates ----------------------------------------------------------------------------------------
+#[tauri::command(rename_all = "snake_case")]
+pub async fn check_update(app: AppHandle) -> Res<updater::UpdateInfo> {
+    Ok(updater::check(&app).await?)
+}
+
+/// Installs the newer version (after running transfers finish, at most 30 min) and restarts.
+/// Progress arrives as `update:phase` / `update:progress`; errors also as `update:error`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn install_update(app: AppHandle, core: C<'_>) -> Res<()> {
+    let core = core.inner().clone();
+    match updater::install(&app, &core, updater::Reason::User).await? {
+        true => Ok(()),
+        false => Err(CmdError(
+            "Bạn đang dùng bản mới nhất (hoặc đang cập nhật)".into(),
+        )),
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_auto_update(core: C<'_>, on: bool) -> Res<()> {
+    Ok(core.set_auto_update(on)?)
+}
+
+/// Asks the remote host (stored admin ticket) to update itself and restart.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remote_update(core: C<'_>) -> Res<()> {
+    Ok(core.remote_update().await?)
 }
 
 // ---- misc ------------------------------------------------------------------------------------------------------
