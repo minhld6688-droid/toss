@@ -6410,6 +6410,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "n0-future",
+ "netwatch",
  "noq-proto",
  "parking_lot",
  "portmapper",

@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
-use crate::{util::now_unix, wire};
+use crate::{contacts::IncomingPush, util::now_unix, wire};
 
 /// `hex(ticket.id) + "-" + 4 random hex chars`.
 pub type TransferId = String;
@@ -35,6 +35,8 @@ pub enum TransferEvent {
         side: Side,
         /// Device name or endpoint id of the other side.
         peer: String,
+        /// v0.5: contact id (hex) for pushes to/from a contact, both sides.
+        contact: Option<String>,
     },
     /// Manifest exchanged; `to_do_*` is what actually moves this session.
     Manifest {
@@ -103,6 +105,24 @@ pub enum TransferEvent {
     },
     /// Host status changed (host mode only).
     HostStatus(wire::HostStatus),
+    /// v0.5: the contact list changed (pairing, rename, removal, settings).
+    ContactsChanged {},
+    /// v0.5: a contact went online/offline or its RTT changed.
+    ContactPresence {
+        /// Contact id (hex).
+        id: String,
+        /// Online now.
+        online: bool,
+        /// RTT of the last presence ping, ms.
+        rtt_ms: Option<u32>,
+    },
+    /// v0.5: a contact wants to send files and waits for `Node::answer_push`.
+    PushIncoming(IncomingPush),
+    /// v0.5: macOS blocks Toss from the local network (changed).
+    LanBlocked {
+        /// Blocked now.
+        blocked: bool,
+    },
 }
 
 /// Which side of a transfer this node is.
@@ -154,7 +174,7 @@ pub enum ErrorCode {
 }
 
 /// Lifecycle status.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     /// Dialing / waiting to retry.
@@ -217,6 +237,8 @@ pub struct TransferState {
     pub error: Option<String>,
     /// Unix seconds.
     pub started_at: u64,
+    /// v0.5: contact id (hex) for pushes to/from a contact, both sides.
+    pub contact: Option<String>,
 }
 
 /// Handle to a transfer.
@@ -340,6 +362,7 @@ impl Tracker {
             dest,
             error: None,
             started_at: now_unix(),
+            contact: None,
         };
         let (state, _) = watch::channel(st);
         Arc::new(Tracker {
@@ -383,6 +406,7 @@ impl Tracker {
             op: s.op,
             side: s.side,
             peer: s.peer,
+            contact: s.contact,
         });
     }
 

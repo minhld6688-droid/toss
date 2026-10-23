@@ -1,4 +1,5 @@
-//! Protocol messages for `toss/xfer/1` and `toss/ctl/1` (wire.md §3–§4) and
+//! Protocol messages for `toss/xfer/1`, `toss/ctl/1` (wire.md §3–§4) and
+//! `toss/peer/1` (contacts-v0.5.md §2.2), and
 //! the length-prefixed postcard framing.
 //!
 //! Every control message is `u32 LE length` + `postcard(msg)`, max 4 MiB.
@@ -332,6 +333,80 @@ pub fn decode_segment_header(h: &[u8; SEG_HEADER_LEN]) -> (u32, u64, u64) {
         u64::from_le_bytes(o),
         u64::from_le_bytes(l),
     )
+}
+
+// ───────────────────── toss/peer/1 (contacts-v0.5.md §2.2) ─────────────────────
+
+/// Request on the first bi stream of a `toss/peer/1` connection (max 64 KiB).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PeerReq {
+    /// From a stranger holding an invite of the dialed device.
+    Pair {
+        /// The invite secret.
+        secret: [u8; 16],
+        /// Dialer device name.
+        name: String,
+        /// Dialer platform.
+        platform: String,
+        /// Dialer app version.
+        version: String,
+    },
+    /// Presence ping from a contact.
+    Hello {
+        /// Sender device name.
+        name: String,
+        /// Sender app version.
+        version: String,
+    },
+    /// A contact wants to send files; on `PushAccepted` the stream continues
+    /// with xfer/2 put semantics (Manifest → Want → segments → Done).
+    Push {
+        /// Random id; the same id is reused when the push resumes.
+        push_id: [u8; 16],
+        /// Job (folder) name.
+        job: String,
+        /// Files in the job.
+        files: u32,
+        /// Bytes in the job.
+        bytes: u64,
+    },
+}
+
+/// Answer to a [`PeerReq`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PeerResp {
+    /// Pairing accepted; the answering device's own name and platform.
+    Paired {
+        /// Device name.
+        name: String,
+        /// Platform.
+        platform: String,
+        /// App version.
+        version: String,
+    },
+    /// Presence answer.
+    Pong {
+        /// Device name.
+        name: String,
+        /// App version.
+        version: String,
+        /// A transfer is running.
+        busy: bool,
+    },
+    /// Send the manifest.
+    PushAccepted,
+    /// The user (or the 10 min timeout) declined.
+    PushDeclined {
+        /// Why (Vietnamese).
+        reason: String,
+    },
+    /// Waiting for the user; `PushAccepted` / `PushDeclined` follows on the same stream.
+    PushQueued,
+    /// Not a contact / bad invite.
+    Denied {
+        /// Why (Vietnamese).
+        reason: String,
+    },
 }
 
 #[cfg(test)]

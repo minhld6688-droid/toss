@@ -26,6 +26,7 @@ iroh-mdns-address-lookup = "0.6.1"
 portmapper = { version = "0.19.3", default-features = false }
 noq-proto = { version = "1.4", default-features = false }
 bytes = "1"
+netwatch = "0.19.3"
 
 [dev-dependencies]
 tempfile = "3"

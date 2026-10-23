@@ -255,7 +255,7 @@ pub enum TicketError {
     Expired,
 }
 
-mod sig64 {
+pub(crate) mod sig64 {
     use serde::{
         de::{Error, SeqAccess, Visitor},
         ser::SerializeTuple,

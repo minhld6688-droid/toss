@@ -15,14 +15,15 @@ use tokio::sync::watch;
 
 use crate::{
     fsutil::{part_path, walk, HashCache, HASH_THREADS},
-    node::{ClientJob, Ctrl, EntryKind, Inner, Running},
+    node::{ClientJob, Ctrl, EntryKind, Inner, Running, Target},
     paths::{canonicalize, check_inside, sanitize_component, sanitize_rel},
+    resume::{Kind, TransferRecord},
     ticket::Ticket,
     transfer::{conn_path, ConnPath, ErrorCode, Side, Status, Tracker, Transfer},
-    util::random_suffix,
+    util::{now_unix, random_suffix},
     wire::{
-        read_msg, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello, Manifest, Op,
-        Want, WantItem,
+        read_msg, read_msg_max, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello,
+        Manifest, Op, PeerReq, PeerResp, Want, WantItem, MAX_HELLO,
     },
     xfer::{self, net, timed, Pipe, RecvItem, SendItem, SessErr},
     ALPN_XFER, ALPN_XFER2,
@@ -106,8 +107,31 @@ pub(crate) async fn start(
         job_dir.as_ref().map(|d| d.display().to_string()),
         inner.events.clone(),
     );
+    let rec = TransferRecord {
+        id: id.clone(),
+        kind: match op {
+            Op::Get => Kind::Get,
+            Op::Put => Kind::Put,
+        },
+        ticket: Some(ticket.to_string()),
+        contact: None,
+        paths: (op == Op::Put).then(|| paths.clone()),
+        dest: job_dir
+            .as_ref()
+            .and_then(|d| d.parent().map(Path::to_path_buf)),
+        job: ticket.body.job.clone(),
+        status: Status::Connecting,
+        bytes_done: 0,
+        bytes_total: 0,
+        created: now_unix(),
+        push_id: None,
+        peer: host.fmt_short().to_string(),
+        files_total: 0,
+        files_done: 0,
+        error: None,
+    };
     let job = Arc::new(ClientJob {
-        ticket,
+        target: Target::Ticket(ticket),
         op,
         job_dir,
         paths,
@@ -122,7 +146,7 @@ pub(crate) async fn start(
         let found = map.values().find_map(|e| match &e.kind {
             EntryKind::Client(j)
                 if j.op == Op::Get
-                    && j.ticket.body.id == job.ticket.body.id
+                    && j.ticket().map(|t| t.body.id) == job.ticket().map(|t| t.body.id)
                     && j.job_dir == job.job_dir
                     && !e.tracker.status().is_final() =>
             {
@@ -152,6 +176,7 @@ pub(crate) async fn start(
             rx: t.subscribe_state(),
         });
     }
+    crate::resume::track(&inner.store, rec, &tracker);
     tracker.started();
     let rx = tracker.subscribe_state();
     {
@@ -159,6 +184,186 @@ pub(crate) async fn start(
         spawn_locked(&mut running, inner, job.clone(), tracker);
     }
     Ok(Transfer { id, rx })
+}
+
+/// v0.5: creates and starts a push to contact `contact_id` (hex).
+pub(crate) async fn start_push(
+    inner: &Arc<Inner>,
+    contact_id: &str,
+    paths: Vec<PathBuf>,
+) -> Result<Transfer> {
+    let contact = inner
+        .contacts
+        .get(contact_id)
+        .ok_or_else(|| anyhow!("không có máy {contact_id} trong danh bạ"))?
+        .c;
+    let id = crate::peer::parse_endpoint_id(&contact.id)?;
+    if paths.is_empty() {
+        bail!("nothing to send");
+    }
+    for p in &paths {
+        tokio::fs::symlink_metadata(p)
+            .await
+            .with_context(|| format!("cannot read {}", p.display()))?;
+    }
+    let job_name = push_job_name(&paths);
+    let push_id = crate::util::random_id();
+    let rec = TransferRecord {
+        id: format!("{}-{}", hex::encode(push_id), random_suffix()),
+        kind: Kind::Push,
+        ticket: None,
+        contact: Some(contact.id.clone()),
+        paths: Some(paths.clone()),
+        dest: None,
+        job: job_name.clone(),
+        status: Status::Connecting,
+        bytes_done: 0,
+        bytes_total: 0,
+        created: now_unix(),
+        push_id: Some(hex::encode(push_id)),
+        peer: contact.name.clone(),
+        files_total: 0,
+        files_done: 0,
+        error: None,
+    };
+    let job = Arc::new(ClientJob {
+        target: Target::Contact {
+            id,
+            push_id,
+            job: job_name,
+        },
+        op: Op::Put,
+        job_dir: None,
+        paths,
+        part_files: Default::default(),
+        running: tokio::sync::Mutex::new(None),
+    });
+    let tracker = launch(inner, job, rec, true);
+    Ok(Transfer {
+        id: tracker.id.clone(),
+        rx: tracker.subscribe_state(),
+    })
+}
+
+/// Job name of a push: the dropped folder's name (one folder), else "N file".
+fn push_job_name(paths: &[PathBuf]) -> String {
+    if let [p] = paths {
+        if p.is_dir() {
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                return name.chars().take(crate::ticket::MAX_JOB_LEN).collect();
+            }
+        }
+    }
+    format!("{} file", paths.len())
+}
+
+/// Registers a client job (tracker with the record's id and state, persisted
+/// via `transfers.json`) and starts its worker when `run`. `job` is new (its
+/// `running` lock is free).
+fn launch(inner: &Arc<Inner>, job: Arc<ClientJob>, rec: TransferRecord, run: bool) -> Arc<Tracker> {
+    let tracker = Tracker::new(
+        rec.id.clone(),
+        rec.job.clone(),
+        job.op,
+        Side::Client,
+        rec.peer.clone(),
+        job.job_dir.as_ref().map(|d| d.display().to_string()),
+        inner.events.clone(),
+    );
+    tracker.update(|s| {
+        s.contact = rec.contact.clone();
+        s.status = rec.status;
+        s.bytes_done = rec.bytes_done;
+        s.bytes_total = rec.bytes_total;
+        s.files_done = rec.files_done;
+        s.files_total = rec.files_total;
+        s.error = rec.error.clone();
+        s.started_at = rec.created;
+    });
+    tracker
+        .bytes_done
+        .store(rec.bytes_done, std::sync::atomic::Ordering::Relaxed);
+    inner.register(tracker.clone(), EntryKind::Client(job.clone()));
+    crate::resume::track(&inner.store, rec, &tracker);
+    if run {
+        tracker.started();
+        match job.running.try_lock() {
+            Ok(mut running) => spawn_locked(&mut running, inner, job.clone(), tracker.clone()),
+            Err(_) => tracing::error!(id = %tracker.id, "new transfer already locked"),
+        }
+    }
+    tracker
+}
+
+/// v0.5: restores the transfers of `transfers.json` (called by `Node::start`):
+/// running/connecting ones resume, paused/failed ones wait for `Node::resume`,
+/// finished ones stay in the list. Registered before `Node::start` returns,
+/// so a new get of the same job finds (and reuses) the restored one.
+pub(crate) fn restore_all(inner: &Arc<Inner>) {
+    let records = inner.store.records();
+    if records.is_empty() {
+        return;
+    }
+    let mut resumed = 0;
+    for mut rec in records {
+        let id = rec.id.clone();
+        match restore_job(inner, &rec) {
+            Ok(job) => {
+                let run = matches!(rec.status, Status::Running | Status::Connecting);
+                if run {
+                    rec.status = Status::Connecting;
+                    resumed += 1;
+                }
+                launch(inner, job, rec, run);
+            }
+            Err(e) => {
+                tracing::info!(%id, "dropping saved transfer: {e:#}");
+                inner.store.remove(&[id]);
+            }
+        }
+    }
+    tracing::info!(resumed, "restored saved transfers");
+}
+
+fn restore_job(inner: &Inner, rec: &TransferRecord) -> Result<Arc<ClientJob>> {
+    let (target, op, job_dir) = match rec.kind {
+        Kind::Get | Kind::Put => {
+            let t = Ticket::from_str(rec.ticket.as_deref().unwrap_or_default())
+                .map_err(|e| anyhow!(e))?;
+            if rec.kind == Kind::Get {
+                let dest = rec.dest.clone().ok_or_else(|| anyhow!("no destination"))?;
+                let fallback = format!("toss-{}", &t.id_hex()[..8]);
+                let dir = dest.join(sanitize_component(&t.body.job, &fallback));
+                (Target::Ticket(t), Op::Get, Some(dir))
+            } else {
+                (Target::Ticket(t), Op::Put, None)
+            }
+        }
+        Kind::Push => {
+            let cid = rec.contact.as_deref().unwrap_or_default();
+            if !inner.contacts.contains(cid) {
+                bail!("contact {cid} is gone");
+            }
+            let push_id: [u8; 16] = hex::decode(rec.push_id.as_deref().unwrap_or_default())
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| anyhow!("bad push id"))?;
+            let target = Target::Contact {
+                id: crate::peer::parse_endpoint_id(cid)?,
+                push_id,
+                job: rec.job.clone(),
+            };
+            (target, Op::Put, None)
+        }
+    };
+    Ok(Arc::new(ClientJob {
+        target,
+        op,
+        job_dir,
+        paths: rec.paths.clone().unwrap_or_default(),
+        part_files: Default::default(),
+        running: tokio::sync::Mutex::new(None),
+    }))
 }
 
 /// Starts the worker task; the caller holds `job.running`'s lock, so checking
@@ -314,6 +519,9 @@ async fn drive(
     job: &Arc<ClientJob>,
     tracker: &Arc<Tracker>,
 ) -> Result<ConnPath, (ErrorCode, String)> {
+    if let Target::Contact { id, .. } = &job.target {
+        return drive_push(inner, job, tracker, *id).await;
+    }
     let mut since = Instant::now();
     let mut hash_retry_used = false;
     loop {
@@ -367,18 +575,21 @@ async fn open(
     SessErr,
 > {
     tracker.set_status(Status::Connecting);
+    let ticket = job
+        .ticket()
+        .ok_or_else(|| SessErr::Other(anyhow!("not a ticket transfer")))?;
     let conn = if XFER1_ONLY.lock().contains(inner.endpoint.id().as_bytes()) {
-        inner.dial_host(&job.ticket, ALPN_XFER).await
+        inner.dial_host(ticket, ALPN_XFER).await
     } else {
         // v0.4: offer xfer/2, fall back to xfer/1 with a v0.3 host.
         inner
-            .dial_host_alpns(&job.ticket, ALPN_XFER2, vec![ALPN_XFER.to_vec()])
+            .dial_host_alpns(ticket, ALPN_XFER2, vec![ALPN_XFER.to_vec()])
             .await
     }
     .map_err(net(false))?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
     let hello = ClientHello::v1 {
-        ticket: job.ticket.clone(),
+        ticket: ticket.clone(),
         device: inner.cfg.device_name.clone(),
         op: job.op,
         app_version: inner.cfg.app_version.clone(),
@@ -548,14 +759,35 @@ async fn put_session(
     // Build (and hash) the manifest before dialing so the host slot is not held while hashing.
     let paths = job.paths.clone();
     let hashes = inner.hashes.clone();
-    let (manifest, abs) = tokio::task::spawn_blocking(move || build_put_manifest(&paths, &hashes))
-        .await
-        .map_err(|e| SessErr::Other(e.into()))?
-        .map_err(SessErr::Io)?;
+    let (manifest, abs) =
+        tokio::task::spawn_blocking(move || build_put_manifest(&paths, &hashes, false))
+            .await
+            .map_err(|e| SessErr::Other(e.into()))?
+            .map_err(SessErr::Io)?;
 
     let (conn, mut send, mut recv) = open(inner, job, tracker).await?;
-    write_msg(&mut send, &manifest).await.map_err(net(true))?;
-    let want: Want = read_msg(&mut recv).await.map_err(net(true))?;
+    let v2 = conn.alpn() == ALPN_XFER2;
+    put_data_phase(
+        inner, &conn, &mut send, &mut recv, &manifest, &abs, tracker, v2,
+    )
+    .await
+}
+
+/// Sender side of xfer put semantics after the hello (ticket put) or the
+/// accepted `Push` (contacts): `Manifest` → `Want` → data → `Done`.
+#[allow(clippy::too_many_arguments)]
+async fn put_data_phase(
+    inner: &Arc<Inner>,
+    conn: &Connection,
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    manifest: &Manifest,
+    abs: &[PathBuf],
+    tracker: &Arc<Tracker>,
+    v2: bool,
+) -> Result<SessionEnd, SessErr> {
+    write_msg(send, manifest).await.map_err(net(true))?;
+    let want: Want = read_msg(recv).await.map_err(net(true))?;
     let mut items = Vec::with_capacity(want.items.len());
     let mut to_do = 0u64;
     let mut seen = BTreeSet::new();
@@ -588,19 +820,14 @@ async fn put_session(
         to_do,
     );
     let _ticker = Abort(tracker.spawn_ticker(conn.clone()));
-    if conn.alpn() == ALPN_XFER2 {
+    if v2 {
         let pipe = Pipe::new(&inner.cfg.net.tuning, None);
-        xfer::send_files_v2(&conn, items, &pipe, tracker).await?;
+        xfer::send_files_v2(conn, items, &pipe, tracker).await?;
     } else {
-        xfer::send_files(&conn, items, CLIENT_STREAMS, tracker).await?;
+        xfer::send_files(conn, items, CLIENT_STREAMS, tracker).await?;
     }
-    let done: Done = timed(
-        "waiting for Done",
-        xfer::stall_timeout(),
-        read_msg(&mut recv),
-    )
-    .await?;
-    let path = conn_path(&conn);
+    let done: Done = timed("waiting for Done", xfer::stall_timeout(), read_msg(recv)).await?;
+    let path = conn_path(conn);
     let _ = send.finish();
     conn.close(0u32.into(), b"done");
     if !done.msg.is_empty() {
@@ -615,17 +842,145 @@ async fn put_session(
     Ok(SessionEnd::Complete(path))
 }
 
+/// v0.5 push to a contact: waits until presence sees the contact online, then
+/// runs push sessions. A contact that cannot be reached is waited for again
+/// (no polling beyond the 60 s presence ping); a decline is final.
+async fn drive_push(
+    inner: &Arc<Inner>,
+    job: &Arc<ClientJob>,
+    tracker: &Arc<Tracker>,
+    id: iroh::EndpointId,
+) -> Result<ConnPath, (ErrorCode, String)> {
+    let mut hash_retry_used = false;
+    loop {
+        crate::peer::wait_online(inner, id, tracker)
+            .await
+            .map_err(|e| (ErrorCode::Other, e))?;
+        let (code, msg) = match push_session(inner, job, tracker).await {
+            Ok(SessionEnd::Complete(p)) => return Ok(p),
+            Ok(SessionEnd::Mismatch(msg)) => {
+                if hash_retry_used {
+                    return Err((ErrorCode::HashMismatch, msg));
+                }
+                tracing::warn!("{msg}; retrying once on a fresh connection");
+                hash_retry_used = true;
+                continue;
+            }
+            Err(SessErr::Denied(r)) => return Err((ErrorCode::Denied, r.to_string())),
+            Err(SessErr::Offline { connected, err }) => {
+                tracing::info!(id = %tracker.id, "push: contact unreachable: {err:#}");
+                crate::peer::note_unreachable(inner, id);
+                if !connected {
+                    // Presence may still say online (another live connection):
+                    // don't spin on a contact we cannot dial.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                (ErrorCode::HostOffline, format!("{err:#}"))
+            }
+            Err(SessErr::Io(e)) => return Err((ErrorCode::Io, format!("{e:#}"))),
+            Err(SessErr::Other(e)) => return Err((ErrorCode::Other, format!("{e:#}"))),
+        };
+        tracker.error(code, msg, Some(crate::peer::PRESENCE_INTERVAL.as_secs()));
+    }
+}
+
+/// One push: dial the contact, `Push`, wait for `PushAccepted` (the receiver
+/// may first answer `PushQueued` and ask its user), then xfer/2 put semantics
+/// on the same connection.
+async fn push_session(
+    inner: &Arc<Inner>,
+    job: &Arc<ClientJob>,
+    tracker: &Arc<Tracker>,
+) -> Result<SessionEnd, SessErr> {
+    let Target::Contact {
+        id,
+        push_id,
+        job: job_name,
+    } = &job.target
+    else {
+        return Err(SessErr::Other(anyhow!("not a push")));
+    };
+    let paths = job.paths.clone();
+    let hashes = inner.hashes.clone();
+    let (manifest, abs) =
+        tokio::task::spawn_blocking(move || build_put_manifest(&paths, &hashes, true))
+            .await
+            .map_err(|e| SessErr::Other(e.into()))?
+            .map_err(SessErr::Io)?;
+
+    tracker.set_status(Status::Connecting);
+    let conn = crate::peer::dial_contact(inner, *id)
+        .await
+        .map_err(net(false))?;
+    let _live = crate::peer::LiveGuard::new(inner, *id);
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
+    let req = PeerReq::Push {
+        push_id: *push_id,
+        job: job_name.clone(),
+        files: manifest.files.len() as u32,
+        bytes: manifest.total,
+    };
+    write_msg(&mut send, &req).await.map_err(net(false))?;
+    let mut resp: PeerResp = timed(
+        "waiting for the push answer",
+        Duration::from_secs(60),
+        read_msg_max(&mut recv, MAX_HELLO),
+    )
+    .await?;
+    if resp == PeerResp::PushQueued {
+        let name = tracker.snapshot().peer;
+        tracing::info!(id = %tracker.id, "push queued: waiting for {name} to accept");
+        tracker.update(|s| s.error = Some(format!("Chờ {name} đồng ý nhận")));
+        resp = timed(
+            "waiting for the receiver to accept",
+            crate::peer::PUSH_ANSWER_TIMEOUT + Duration::from_secs(60),
+            read_msg_max(&mut recv, MAX_HELLO),
+        )
+        .await?;
+    }
+    match resp {
+        PeerResp::PushAccepted => {}
+        PeerResp::PushDeclined { reason } | PeerResp::Denied { reason } => {
+            conn.close(0u32.into(), b"declined");
+            return Err(SessErr::Denied(DenyReason::Other(reason)));
+        }
+        other => {
+            conn.close(1u32.into(), b"protocol");
+            return Err(SessErr::Other(anyhow!(
+                "unexpected answer to Push: {other:?}"
+            )));
+        }
+    }
+    tracker.update(|s| s.error = None);
+    put_data_phase(
+        inner, &conn, &mut send, &mut recv, &manifest, &abs, tracker, true,
+    )
+    .await
+}
+
 /// Manifest for a put: each selected file is `name`, each selected folder keeps
 /// its name as first segment.
-fn build_put_manifest(paths: &[PathBuf], hashes: &HashCache) -> Result<(Manifest, Vec<PathBuf>)> {
+///
+/// `push`: a single selected folder is sent as its contents (the receiver puts
+/// them in `<contact>/<folder name>/`, the push's job folder).
+fn build_put_manifest(
+    paths: &[PathBuf],
+    hashes: &HashCache,
+    push: bool,
+) -> Result<(Manifest, Vec<PathBuf>)> {
     let mut walked = Vec::new();
     let mut seen = BTreeSet::new();
+    let single_folder = push && paths.len() == 1 && paths[0].is_dir();
     for p in paths {
         let name = p
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("cannot send {}: no usable name", p.display()))?;
-        let prefix = sanitize_rel(name).with_context(|| format!("cannot send {}", p.display()))?;
+        let prefix = if single_folder {
+            crate::paths::RelPath::default()
+        } else {
+            sanitize_rel(name).with_context(|| format!("cannot send {}", p.display()))?
+        };
         for f in walk(p, &prefix)? {
             let rel = f.rel.as_str();
             if !seen.insert(rel.to_lowercase()) {
