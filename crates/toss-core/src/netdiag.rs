@@ -137,7 +137,11 @@ pub(crate) async fn diagnostics(inner: &Inner) -> NetDiag {
         direct_addrs: host_addr.addrs.len(),
     };
     let direct_likelihood = likelihood(&facts);
-    let reasons = reasons(&facts, direct_likelihood);
+    let mut reasons = reasons(&facts, direct_likelihood);
+    let lan_blocked = inner.lan_blocked.load(std::sync::atomic::Ordering::SeqCst);
+    if lan_blocked {
+        reasons.insert(0, crate::lanprobe::REASON.to_string());
+    }
     NetDiag {
         relay_url,
         relay_connected,
@@ -149,8 +153,8 @@ pub(crate) async fn diagnostics(inner: &Inner) -> NetDiag {
         nat,
         direct_likelihood,
         reasons,
-        // v0.5 (WS-E): real detection of macOS Local Network denial.
-        lan_blocked: false,
+        // v0.5: macOS Local Network denial (lanprobe.rs; always false elsewhere).
+        lan_blocked,
     }
 }
 

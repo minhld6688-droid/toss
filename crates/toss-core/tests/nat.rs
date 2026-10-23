@@ -110,6 +110,7 @@ async fn diagnostics_json_shape() {
             "nat",
             "direct_likelihood",
             "reasons",
+            "lan_blocked",
         ])
     );
     assert_eq!(

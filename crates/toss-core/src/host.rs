@@ -344,7 +344,19 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
             )
             .await
         }
-        Op::Put => host_put(&inner, &conn, &mut send, &mut recv, &resolved, &tracker).await,
+        Op::Put => {
+            receive_put(
+                &inner,
+                &conn,
+                &mut send,
+                &mut recv,
+                &resolved.return_root_c,
+                &resolved.ret_dir,
+                &tracker,
+                conn.alpn() == ALPN_XFER2,
+            )
+            .await
+        }
     };
     ticker.abort();
     let path = conn_path(&conn);
@@ -499,13 +511,21 @@ fn build_manifest(
     Ok((manifest, abs))
 }
 
-async fn host_put(
+/// Receiving side of a put (xfer put via ticket, or a v0.5 push from a
+/// contact): reads the `Manifest`, answers `Want` (resume against `.part`s,
+/// never overwriting a different complete file under `ret_dir`), receives the
+/// data and answers `Done`. `v2` = segmented data streams (xfer/2; always for
+/// pushes).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn receive_put(
     inner: &Arc<Inner>,
     conn: &Connection,
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
-    resolved: &Resolved,
+    return_root_c: &std::path::Path,
+    ret_dir: &std::path::Path,
     tracker: &Arc<Tracker>,
+    v2: bool,
 ) -> Result<Done, SessErr> {
     let manifest: Manifest = timed(
         "waiting for the file list",
@@ -514,8 +534,8 @@ async fn host_put(
     )
     .await?;
     xfer::check_manifest(&manifest).map_err(SessErr::Other)?;
-    let ret_dir = resolved.ret_dir.clone();
-    let return_root_c = resolved.return_root_c.clone();
+    let ret_dir = ret_dir.to_path_buf();
+    let return_root_c = return_root_c.to_path_buf();
     let hashes = inner.hashes.clone();
     let reserved = inner.put_reserved.clone();
     let m2 = manifest.clone();
@@ -537,7 +557,7 @@ async fn host_put(
         plan.want.items.len() as u32,
         plan.to_do_bytes,
     );
-    let summary = if conn.alpn() == ALPN_XFER2 {
+    let summary = if v2 {
         let pipe = Pipe::new(&inner.cfg.net.tuning, None);
         xfer::receive_files_v2(
             conn,

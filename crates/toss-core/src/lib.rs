@@ -10,12 +10,14 @@
 
 #![warn(missing_docs)]
 
+pub mod contacts;
 pub mod ctl;
 pub mod fsutil;
 pub mod jobs;
 pub mod net;
 pub mod node;
 pub mod paths;
+pub mod resume;
 pub mod ticket;
 pub mod transfer;
 pub mod util;
@@ -23,8 +25,10 @@ pub mod wire;
 
 mod client;
 mod host;
+mod lanprobe;
 mod mdns;
 mod netdiag;
+mod peer;
 mod tuning;
 mod xfer;
 
@@ -33,8 +37,27 @@ mod xfer;
 pub mod testing {
     pub use crate::client::force_xfer1_client;
     pub use crate::xfer::set_timeouts;
+
+    /// Sends one raw `toss/peer/1` request to `addr` and returns the answer
+    /// (tests of the contact checks).
+    pub async fn peer_request(
+        node: &crate::Node,
+        addr: iroh::EndpointAddr,
+        req: &crate::wire::PeerReq,
+    ) -> anyhow::Result<crate::wire::PeerResp> {
+        let conn = node
+            .inner
+            .connect_alpns(addr, crate::ALPN_PEER, Vec::new())
+            .await?;
+        let (mut send, mut recv) = conn.open_bi().await?;
+        crate::wire::write_msg(&mut send, req).await?;
+        let resp = crate::wire::read_msg_max(&mut recv, crate::wire::MAX_HELLO).await;
+        conn.close(0u32.into(), b"test");
+        resp
+    }
 }
 
+pub use contacts::{Contact, IncomingPush, InviteInfo};
 pub use ctl::CtlClient;
 pub use jobs::{JobEvent, JobRecord};
 pub use net::{ConnectReport, NetConfig, NetDiag, Tuning};
@@ -50,3 +73,5 @@ pub const ALPN_XFER: &[u8] = b"toss/xfer/1";
 pub const ALPN_XFER2: &[u8] = b"toss/xfer/2";
 /// ALPN of the control protocol.
 pub const ALPN_CTL: &[u8] = b"toss/ctl/1";
+/// ALPN of the v0.5 contacts protocol (pairing, presence, pushes; contacts-v0.5.md §2.2).
+pub const ALPN_PEER: &[u8] = b"toss/peer/1";

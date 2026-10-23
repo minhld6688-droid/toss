@@ -12,6 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use toss_core::{
+    contacts::{create_invite_offline, read_contacts, resolve_in},
     jobs::JobStore,
     node::{
         default_data_dir, issue_admin_ticket_offline, issue_ticket_offline,
@@ -133,6 +134,41 @@ enum Cmd {
     },
     /// Loopback benchmark: two nodes in this process, one get; prints JSON.
     Bench(bench::BenchArgs),
+    /// Create a pairing invite (Danh bạ máy). By default it is signed offline
+    /// with the addresses of the last `toss-cli host` run on this data dir
+    /// (that host accepts the pairings); with --wait this process starts a
+    /// node, prints an invite with its live addresses and stays up to accept
+    /// pairings and pushes until Ctrl-C.
+    Invite {
+        /// Validity in days (0 = never).
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Also print the web link for this page host.
+        #[arg(long)]
+        page_host: Option<String>,
+        /// Run a node and wait for pairings / pushes.
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: where pushes from contacts land. Default: ~/Toss.
+        #[arg(long)]
+        inbox: Option<PathBuf>,
+    },
+    /// Pair with the device that issued an invite (tossinv1…, toss://i/…, or web link).
+    Pair {
+        /// The invite.
+        invite: String,
+    },
+    /// List paired devices (contacts.json of this data dir).
+    Contacts,
+    /// Send files/folders to a contact (id, unique id prefix or name). Waits
+    /// until the contact is online; it may have to accept the files.
+    Send {
+        /// Contact id, id prefix or name.
+        contact: String,
+        /// Files or folders.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -354,8 +390,132 @@ async fn main() -> Result<()> {
             run_diag(cfg, ticket).await?;
         }
         Cmd::Bench(args) => bench::run(args).await?,
+        Cmd::Invite {
+            days,
+            page_host,
+            wait,
+            inbox,
+        } => {
+            let page_host = page_host.as_deref().unwrap_or("");
+            if *wait {
+                let node = Node::start(cfg).await?;
+                node.set_inbox_dir(inbox.clone().unwrap_or_else(default_inbox));
+                node.wait_online(Duration::from_secs(15)).await;
+                let info = node.create_invite(*days, page_host)?;
+                print_invite(&info, !page_host.is_empty());
+                println!(
+                    "waiting for pairings and pushes (inbox: {}); Ctrl-C to stop",
+                    node.inbox_dir().display()
+                );
+                serve_events(&node, true).await;
+                node.shutdown().await;
+            } else {
+                let addr = load_host_file(&data_dir)
+                    .map(|f| f.addr)
+                    .unwrap_or_default();
+                if addr.is_empty() {
+                    eprintln!(
+                        "warning: no address known for this device (no `toss-cli host` has run \
+                         with this data dir); the pairing device will depend on DNS discovery. \
+                         Use --wait to run a node for the pairing instead."
+                    );
+                }
+                let info = create_invite_offline(&data_dir, &name, *days, page_host, &addr)?;
+                print_invite(&info, !page_host.is_empty());
+            }
+        }
+        Cmd::Pair { invite } => {
+            let node = Node::start(cfg).await?;
+            node.wait_online(Duration::from_secs(5)).await;
+            let res = node.accept_invite(invite).await;
+            node.shutdown().await;
+            let c = res?;
+            println!("paired with {} ({}, {})", c.name, c.platform, c.id);
+        }
+        Cmd::Contacts => {
+            let list = read_contacts(&data_dir);
+            if list.is_empty() {
+                println!("no contacts (pair with `toss-cli pair <invite>`)");
+            }
+            for c in list {
+                println!(
+                    "{}  {:<24} {:<8} auto_accept={} last_seen={}{}",
+                    c.id,
+                    c.name,
+                    c.platform,
+                    c.auto_accept,
+                    c.last_seen,
+                    if c.their_name != c.name {
+                        format!(" (reports as {})", c.their_name)
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+        }
+        Cmd::Send { contact, paths } => {
+            let c = resolve_in(&read_contacts(&data_dir), contact).ok_or_else(|| {
+                anyhow!("no contact matches {contact:?} (see `toss-cli contacts`)")
+            })?;
+            let node = Node::start(cfg).await?;
+            node.wait_online(Duration::from_secs(5)).await;
+            eprintln!("sending to {} ({})", c.name, c.id);
+            let t = node.send_to_contact(&c.id, paths.clone()).await?;
+            finish_transfer(node, t, cli.max_wait).await?;
+        }
     }
     Ok(())
+}
+
+/// `~/Toss` (inbox for pushes when not hosting).
+fn default_inbox() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join("Toss"))
+        .unwrap_or_else(|| PathBuf::from("Toss"))
+}
+
+fn print_invite(info: &toss_core::InviteInfo, web: bool) {
+    println!("{}", info.invite);
+    eprintln!(
+        "invite from {:?}, expires {}; deep link: {}",
+        info.name,
+        if info.exp == 0 {
+            "never".to_string()
+        } else {
+            format!("in {}h", info.exp.saturating_sub(now_unix()) / 3600)
+        },
+        info.deep_link
+    );
+    if web {
+        println!("{}", info.web_url);
+    }
+}
+
+/// Prints node events until Ctrl-C. `auto_accept`: pushes that wait for an
+/// answer (contact with auto-accept off) are accepted.
+async fn serve_events(node: &Node, auto_accept: bool) {
+    let mut rx = node.subscribe();
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            ev = rx.recv() => match ev {
+                Ok(ev) => {
+                    if let TransferEvent::PushIncoming(p) = &ev {
+                        if auto_accept {
+                            if let Err(e) = node.answer_push(&p.push_id, true) {
+                                eprintln!("could not accept push {}: {e:#}", p.push_id);
+                            }
+                        }
+                    }
+                    if let Some(line) = event_line(&ev) {
+                        println!("{line}");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 /// `toss-cli diag`: prints `NetDiag` as JSON (+ `"connect": ConnectReport`
@@ -483,6 +643,8 @@ async fn run_host(cfg: NodeConfig, hc: HostConfig) -> Result<()> {
     let data_dir = cfg.data_dir.clone();
     let node = Node::start_host(cfg, hc.bind_port).await?;
     node.set_host(Some(hc.clone())).await?;
+    // v0.5: pushes from contacts land in the return root, accepted automatically.
+    node.set_inbox_dir(hc.return_root.clone());
     let mut hf = HostFile {
         cfg: hc.clone(),
         addr: node.host_addr(),
@@ -530,21 +692,7 @@ async fn run_host(cfg: NodeConfig, hc: HostConfig) -> Result<()> {
             }
         });
     }
-    let mut rx = node.subscribe();
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            ev = rx.recv() => match ev {
-                Ok(ev) => {
-                    if let Some(line) = event_line(&ev) {
-                        println!("{line}");
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(_) => break,
-            }
-        }
-    }
+    serve_events(&node, true).await;
     println!("stopping");
     node.shutdown().await;
     Ok(())
@@ -558,8 +706,15 @@ fn event_line(ev: &TransferEvent) -> Option<String> {
             op,
             side,
             peer,
+            contact,
         } => {
-            format!("{id} started {op:?} {job:?} side={side:?} peer={peer}")
+            format!(
+                "{id} started {op:?} {job:?} side={side:?} peer={peer}{}",
+                contact
+                    .as_ref()
+                    .map(|c| format!(" contact={c}"))
+                    .unwrap_or_default()
+            )
         }
         TransferEvent::Manifest {
             id,
@@ -603,6 +758,17 @@ fn event_line(ev: &TransferEvent) -> Option<String> {
                 s.active, s.queued, s.uptime_s
             )
         }
+        TransferEvent::ContactsChanged {} => "contacts changed".to_string(),
+        TransferEvent::ContactPresence { id, online, rtt_ms } => format!(
+            "contact {id} {}{}",
+            if *online { "online" } else { "offline" },
+            rtt_ms.map(|r| format!(" rtt={r}ms")).unwrap_or_default()
+        ),
+        TransferEvent::PushIncoming(p) => format!(
+            "push {} from {} ({}): {:?} {} files {} B",
+            p.push_id, p.from_name, p.from_id, p.job, p.files, p.bytes
+        ),
+        TransferEvent::LanBlocked { blocked } => format!("local network blocked: {blocked}"),
     })
 }
 

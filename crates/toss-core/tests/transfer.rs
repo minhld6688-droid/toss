@@ -146,7 +146,7 @@ async fn events_for(rx: &mut broadcast::Receiver<TransferEvent>, id: &str) -> Ve
             | TransferEvent::Paused { id } => (id.clone(), false),
             TransferEvent::Done { id, .. } => (id.clone(), true),
             TransferEvent::Error { id, retry_in_s, .. } => (id.clone(), retry_in_s.is_none()),
-            TransferEvent::HostStatus(_) => continue,
+            _ => continue,
         };
         if eid == id {
             out.push(ev);

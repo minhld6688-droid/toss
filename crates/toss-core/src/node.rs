@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Weak,
     },
     time::{Duration, Instant},
@@ -23,15 +23,18 @@ use tokio::sync::{broadcast, watch};
 
 use crate::{
     client,
+    contacts::{Contact, ContactBook, IncomingPush, Invite, InviteInfo, InviteStore},
     fsutil::{is_hidden, HashCache, PART_SUFFIX},
     host,
     jobs::{JobRecord, JobStore},
     paths::{canonicalize, resolve_inside},
+    peer::PeerState,
+    resume::TransferStore,
     ticket::{HostAddr, Ticket, TicketSpec},
     transfer::{conn_path, Tracker, TransferEvent, TransferId, TransferState},
     util::unix_of,
     wire::{self, DirEntry},
-    CtlClient, ALPN_CTL, ALPN_XFER, ALPN_XFER2,
+    CtlClient, ALPN_CTL, ALPN_PEER, ALPN_XFER, ALPN_XFER2,
 };
 
 /// Node configuration.
@@ -220,10 +223,26 @@ pub(crate) struct Running {
     pub handle: tokio::task::JoinHandle<()>,
 }
 
-/// A client-side transfer (get or put) that can be paused/resumed.
+/// Where a client transfer goes.
+#[derive(Debug, Clone)]
+pub(crate) enum Target {
+    /// get/put with a ticket.
+    Ticket(Ticket),
+    /// v0.5 push to a contact (`op` = Put).
+    Contact {
+        /// Contact endpoint id.
+        id: EndpointId,
+        /// Push id; reused when the push resumes.
+        push_id: [u8; 16],
+        /// Job (folder) name announced to the receiver.
+        job: String,
+    },
+}
+
+/// A client-side transfer (get, put or push) that can be paused/resumed.
 #[derive(Debug)]
 pub(crate) struct ClientJob {
-    pub ticket: Ticket,
+    pub target: Target,
     pub op: wire::Op,
     /// get: `dest/<job>` (created at start).
     pub job_dir: Option<PathBuf>,
@@ -232,6 +251,24 @@ pub(crate) struct ClientJob {
     /// `.part` files this transfer may have created (deleted on cancel).
     pub part_files: Mutex<BTreeSet<PathBuf>>,
     pub running: tokio::sync::Mutex<Option<Running>>,
+}
+
+impl ClientJob {
+    /// The ticket of a get/put (None for a push).
+    pub fn ticket(&self) -> Option<&Ticket> {
+        match &self.target {
+            Target::Ticket(t) => Some(t),
+            Target::Contact { .. } => None,
+        }
+    }
+
+    /// The contact of a push.
+    pub fn contact(&self) -> Option<EndpointId> {
+        match &self.target {
+            Target::Ticket(_) => None,
+            Target::Contact { id, .. } => Some(*id),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -272,9 +309,24 @@ pub(crate) struct Inner {
     /// v0.4: start-time network problems for diagnostics (Vietnamese, one
     /// sentence each): host port taken, mDNS unavailable, bad relay URL.
     pub net_notes: Vec<String>,
+    /// v0.5: paired devices (`contacts.json`).
+    pub contacts: ContactBook,
+    /// v0.5: issued pairing invites (`invites.json`).
+    pub invites: InviteStore,
+    /// v0.5: `toss/peer/1` runtime state (pending pushes, presence).
+    pub peer: PeerState,
+    /// v0.5: persisted client transfers (`transfers.json`).
+    pub store: Arc<TransferStore>,
+    /// v0.5: macOS Local Network access denied (lanprobe).
+    pub lan_blocked: AtomicBool,
 }
 
 impl Inner {
+    /// Emits an event to all subscribers.
+    pub fn emit(&self, ev: TransferEvent) {
+        let _ = self.events.send(ev);
+    }
+
     pub fn register(&self, tracker: Arc<Tracker>, kind: EntryKind) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         self.transfers
@@ -570,7 +622,7 @@ impl Node {
             } else {
                 PortmapperConfig::Disabled
             })
-            .alpns(vec![]);
+            .alpns(vec![ALPN_PEER.to_vec()]);
         if !cfg.net.relay_urls.is_empty() {
             let (mode, bad) = crate::netdiag::relay_mode(&cfg.net.relay_urls);
             for b in bad {
@@ -630,6 +682,11 @@ impl Node {
             endpoint: endpoint.clone(),
             secret,
             jobs: JobStore::open(&cfg.data_dir),
+            contacts: ContactBook::open(&cfg.data_dir),
+            invites: InviteStore::open(&cfg.data_dir),
+            peer: PeerState::new(&cfg.data_dir),
+            store: Arc::new(TransferStore::open(&cfg.data_dir)),
+            lan_blocked: AtomicBool::new(false),
             cfg,
             lookup,
             host: RwLock::new(None),
@@ -647,6 +704,10 @@ impl Node {
         });
         tokio::spawn(log_relay_status(endpoint.clone()));
         tokio::spawn(accept_loop(endpoint, Arc::downgrade(&inner)));
+        // v0.5: restore persisted transfers, presence pings, Local Network probe.
+        client::restore_all(&inner);
+        crate::peer::spawn_presence(&inner);
+        crate::lanprobe::spawn(&inner);
         Ok(Node { inner })
     }
 
@@ -738,12 +799,13 @@ impl Node {
                     ALPN_XFER2.to_vec(),
                     ALPN_XFER.to_vec(),
                     ALPN_CTL.to_vec(),
+                    ALPN_PEER.to_vec(),
                 ]);
                 tracing::info!("host mode on");
                 self.inner.emit_host_status();
             }
             None => {
-                self.inner.endpoint.set_alpns(vec![]);
+                self.inner.endpoint.set_alpns(vec![ALPN_PEER.to_vec()]);
                 *self.inner.host.write() = None;
                 tracing::info!("host mode off");
             }
@@ -853,12 +915,18 @@ impl Node {
             .map(|e| e.tracker.snapshot())
     }
 
-    /// Removes finished (done/error/cancelled) transfers from the list.
+    /// Removes finished (done/error/cancelled) transfers from the list
+    /// (and from `transfers.json`).
     pub fn clear_finished(&self) {
-        self.inner
-            .transfers
-            .lock()
-            .retain(|_, e| !e.tracker.status().is_final());
+        let mut gone = Vec::new();
+        self.inner.transfers.lock().retain(|id, e| {
+            let keep = !e.tracker.status().is_final();
+            if !keep {
+                gone.push(id.clone());
+            }
+            keep
+        });
+        self.inner.store.remove(&gone);
     }
 
     /// Closes the connection, keeps `.part` files (client transfers only).
@@ -911,8 +979,11 @@ impl Node {
         }
     }
 
-    /// Pauses all client transfers (keeping `.part` files) and closes the endpoint.
+    /// Pauses all client transfers (keeping `.part` files) and closes the
+    /// endpoint. `transfers.json` keeps their pre-shutdown status, so running
+    /// ones resume on the next start.
     pub async fn shutdown(self) {
+        self.inner.store.freeze();
         let jobs: Vec<_> = {
             let map = self.inner.transfers.lock();
             map.values()
@@ -926,6 +997,113 @@ impl Node {
             let _ = client::pause(j).await;
         }
         self.inner.endpoint.close().await;
+    }
+}
+
+/// v0.5 "Danh bạ máy" (contracts/contacts-v0.5.md §3): pair devices once,
+/// then push files to them by id; pushes from contacts land in
+/// `<inbox_dir>/<contact name>/<job>/`.
+impl Node {
+    /// Where pushes from contacts land (default `~/Toss`). Takes effect for
+    /// the next push.
+    pub fn set_inbox_dir(&self, dir: PathBuf) {
+        *self.inner.peer.inbox_dir.write() = dir;
+    }
+
+    /// Current inbox folder (see [`Node::set_inbox_dir`]).
+    pub fn inbox_dir(&self) -> PathBuf {
+        self.inner.peer.inbox_dir.read().clone()
+    }
+
+    /// All paired devices, oldest first, with their presence.
+    pub fn contacts(&self) -> Vec<Contact> {
+        self.inner.contacts.list()
+    }
+
+    /// Creates a pairing invite valid for `days` (0 = never expires), usable
+    /// by any number of devices until it expires or [`Node::revoke_invites`].
+    /// It carries this node's current relay + direct addresses.
+    pub fn create_invite(&self, days: u32, page_host: &str) -> Result<InviteInfo> {
+        let inv = crate::contacts::issue_invite(
+            &self.inner.invites,
+            &self.inner.secret,
+            &self.inner.cfg.device_name,
+            days,
+            &self.inner.host_addr(),
+        )?;
+        tracing::info!(
+            exp = inv.body.exp,
+            "pairing invite issued ({})",
+            inv.host_addr().summary()
+        );
+        Ok(inv.info(page_host))
+    }
+
+    /// Revokes every invite this device issued (existing contacts stay).
+    pub fn revoke_invites(&self) -> Result<()> {
+        self.inner.invites.revoke_all()
+    }
+
+    /// Parses and checks an invite (`tossinv1…`, `toss://i/…` or a web link;
+    /// tolerant like `Ticket::from_str`): signature and expiry. `web_url` uses
+    /// [`crate::contacts::DEFAULT_PAGE_HOST`].
+    pub fn parse_invite(text: &str) -> Result<InviteInfo> {
+        let inv: Invite = text.parse()?;
+        inv.verify()?;
+        Ok(inv.info(crate::contacts::DEFAULT_PAGE_HOST))
+    }
+
+    /// Pairs with the device that issued `text`: both sides add each other as
+    /// contacts (and emit `ContactsChanged`). Returns the new contact.
+    pub async fn accept_invite(&self, text: &str) -> Result<Contact> {
+        crate::peer::pair(&self.inner, text).await
+    }
+
+    /// Renames a contact locally.
+    pub fn rename_contact(&self, id: &str, name: &str) -> Result<()> {
+        let name = crate::util::clean_text(name.trim(), crate::contacts::MAX_NAME);
+        if name.trim().is_empty() {
+            bail!("tên máy không được để trống");
+        }
+        self.inner.contacts.update(id, |c| c.name = name)?;
+        self.inner.emit(TransferEvent::ContactsChanged {});
+        Ok(())
+    }
+
+    /// Accept pushes from this contact without asking (`true`) or queue them
+    /// for [`Node::answer_push`].
+    pub fn set_contact_auto_accept(&self, id: &str, on: bool) -> Result<()> {
+        self.inner.contacts.update(id, |c| c.auto_accept = on)?;
+        self.inner.emit(TransferEvent::ContactsChanged {});
+        Ok(())
+    }
+
+    /// Removes a contact; its pushes from this device that are not finished
+    /// are cancelled and forgotten, pushes from it waiting for an answer are
+    /// declined. It can no longer reach this device until paired again.
+    pub fn remove_contact(&self, id: &str) -> Result<()> {
+        crate::peer::remove_contact(&self.inner, id)
+    }
+
+    /// Sends files/folders to a contact. Starts at once when it is online,
+    /// else waits ("Chờ <name> online") until presence sees it.
+    pub async fn send_to_contact(&self, id: &str, paths: Vec<PathBuf>) -> Result<crate::Transfer> {
+        client::start_push(&self.inner, id, paths).await
+    }
+
+    /// Pushes from contacts waiting for an answer, oldest first.
+    pub fn incoming_pushes(&self) -> Vec<IncomingPush> {
+        self.inner.peer.incoming()
+    }
+
+    /// Accepts or declines a waiting push.
+    pub fn answer_push(&self, push_id: &str, accept: bool) -> Result<()> {
+        self.inner.peer.answer(push_id, accept)
+    }
+
+    /// Pings every contact now and waits for the answers (≤ ~15 s).
+    pub async fn refresh_presence(&self) {
+        crate::peer::ping_all(&self.inner).await;
     }
 }
 
@@ -956,13 +1134,24 @@ async fn accept_loop(endpoint: Endpoint, inner: Weak<Inner>) {
                 }
             };
             let remote = conn.remote_id().fmt_short().to_string();
-            tracing::info!(
-                %remote,
-                alpn = %alpn_s,
-                path = ?conn_path(&conn),
-                "incoming connection accepted"
-            );
+            if alpn == ALPN_PEER {
+                // Presence pings arrive every minute per contact: keep them out of info logs
+                // (peer.rs logs pairings, pushes and denials at info).
+                tracing::debug!(%remote, path = ?conn_path(&conn), "incoming peer connection");
+            } else {
+                tracing::info!(
+                    %remote,
+                    alpn = %alpn_s,
+                    path = ?conn_path(&conn),
+                    "incoming connection accepted"
+                );
+            }
             let Some(inner) = inner.upgrade() else { return };
+            if alpn == ALPN_PEER {
+                // v0.5: contacts / pairing, on every node (host mode or not).
+                crate::peer::handle_peer(inner, conn).await;
+                return;
+            }
             if inner.host.read().is_none() {
                 tracing::info!(%remote, alpn = %alpn_s, "denied: host mode off");
                 conn.close(1u32.into(), b"host mode off");
