@@ -42,6 +42,10 @@ const QS_RETURN_DIR: &str = "Tra-ve";
 /// Prefix of the error text the UI uses to detect "no admin ticket stored".
 pub const NO_ADMIN: &str = "no_admin_ticket: Chưa có máy tổng từ xa";
 
+/// v0.5.1 `remote_update` on a host that cannot update remotely.
+pub const REMOTE_TOO_OLD: &str =
+    "Máy tổng đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này";
+
 /// How often a host whose config could not be applied at startup (e.g. a root
 /// on a drive that is not mounted yet) tries again.
 const HOST_RETRY: Duration = Duration::from_secs(30);
@@ -387,7 +391,34 @@ impl Core {
             context_menu: s.context_menu,
             auto_receive: s.auto_receive,
             net: s.net.clone(),
+            auto_update: s.auto_update(),
         })
+    }
+
+    /// v0.5.1: effective auto-update setting.
+    pub fn auto_update(&self) -> bool {
+        self.settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .auto_update()
+    }
+
+    pub fn set_auto_update(&self, on: bool) -> Result<()> {
+        tracing::info!(on, "auto update");
+        self.update_settings(|s| s.auto_update = Some(on))
+    }
+
+    /// v0.5.1: transfers moving data right now (client and host side). Waiting
+    /// ones (connecting, paused) do not count: they resume after a restart.
+    /// 0 when the node is not running.
+    pub async fn running_transfers(&self) -> usize {
+        let Some(node) = self.node.read().await.clone() else {
+            return 0;
+        };
+        node.transfers()
+            .iter()
+            .filter(|t| t.status == toss_core::transfer::Status::Running)
+            .count()
     }
 
     pub async fn finish_setup(&self, device_name: String, dest_dir: String) -> Result<AppState> {
@@ -830,6 +861,21 @@ impl Core {
     pub async fn remote_status(&self) -> Result<Value> {
         let s = self.with_ctl(|c| async move { c.status().await }).await?;
         Ok(serde_json::to_value(s)?)
+    }
+
+    /// v0.5.1: asks the remote host (admin ticket) to update its app now.
+    /// Hosts before 0.5.1 do not know the request: refused up front.
+    pub async fn remote_update(&self) -> Result<()> {
+        let st = self.with_ctl(|c| async move { c.status().await }).await?;
+        if !crate::updater::version_at_least(&st.version, (0, 5, 1)) {
+            tracing::info!(version = %st.version, "remote update: host too old");
+            bail!(REMOTE_TOO_OLD);
+        }
+        self.with_ctl(|c| async move { c.request_update().await })
+            .await
+            .map_err(|e| anyhow!("Không gửi được lệnh cập nhật tới máy tổng: {e:#}"))?;
+        tracing::info!(host = %st.device, version = %st.version, "remote update requested");
+        Ok(())
     }
 
     pub async fn remote_list_dir(&self, root: String, path: String) -> Result<Value> {
@@ -1330,6 +1376,11 @@ fn resync_events(snaps: &[Value], seen: &Seen) -> Vec<Value> {
 
 /// Emit one core event to the UI (+ derived `host:status`, + native notifications).
 fn forward(app: &AppHandle, seen: &mut Seen, v: Value) {
+    // v0.5.1: an admin device asked this host to update the app (not a UI event).
+    if v["type"] == "update_requested" {
+        crate::updater::on_remote_request(app, v["device"].as_str().unwrap_or("máy admin"));
+        return;
+    }
     let _ = app.emit("transfer:event", &v);
     // v0.5: contacts / presence / pushes / Local Network events also get their own UI event name.
     if let Some((name, payload)) = v05_event(&v) {
@@ -1382,7 +1433,7 @@ fn v05_event(v: &Value) -> Option<(&'static str, Value)> {
     }
 }
 
-fn notify(app: &AppHandle, body: &str) {
+pub(crate) fn notify(app: &AppHandle, body: &str) {
     // Skip when the user is looking at the window anyway.
     if let Some(w) = app.get_webview_window(config::MAIN_WINDOW) {
         if w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) {

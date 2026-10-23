@@ -23,6 +23,9 @@ tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
+# v0.5.1 in-app updates (signed GitHub release feed, see tauri.conf.json plugins.updater).
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
