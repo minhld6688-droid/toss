@@ -150,6 +150,11 @@ pub struct NetDiag {
     pub direct_likelihood: Likelihood,
     /// Human-readable reasons, Vietnamese, one short sentence each.
     pub reasons: Vec<String>,
+    /// v0.5: the OS blocks this app from the local network (macOS 15+ "Local
+    /// Network" privacy denied: sends to LAN / multicast fail with
+    /// EHOSTUNREACH). Same-LAN transfers then fall back to the relay.
+    #[serde(default)]
+    pub lan_blocked: bool,
 }
 
 /// Result of `Node::test_connect`.

@@ -149,6 +149,8 @@ pub(crate) async fn diagnostics(inner: &Inner) -> NetDiag {
         nat,
         direct_likelihood,
         reasons,
+        // v0.5 (WS-E): real detection of macOS Local Network denial.
+        lan_blocked: false,
     }
 }
 
