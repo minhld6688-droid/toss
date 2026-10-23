@@ -479,7 +479,12 @@ async fn run(
     tokio::select! {
         res = drive_fut => match res {
             Ok(path) => tracker.finish_done(path),
-            Err((code, msg)) => tracker.error(code, msg, None),
+            Err((code, msg)) => {
+                // Final failures (e.g. "No space left on device") must be
+                // visible in the log, not only in the UI.
+                tracing::warn!(id = %tracker.id, ?code, "transfer failed: {msg}");
+                tracker.error(code, msg, None)
+            }
         },
         c = async {
             loop {
