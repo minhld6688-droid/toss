@@ -45,6 +45,7 @@ export interface TransferState {
   status: Status; bytes_done: number; bytes_total: number; files_done: number; files_total: number;
   speed_bps: number; eta_s: number | null; path: ConnPath; rtt_ms: number | null; streams: number; dest: string | null; error: string | null;
   started_at: number;
+  contact: string | null;       // v0.5: contact id when this transfer is a push to / from a contact
 }
 
 export interface JobRecord {
@@ -61,7 +62,7 @@ export interface NetConfig { relay_urls: string[]; mdns: boolean; portmap: boole
 export type Likelihood = "high" | "medium" | "low" | "unknown";
 export interface PortmapState { status: "off" | "probing" | "mapped" | "unavailable"; external_addr: string | null; protocol: string | null }
 export interface NatInfo { udp: boolean; global_v4: string | null; global_v6: string | null; mapping_varies_by_dest: boolean | null; hairpin: boolean | null; relay_latency_ms: number | null }
-export interface NetDiag { relay_url: string; relay_connected: boolean; custom_relay: boolean; direct_addrs: string[]; bind_port: number | null; mdns: boolean; portmap: PortmapState; nat: NatInfo; direct_likelihood: Likelihood; reasons: string[] }
+export interface NetDiag { relay_url: string; relay_connected: boolean; custom_relay: boolean; direct_addrs: string[]; bind_port: number | null; mdns: boolean; portmap: PortmapState; nat: NatInfo; direct_likelihood: Likelihood; reasons: string[]; lan_blocked: boolean }
 export type FirewallState = "ok" | "missing" | "unknown";
 export interface NetDiagUi extends NetDiag { firewall: FirewallState; log_dir: string }
 export interface ConnectReport { ok: boolean; path: ConnPath; rtt_ms: number | null; connect_ms: number; direct_after_ms: number | null; known_paths: string[]; reason: string }
@@ -138,7 +139,7 @@ export type Events = {
 };
 
 export type TransferEvent =
-  | { type: "started"; id: string; job: string; op: Op; side: Side; peer: string }
+  | { type: "started"; id: string; job: string; op: Op; side: Side; peer: string; contact?: string | null }
   | { type: "manifest"; id: string; files: number; bytes: number; to_do_files: number; to_do_bytes: number }
   | { type: "progress"; id: string; bytes_done: number; bytes_total: number; files_done: number; files_total: number; speed_bps: number; eta_s: number | null; path: ConnPath; rtt_ms: number | null; streams: number }
   | { type: "done"; id: string; files: number; bytes: number; elapsed_s: number; dest: string | null }
@@ -155,3 +156,40 @@ export type TransferEvent =
 // - On "drop" while a put-capable ticket is selected → start_put.
 // - Window: 400 x 600, not resizable below 360 x 480, hides to tray on close.
 // - Host mode machines: window may stay hidden; tray menu = Mở Toss · Trạng thái · Thoát.
+
+// ===========================================================================
+// ---- v0.5 "Danh bạ máy" (contracts/contacts-v0.5.md §4) -------------------
+// Edited in place above: TransferState.contact, NetDiag.lan_blocked, TransferEvent "started".contact.
+export interface Contact { id: string; name: string; their_name: string; platform: string; added_at: number; auto_accept: boolean; online: boolean; last_seen: number; rtt_ms: number | null }
+export interface InviteInfo { invite: string; web_url: string; deep_link: string; exp: number; name: string }
+export interface IncomingPush { push_id: string; from_id: string; from_name: string; job: string; files: number; bytes: number; at: number }
+
+export interface CommandsV05 {
+  list_contacts(): Promise<Contact[]>;
+  create_invite(args: { days: number }): Promise<InviteInfo>;     // copies web_url to clipboard
+  revoke_invites(): Promise<void>;
+  accept_invite(args: { text: string }): Promise<Contact>;
+  rename_contact(args: { id: string; name: string }): Promise<void>;
+  set_contact_auto_accept(args: { id: string; on: boolean }): Promise<void>;
+  remove_contact(args: { id: string }): Promise<void>;
+  send_to_contact(args: { id: string; paths: string[] }): Promise<string>;   // transfer id
+  list_incoming_pushes(): Promise<IncomingPush[]>;
+  answer_push(args: { push_id: string; accept: boolean }): Promise<void>;
+  open_local_network_settings(): Promise<void>;   // macOS: open "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"; else no-op
+}
+
+export type EventsV05 = {
+  "contacts:changed": Record<string, never>;
+  "contact:presence": { id: string; online: boolean; rtt_ms: number | null };
+  "push:incoming": IncomingPush;
+  "net:lan_blocked": { blocked: boolean };
+  // deep-link gains a sibling: "invite" { invite } for toss://i/<invite> or a pasted tossinv1…
+  "invite": { invite: string };
+};
+
+// The same core events also arrive through "transfer:event" (serde tag "type", snake_case):
+export type TransferEventV05 =
+  | { type: "contacts_changed" }
+  | { type: "contact_presence"; id: string; online: boolean; rtt_ms: number | null }
+  | ({ type: "push_incoming" } & IncomingPush)
+  | { type: "lan_blocked"; blocked: boolean };

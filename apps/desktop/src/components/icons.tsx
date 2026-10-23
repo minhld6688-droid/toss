@@ -56,6 +56,21 @@ export const TOSS_ICONS = {
   // a note: ring, stem, spark on top
   info: [RING(12, 12, 8.4), S("M12 11v5.2"), DOT(12, 7.9, 1.1)],
   share: [S("M8.2 11H6.6A1.6 1.6 0 0 0 5 12.6v5.8A1.6 1.6 0 0 0 6.6 20h10.8a1.6 1.6 0 0 0 1.6-1.6v-1.3"), S("M10 15.2C10.4 9.8 13.4 6.6 19 6"), S("M15.6 3 19.1 6l-3 3.5"), DOT(10, 15.4, 1.4)],
+  // v0.5 "Danh bạ máy" ------------------------------------------------------------------
+  // a machine's owner: head ring, shoulders as one soft arc, the spark is the presence light
+  contact: [F("M5.2 19.4c.8-3.7 3.4-5.7 6.8-5.7s6 2 6.8 5.7Z"), RING(12, 8.3, 3.5), S("M5.2 19.4c.8-3.7 3.4-5.7 6.8-5.7s6 2 6.8 5.7"), DOT(18.4, 5.2, 1.45)],
+  // the same figure, half-turned, with a plus: someone you are about to add
+  invite: [RING(9.8, 8.4, 3.3), S("M3.6 19.4c.7-3.4 3-5.3 6.2-5.3 1.4 0 2.6.3 3.6 1"), S("M18 12.3v6.2"), S("M14.9 15.4h6.2")],
+  // laptop: lid with a spark for the camera, base is a soft arc
+  laptop: [RECT(5.2, 5, 13.6, 9.4, 1.9, "f"), RECT(5.2, 5, 13.6, 9.4, 1.9), S("M2.8 18.4c3 1.3 15.4 1.3 18.4 0"), DOT(12, 9.7, 1.3)],
+  // desktop: screen on a short neck
+  desktop: [RECT(3.6, 4.4, 16.8, 11.2, 2, "f"), RECT(3.6, 4.4, 16.8, 11.2, 2), S("M12 15.6v3.6"), S("M8.6 19.6h6.8"), DOT(12, 10, 1.3)],
+  // the link is cut: the signal arcs with a slash through them
+  offline: [S("M4.8 9.4a10 10 0 0 1 3.4-2.3"), S("M19.2 9.4a10 10 0 0 0-5.4-3"), S("M7.9 12.6a5.7 5.7 0 0 1 2.2-1.4"), S("M16.1 12.6a5.7 5.7 0 0 0-1.6-1.2"), DOT(12, 16.6, 1.6), S("M4.6 4.6l14.8 14.8")],
+  // waiting: a ring and one hand, the spark where the hand points
+  clock: [RING(12, 12, 8.4), S("M12 7.4V12l3.1 1.9"), DOT(12, 12, 1.1)],
+  // qr: three finders and the data spark
+  qr: [RECT(4, 4, 6.4, 6.4, 1.6), RECT(13.6, 4, 6.4, 6.4, 1.6), RECT(4, 13.6, 6.4, 6.4, 1.6), DOT(16.8, 16.8, 1.7), S("M13.8 20h6.2"), S("M20 13.8v.4")],
 } satisfies Record<string, Part[]>;
 
 export type TossIconName = keyof typeof TOSS_ICONS;

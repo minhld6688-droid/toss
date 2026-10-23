@@ -1,10 +1,12 @@
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
-import { extractTicket } from "../lib/ticket";
+import { extractInvite, extractTicket } from "../lib/ticket";
 import { fmtExpiry } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Badge, Icon, Nest, Words } from "../components/ui";
 import { TossMark } from "../components/TossMark";
+import { ContactsSection } from "../components/Contacts";
+import { LanBlockedCard } from "../components/LanBlocked";
 import { api, errorMessage, isMock } from "../lib/ipc";
 
 export function Home() {
@@ -14,12 +16,15 @@ export function Home() {
   const toast = useStore((s) => s.toast);
   const openShare = useStore((s) => s.openShare);
   const askShare = useStore((s) => s.askShare);
+  const receiveInvite = useStore((s) => s.receiveInvite);
   const deviceName = useStore((s) => s.app?.device_name ?? "");
   const hostOn = useStore((s) => !!s.app?.host);
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function handle(t: string): Promise<boolean> {
+    const inv = extractInvite(t);
+    if (inv) { receiveInvite(inv); setText(""); return true; }
     const found = extractTicket(t);
     if (!found) return false;
     const ok = await openTicket(t);
@@ -58,6 +63,8 @@ export function Home() {
 
   return (
     <div className="p-4 pb-2">
+      <LanBlockedCard className="mb-4" />
+      <ContactsSection />
       <div className={`shell rise transition-colors duration-500 ease-aura ${dropHover ? "bg-accent/10" : ""}`}>
         <div
           className={`core relative overflow-hidden px-4 pt-5 pb-6 text-center transition-colors duration-500 ease-aura ${dropHover ? "border-accent/60" : ""}`}
@@ -87,12 +94,12 @@ export function Home() {
         <input
           ref={inputRef}
           className="input"
-          placeholder="…hoặc dán link / mã toss1… vào đây"
+          placeholder="…hoặc dán link / mã toss1… / lời mời vào đây"
           value={text}
           spellCheck={false}
           onChange={(e) => {
             setText(e.target.value);
-            if (extractTicket(e.target.value)) void handle(e.target.value);
+            if (extractTicket(e.target.value) || extractInvite(e.target.value)) void handle(e.target.value);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && text.trim()) void handle(text).then((ok) => { if (!ok) toast("Không phải link Toss", "error"); });

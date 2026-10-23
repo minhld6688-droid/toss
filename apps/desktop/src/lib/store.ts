@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AppState, HostStatus, TicketInfo, TransferEvent, TransferState } from "./ipc-types";
+import type { AppState, Contact, HostStatus, IncomingPush, TicketInfo, TransferEvent, TransferEventV05, TransferState } from "./ipc-types";
 import { api, errorMessage } from "./ipc";
 
 export type Screen = "home" | "transfers" | "settings";
@@ -15,6 +15,9 @@ export interface SheetNote { kind: "exists" | "error"; text: string }
 const EXISTS_RE = /already|exist|complete|đã (có|xong|nhận|tồn tại|đầy đủ)|hoàn tất/i;
 
 interface Toast { id: number; text: string; kind: "info" | "error" }
+
+/** "Thêm máy" sheet: which tab, and an invite to prefill (deep link / paste). */
+export interface AddDevice { tab: "invite" | "enter"; text: string }
 
 interface Store {
   screen: Screen;
@@ -39,6 +42,37 @@ interface Store {
   navPulse: number;
   /** "Vì sao?" on a relay transfer: timestamp of the last request to open the Kết nối section (0 = none) */
   diagFocus: number;
+  /** v0.5 Danh bạ máy */
+  contacts: Contact[];
+  contactsLoaded: boolean;
+  /** pushes waiting for the user's answer (not auto-accepted) */
+  pushes: IncomingPush[];
+  /** the "X muốn gửi…" sheet is open */
+  pushSheet: boolean;
+  /** macOS blocks Toss from the local network (NetDiag.lan_blocked / net:lan_blocked) */
+  lanBlocked: boolean;
+  addDevice: AddDevice | null;
+  /** contact whose detail sheet is open */
+  contactSheet: string | null;
+  /** contact row under a dragged file (highlighted drop target) */
+  hoverContact: string | null;
+
+  refreshContacts(): Promise<void>;
+  refreshPushes(): Promise<void>;
+  setLanBlocked(b: boolean): void;
+  presence(id: string, online: boolean, rtt: number | null): void;
+  addPush(p: IncomingPush): void;
+  removePush(pushId: string): void;
+  setPushSheet(open: boolean): void;
+  openAddDevice(tab?: AddDevice["tab"], text?: string): void;
+  closeAddDevice(): void;
+  openContact(id: string): void;
+  closeContact(): void;
+  setHoverContact(id: string | null): void;
+  /** send_to_contact + comet + jump to Chuyển file. Resolves false (after a toast) on failure. */
+  sendToContact(id: string, paths: string[], origin?: { x: number; y: number }): Promise<boolean>;
+  /** `invite` deep link / pasted invite: open "Thêm máy" on the paste tab with the confirm */
+  receiveInvite(invite: string): void;
 
   setScreen(s: Screen): void;
   /** Settings → Kết nối, scrolled into view */
@@ -55,7 +89,7 @@ interface Store {
   bumpShares(): void;
   toast(text: string, kind?: "info" | "error"): void;
   refreshTransfers(): Promise<void>;
-  applyEvent(ev: TransferEvent): void;
+  applyEvent(ev: TransferEvent | TransferEventV05): void;
   setDropHover(on: boolean): void;
   setHostStatus(h: HostStatus | null): void;
   fly(from?: { x: number; y: number }): void;
@@ -106,6 +140,68 @@ export const useStore = create<Store>((set, get) => ({
   flights: [],
   navPulse: 0,
   diagFocus: 0,
+  contacts: [],
+  contactsLoaded: false,
+  pushes: [],
+  pushSheet: false,
+  lanBlocked: false,
+  addDevice: null,
+  contactSheet: null,
+  hoverContact: null,
+
+  async refreshContacts() {
+    try {
+      const contacts = await api.list_contacts();
+      set({ contacts, contactsLoaded: true });
+    } catch {
+      // older core / not supported yet: an empty book is the right fallback
+      set({ contactsLoaded: true });
+    }
+  },
+  async refreshPushes() {
+    try {
+      const pushes = await api.list_incoming_pushes();
+      set((s) => ({ pushes, pushSheet: pushes.length > 0 && (s.pushSheet || pushes.some((p) => !s.pushes.some((o) => o.push_id === p.push_id))) }));
+    } catch { /* older core */ }
+  },
+  setLanBlocked: (lanBlocked) => set((s) => (s.lanBlocked === lanBlocked ? s : { lanBlocked })),
+  presence(id, online, rtt) {
+    set((s) => ({
+      contacts: s.contacts.map((c) => c.id !== id ? c : {
+        ...c, online, rtt_ms: online ? rtt : null,
+        last_seen: online || !c.online ? c.last_seen : Math.floor(Date.now() / 1000),
+      }),
+    }));
+  },
+  addPush(p) {
+    set((s) => (s.pushes.some((x) => x.push_id === p.push_id) ? s : { pushes: [...s.pushes, p], pushSheet: true, addDevice: null, contactSheet: null }));
+  },
+  removePush: (pushId) => set((s) => {
+    const pushes = s.pushes.filter((p) => p.push_id !== pushId);
+    return { pushes, pushSheet: pushes.length > 0 && s.pushSheet };
+  }),
+  setPushSheet: (pushSheet) => set({ pushSheet }),
+  openAddDevice: (tab = "invite", text = "") => set({ addDevice: { tab, text }, contactSheet: null, sheet: null, sheetNote: null, screen: "home" }),
+  closeAddDevice: () => set({ addDevice: null }),
+  openContact: (id) => set({ contactSheet: id }),
+  closeContact: () => set({ contactSheet: null }),
+  setHoverContact: (hoverContact) => set((s) => (s.hoverContact === hoverContact ? s : { hoverContact })),
+  receiveInvite: (invite) => set({ addDevice: { tab: "enter", text: invite }, contactSheet: null, sheet: null, sheetNote: null, share: null, shareAsk: null, screen: "home" }),
+
+  async sendToContact(id, paths, origin) {
+    const c = get().contacts.find((x) => x.id === id);
+    try {
+      await api.send_to_contact({ id, paths });
+      await get().refreshTransfers();
+      get().fly(origin);
+      set({ screen: "transfers", contactSheet: null });
+      get().toast(c && !c.online ? `${c.name} đang offline, sẽ gửi khi máy online` : `Đang gửi cho ${c?.name ?? "máy kia"}…`);
+      return true;
+    } catch (e) {
+      get().toast(errorMessage(e), "error");
+      return false;
+    }
+  },
 
   setScreen: (screen) => set({ screen }),
   openDiagnostics: () => set({ screen: "settings", sheet: null, sheetNote: null, diagFocus: Date.now() }),
@@ -174,6 +270,8 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   applyEvent(ev) {
+    // v0.5 core events also come through here; they have their own listeners (contacts:changed …)
+    if (ev.type === "contacts_changed" || ev.type === "contact_presence" || ev.type === "push_incoming" || ev.type === "lan_blocked") return;
     if (ev.type === "host_status") {
       const { type: _t, ...rest } = ev;
       void _t;
@@ -189,6 +287,7 @@ export const useStore = create<Store>((set, get) => ({
           id: ev.id, job: ev.job, op: ev.op, side: ev.side, peer: ev.peer, status: "connecting",
           bytes_done: 0, bytes_total: 0, files_done: 0, files_total: 0, speed_bps: 0, eta_s: null,
           path: "unknown", rtt_ms: null, streams: 0, dest: null, error: null, started_at: Math.floor(Date.now() / 1000),
+          contact: ev.contact ?? null,
         };
         break;
       case "manifest":

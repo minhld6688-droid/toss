@@ -103,3 +103,39 @@ pub struct JobRecord {
     /// Re-signed ticket string for display/copy; "" when this app did not mint it.
     pub ticket: String,
 }
+
+// ---- v0.5 "Danh bạ máy" (contracts/contacts-v0.5.md §3/§4) -----------------------------------------
+// Same field names/types as the core structs, so the real calls convert with `core_v05::via_serde`.
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Contact {
+    pub id: String,
+    pub name: String,
+    pub their_name: String,
+    pub platform: String,
+    pub added_at: u64,
+    pub auto_accept: bool,
+    pub online: bool,
+    pub last_seen: u64,
+    pub rtt_ms: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InviteInfo {
+    pub invite: String,
+    pub web_url: String,
+    pub deep_link: String,
+    pub exp: u64,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IncomingPush {
+    pub push_id: String,
+    pub from_id: String,
+    pub from_name: String,
+    pub job: String,
+    pub files: u32,
+    pub bytes: u64,
+    pub at: u64,
+}

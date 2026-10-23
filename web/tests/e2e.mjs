@@ -104,6 +104,34 @@ await check('tolerates toss:// prefix, https prefix, uppercase, percent-encoding
   }
 });
 
+// v0.5: a pairing invite (tossinv1…) redirects to toss://i/<invite>, never to the ticket scheme.
+let invite = 'tossinv1';
+for (let i = 0; i < 420; i++) invite += b32[(i * 5 + (i >> 2)) % 32];
+
+await check('invite: opens toss://i/, invite wording, copy button copies the invite', async () => {
+  for (const frag of ['#' + invite, '#toss://i/' + invite, '#https://x.example/#' + invite, '#' + invite.toUpperCase()]) {
+    const { ctx, page, problems } = await open(frag, { ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36' });
+    assert(await vis(page, 'view-link'), 'valid invite: ' + frag.slice(0, 30));
+    assert.equal(await page.locator('iframe').getAttribute('src'), 'toss://i/' + invite);
+    assert(await page.locator('#invite-intro').isVisible());
+    assert.deepEqual(problems.filter((p) => /Content Security Policy|Refused/i.test(p)), []);
+    if (frag === '#' + invite) {
+      await page.waitForTimeout(1800);
+      assert(await vis(page, 'state-fallback'));
+      await page.getByRole('button', { name: 'Copy lời mời' }).click();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), invite);
+      await page.screenshot({ path: join(shots, 'invite.png'), fullPage: true });
+    }
+    await ctx.close();
+  }
+  for (const bad of ['tossinv1short', 'tossinv1' + 'a'.repeat(60) + '1', 'tossinv1' + 'a'.repeat(4000)]) {
+    const { ctx, page } = await open('#' + bad);
+    assert(await vis(page, 'view-invalid'), 'invalid invite: ' + bad.slice(0, 20));
+    assert.equal(await page.locator('iframe').count(), 0);
+    await ctx.close();
+  }
+});
+
 await check('invalid tickets', async () => {
   const bad = ['abc', 'toss1short', 'toss1' + 'a'.repeat(44), 'toss2' + 'a'.repeat(100), 'toss1' + 'a'.repeat(60) + '!', 'toss1' + 'a'.repeat(60) + '1', 'toss1' + 'a'.repeat(2000)];
   for (const frag of bad) {

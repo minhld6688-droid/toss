@@ -12,9 +12,13 @@ use tauri_plugin_notification::NotificationExt as _;
 use tauri_plugin_opener::OpenerExt as _;
 
 use crate::{
+    contacts,
     core::{self, Core},
     firewall,
-    ipc::{AppState, HostConfig, JobRecord, NetDiagUi, TicketInfo, TicketSpec},
+    ipc::{
+        AppState, Contact, HostConfig, IncomingPush, InviteInfo, JobRecord, NetDiagUi, TicketInfo,
+        TicketSpec,
+    },
     settings::QuickShare,
     shell::Shell,
 };
@@ -287,6 +291,74 @@ pub async fn set_net(core: C<'_>, net: toss_core::NetConfig) -> Res<()> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn export_logs(core: C<'_>) -> Res<String> {
     Ok(core.export_logs().await?)
+}
+
+// ---- v0.5 contacts ("Danh bạ máy") ----------------------------------------------------------------------------
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_contacts(core: C<'_>) -> Res<Vec<Contact>> {
+    Ok(core.list_contacts().await?)
+}
+
+/// Creates the invite and copies its web link to the clipboard (the UI shows link + QR).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn create_invite(app: AppHandle, core: C<'_>, days: u32) -> Res<InviteInfo> {
+    let info = core.create_invite(days).await?;
+    if let Err(e) = app.clipboard().write_text(info.web_url.clone()) {
+        tracing::warn!("clipboard: {e}");
+    }
+    Ok(info)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn revoke_invites(core: C<'_>) -> Res<()> {
+    Ok(core.revoke_invites().await?)
+}
+
+/// Additive (not in ipc.ts): decode an invite for the "Kết nối với <name>?" confirm, without pairing.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn parse_invite(core: C<'_>, text: String) -> Res<InviteInfo> {
+    Ok(core.parse_invite(&text)?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn accept_invite(core: C<'_>, text: String) -> Res<Contact> {
+    Ok(core.accept_invite(text).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn rename_contact(core: C<'_>, id: String, name: String) -> Res<()> {
+    Ok(core.rename_contact(id, name).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_contact_auto_accept(core: C<'_>, id: String, on: bool) -> Res<()> {
+    Ok(core.set_contact_auto_accept(id, on).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remove_contact(core: C<'_>, id: String) -> Res<()> {
+    Ok(core.remove_contact(id).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_to_contact(core: C<'_>, id: String, paths: Vec<String>) -> Res<String> {
+    Ok(core.send_to_contact(id, paths).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_incoming_pushes(core: C<'_>) -> Res<Vec<IncomingPush>> {
+    Ok(core.list_incoming_pushes().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn answer_push(core: C<'_>, push_id: String, accept: bool) -> Res<()> {
+    Ok(core.answer_push(push_id, accept).await?)
+}
+
+/// macOS: opens System Settings → Privacy & Security → Local Network. Elsewhere: no-op.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn open_local_network_settings() -> Res<()> {
+    Ok(contacts::open_local_network_settings()?)
 }
 
 // ---- misc ------------------------------------------------------------------------------------------------------

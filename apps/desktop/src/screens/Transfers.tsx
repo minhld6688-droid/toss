@@ -5,15 +5,23 @@ import { fmtBytes, fmtEta, fmtSpeed } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Badge, EASE, Icon, Progress, Words, motion } from "../components/ui";
 import { TossMark } from "../components/TossMark";
+import { LanBlockedCard } from "../components/LanBlocked";
 import type React from "react";
 
 const pathLabel: Record<ConnPath, string | null> = { direct: "Trực tiếp", relay: "Relay", mixed: "Hỗn hợp", unknown: null };
 
-function statusLine(t: TransferState): string {
+/** A push is sent to (side client, op put) or received from (side host) a contact. */
+const sendsToContact = (t: TransferState) => t.side === "client" && t.op === "put";
+
+function statusLine(t: TransferState, contactName: string | null, contactOnline: boolean | null): string {
   switch (t.status) {
-    case "connecting": return t.error ?? "Đang kết nối…";
+    case "connecting":
+      if (t.error) return t.error;
+      // queued push: the contact is offline, it starts by itself when they come online
+      if (t.contact && sendsToContact(t) && contactOnline === false) return `Chờ ${contactName ?? t.peer} online`;
+      return "Đang kết nối…";
     case "running": return [fmtSpeed(t.speed_bps), fmtEta(t.eta_s)].filter(Boolean).join(" · ");
-    case "paused": return "Tạm dừng";
+    case "paused": return t.bytes_done > 0 ? "Tạm dừng · bấm Tiếp tục để gửi nốt" : "Tạm dừng";
     case "done": return `Xong · ${t.files_total} file`;
     case "cancelled": return "Đã huỷ";
     case "error": return t.error ?? "Lỗi";
@@ -22,6 +30,7 @@ function statusLine(t: TransferState): string {
 
 function Item({ t, i }: { t: TransferState; i: number }) {
   const toast = useStore((s) => s.toast);
+  const contact = useStore((s) => (t.contact ? s.contacts.find((c) => c.id === t.contact) ?? null : null));
   const openDiagnostics = useStore((s) => s.openDiagnostics);
   const call = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { toast(errorMessage(e), "error"); } };
   const frac = t.bytes_total > 0 ? t.bytes_done / t.bytes_total : t.status === "done" ? 1 : 0;
@@ -29,19 +38,23 @@ function Item({ t, i }: { t: TransferState; i: number }) {
   const tone = t.status === "done" ? "ok" : t.status === "error" ? "bad" : t.status === "paused" || t.status === "cancelled" ? "mute" : "accent";
   const pl = pathLabel[t.path];
   const isHostSide = t.side === "host";
+  const viaContact = !!t.contact;
+  const peerName = contact?.name ?? t.peer;
+  // direction of the bytes: for contact pushes the op/side pair decides (host-side put = receiving)
+  const incoming = viaContact ? !sendsToContact(t) : t.op === "get";
   return (
     <motion.li
       layout="position" className="shell rise" style={{ "--i": i } as React.CSSProperties}
       transition={{ layout: { duration: 0.6, ease: EASE } }}
     ><div className="core p-3.5">
       <div className="flex items-start gap-2.5">
-        <div className={`relative grid place-items-center w-8 h-8 rounded-full shrink-0 ${t.status === "done" ? "bg-ok/15 text-ok" : t.op === "get" ? "bg-accent/15 text-accent" : "bg-ok/15 text-ok"} ${t.status === "running" ? `drip ${t.op === "put" ? "up" : ""}` : ""}`}>
+        <div className={`relative grid place-items-center w-8 h-8 rounded-full shrink-0 ${t.status === "done" ? "bg-ok/15 text-ok" : incoming ? "bg-accent/15 text-accent" : "bg-ok/15 text-ok"} ${t.status === "running" ? `drip ${incoming ? "" : "up"}` : ""}`}>
           {t.status === "done" ? (
             <motion.span
               key="done" className="grid place-items-center"
               initial={{ scale: 0, rotate: -40 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 520, damping: 16 }}
             ><Icon name="check" className="w-4 h-4" weight="bold" /></motion.span>
-          ) : <Icon name={t.op === "get" ? "down" : "up"} className="w-4 h-4" weight="bold" />}
+          ) : <Icon name={t.status === "connecting" && viaContact && !incoming && contact?.online === false ? "clock" : incoming ? "down" : "up"} className="w-4 h-4" weight="bold" />}
           {t.status === "done" && (
             <motion.span
               className="absolute inset-0 rounded-full border-2 border-ok pointer-events-none"
@@ -52,12 +65,14 @@ function Item({ t, i }: { t: TransferState; i: number }) {
         <div className="min-w-0 flex-1">
           <div className="truncate text-base font-semibold tracking-tight" title={t.job}>{t.job}</div>
           <div className="text-xs text-mute truncate">
-            {isHostSide ? `${t.op === "get" ? "Gửi cho" : "Nhận từ"} ${t.peer}` : t.op === "get" ? `Nhận từ ${t.peer}` : `Trả cho ${t.peer}`}
+            {viaContact
+              ? `${incoming ? "Nhận từ" : "Gửi tới"} ${peerName}`
+              : isHostSide ? `${t.op === "get" ? "Gửi cho" : "Nhận từ"} ${t.peer}` : t.op === "get" ? `Nhận từ ${t.peer}` : `Trả cho ${t.peer}`}
           </div>
         </div>
         <div className="flex flex-col items-end gap-0.5 shrink-0">
           <div className="flex items-center gap-1">
-            {isHostSide && <Badge tone="warn">Máy tổng</Badge>}
+            {isHostSide && !viaContact && <Badge tone="warn">Máy tổng</Badge>}
             {pl && <Badge tone={t.path === "direct" ? "ok" : "mute"}>{pl}</Badge>}
             {pl && t.rtt_ms != null && <span className="mono text-[11px] text-mute" title="Độ trễ (RTT) của đường đang dùng">{t.rtt_ms} ms</span>}
           </div>
@@ -72,7 +87,7 @@ function Item({ t, i }: { t: TransferState; i: number }) {
       )}
 
       <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-        <div className={`min-w-0 truncate ${t.status === "error" ? "text-bad" : "text-mute"}`}>{statusLine(t)}</div>
+        <div className={`min-w-0 truncate ${t.status === "error" ? "text-bad" : "text-mute"}`}>{statusLine(t, contact?.name ?? null, contact ? contact.online : null)}</div>
         <div className="text-mute shrink-0 mono">
           {t.bytes_total > 0 ? `${fmtBytes(t.bytes_done)} / ${fmtBytes(t.bytes_total)}` : ""}
         </div>
@@ -100,6 +115,7 @@ export function Transfers() {
 
   return (
     <div className="p-4">
+      <LanBlockedCard className="mb-4" />
       <div className="flex items-center justify-between mb-3">
         <Words text="Chuyển file" accent={["file"]} className="text-[30px]" />
         <button
