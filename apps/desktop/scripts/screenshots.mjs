@@ -113,6 +113,104 @@ for (const scheme of ["light", "dark"]) {
     await page.getByRole("button", { name: /Cho phép qua firewall/ }).waitFor();
     await shot(page, "07-wizard-firewall.png");
   }
+  // ---- v0.5 Danh bạ máy ------------------------------------------------------------------------
+  {
+    const open = async (qs) => {
+      const p = await ctx.newPage();
+      await p.goto(base + qs);
+      await p.getByText("Danh bạ máy", { exact: true }).waitFor();
+      return p;
+    };
+    // contact book: online + RTT, offline, and one that is waiting to push
+    let p = await open("?push=1");
+    await p.getByText("Từ Đạt – Mac").waitFor();
+    await p.getByRole("button", { name: "Để sau" }).click(); // push sheet auto-opened: dismissed, the banner stays
+    await p.waitForTimeout(700);
+    await shot(p, `12-contacts${sfx}.png`);
+    if (scheme === "light") {
+      // dragging a folder over the window: the row under the pointer lights up
+      await p.evaluate(() => {
+        const r = document.querySelector('[data-contact-id]').getBoundingClientRect();
+        window.__tossMock.emit("drop:hover", { on: true });
+        window.__tossMock.emit("drop:over", { x: r.left + 60, y: r.top + r.height / 2 });
+      });
+      await p.waitForTimeout(500);
+      await shot(p, "12-contacts-drop.png");
+      await p.evaluate(() => window.__tossMock.emit("drop:hover", { on: false }));
+      // contact detail sheet
+      await p.getByText("Từ Đạt – Mac").first().click();
+      await p.getByText("Tên hiển thị").waitFor();
+      await p.waitForTimeout(900);
+      await shot(p, "12-contact-sheet.png");
+    }
+    await p.close();
+
+    // empty book
+    if (scheme === "light") {
+      p = await ctx.newPage();
+      await p.goto(base + "?contacts=0");
+      await p.getByText("Chưa có máy nào trong danh bạ").waitFor();
+      await p.waitForTimeout(500);
+      await shot(p, "12-contacts-empty.png");
+      await p.close();
+    }
+
+    // transfers after a restart: paused push with Tiếp tục, one waiting for an offline contact, one received
+    p = await ctx.newPage();
+    await p.goto(base + "?restored=1");
+    await p.getByRole("button", { name: "Chuyển file" }).click();
+    await p.getByText("Chờ Chị Lan – PC online").waitFor();
+    await p.evaluate(() => document.querySelector("main").scrollBy(0, 300));
+    await p.waitForTimeout(700);
+    await shot(p, `12-transfers-contacts${sfx}.png`);
+    await p.close();
+
+    // "Thêm máy" -> Mời: QR + link + expiry
+    p = await open("");
+    await p.getByRole("button", { name: "Thêm máy" }).first().click();
+    await p.getByRole("button", { name: "Tạo lời mời" }).click();
+    await p.getByRole("button", { name: "Huỷ mọi lời mời" }).waitFor();
+    await p.waitForTimeout(4300); // let the "đã copy" toast go
+    await shot(p, `13-invite${sfx}.png`);
+    await p.close();
+
+    // an invite arrives as a deep link: "Kết nối với <name>?"
+    if (scheme === "light") {
+      p = await ctx.newPage();
+      await p.goto(base + "?invite=1");
+      await p.getByText("Mai – Laptop").first().waitFor({ timeout: 8000 });
+      await p.waitForTimeout(900);
+      await shot(p, "13-invite-confirm.png");
+      await p.close();
+    }
+
+    // an incoming push from a contact that is not auto-accepted
+    p = await ctx.newPage();
+    await p.goto(base + "?push=1");
+    await p.getByRole("button", { name: "Nhận", exact: true }).waitFor({ timeout: 8000 });
+    await p.waitForTimeout(900);
+    await shot(p, `14-push-incoming${sfx}.png`);
+    await p.close();
+
+    // macOS blocks the local network: banner in Home, Chuyển file and Kết nối
+    p = await ctx.newPage();
+    await p.goto(base + "?lan=blocked&host=1&remote=1");
+    await p.getByText("macOS đang chặn Toss").first().waitFor({ timeout: 8000 });
+    await p.waitForTimeout(700);
+    await shot(p, `15-lan-blocked${sfx}.png`);
+    if (scheme === "light") {
+      await p.getByRole("button", { name: "Chuyển file" }).click();
+      await p.getByText("macOS đang chặn Toss").first().waitFor();
+      await p.waitForTimeout(700);
+      await shot(p, "15-lan-blocked-transfers.png");
+      await p.getByRole("button", { name: "Cài đặt", exact: true }).click();
+      await p.getByText("Khả năng nối trực tiếp").waitFor();
+      await p.getByRole("heading", { name: "Kết nối", exact: true }).evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await p.waitForTimeout(700);
+      await shot(p, "15-lan-blocked-connection.png");
+    }
+    await p.close();
+  }
   await ctx.close();
 }
 await browser.close();

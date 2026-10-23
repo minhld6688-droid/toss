@@ -165,12 +165,13 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
   <section class="card" id="view-link" hidden data-state="opening">
     <div id="state-opening">
       <div class="status"><div class="spinner" aria-hidden="true"></div><h1 style="margin:0">Đang mở Toss…</h1></div>
+      <p class="muted" id="invite-intro" hidden>Lời mời kết nối máy: sau khi bạn đồng ý, hai máy nhớ nhau và gửi file qua lại không cần link nữa.</p>
       <p class="muted">Nếu trình duyệt hỏi, hãy chọn cho phép mở Toss.</p>
     </div>
 
     <div id="state-opened" hidden>
-      <h1>Đã gửi link sang Toss</h1>
-      <p class="muted">Chuyển sang ứng dụng Toss để theo dõi tiến trình. Nếu bạn đã huỷ hộp thoại của trình duyệt, bấm bên dưới để thử lại.</p>
+      <h1 id="opened-title">Đã gửi link sang Toss</h1>
+      <p class="muted" id="opened-note">Chuyển sang ứng dụng Toss để theo dõi tiến trình. Nếu bạn đã huỷ hộp thoại của trình duyệt, bấm bên dưới để thử lại.</p>
       <p class="small"><button type="button" class="link-btn" id="btn-notopened">Toss chưa mở?</button></p>
     </div>
 
@@ -188,7 +189,7 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
       <hr class="divider">
       <p class="ticket-line" id="ticket-preview"></p>
       <button type="button" class="btn" id="btn-copy">Copy ticket</button>
-      <p class="muted small" style="margin:10px 0 0">Đã cài Toss mà vẫn không mở? Copy ticket rồi dán vào ứng dụng Toss.</p>
+      <p class="muted small" id="copy-note" style="margin:10px 0 0">Đã cài Toss mà vẫn không mở? Copy ticket rồi dán vào ứng dụng Toss.</p>
     </div>
   </section>
 
@@ -212,6 +213,7 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
     repo: 'minhld6688-droid/toss',
     assets: { mac: 'Toss.dmg', win: 'Toss-setup.exe' },
     scheme: 'toss://t/',
+    inviteScheme: 'toss://i/',
     fallbackDelayMs: 1500
   };
   var BASE = 'https://github.com/' + TOSS.repo + '/releases/latest/download/';
@@ -224,9 +226,14 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
     if (!raw) return { kind: 'none' };
     try { raw = decodeURIComponent(raw); } catch (e) { /* keep raw */ }
     raw = raw.trim();
-    raw = raw.replace(/^toss:\/\/t\//i, '');
+    raw = raw.replace(/^toss:\/\/[ti]\//i, '');
     raw = raw.replace(/^https?:\/\/[^#]*#/i, '');
     raw = raw.trim();
+    // v0.5 pairing invite: tossinv1 + base32 (signed invite, a few hundred chars).
+    if (/^tossinv1/i.test(raw)) {
+      if (raw.length < 40 || raw.length > 3000 || !/^tossinv1[a-z2-7]+$/i.test(raw)) return { kind: 'invalid' };
+      return { kind: 'invite', ticket: raw.toLowerCase() };
+    }
     // toss1 + RFC 4648 base32 (a-z, 2-7), upper or lower case, 50..2000 chars.
     if (raw.length < 50 || raw.length > 2000 || !/^toss1[a-z2-7]+$/i.test(raw)) {
       return { kind: 'invalid' };
@@ -293,8 +300,9 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
   }
 
   // ---- link flow ------------------------------------------------------
-  function runLink(ticket) {
-    var deep = TOSS.scheme + ticket;
+  function runLink(ticket, kind) {
+    var invite = kind === 'invite';
+    var deep = (invite ? TOSS.inviteScheme : TOSS.scheme) + ticket;
     var left = false; // page lost focus / went hidden => the OS probably opened the app
     var iframe = null;
 
@@ -321,6 +329,16 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
       location.href = deep;
     }
 
+    if (invite) {
+      document.title = 'Lời mời kết nối · Toss';
+      $('invite-intro').hidden = false;
+      $('opened-title').textContent = 'Đã gửi lời mời sang Toss';
+      $('opened-note').textContent = 'Chuyển sang ứng dụng Toss và bấm Kết nối. Nếu bạn đã huỷ hộp thoại của trình duyệt, bấm bên dưới để thử lại.';
+      $('btn-copy').textContent = 'Copy lời mời';
+      $('copy-note').textContent = 'Đã cài Toss mà vẫn không mở? Copy lời mời rồi dán vào Toss: Trang chính → Thêm máy → Nhập lời mời.';
+    }
+    var copyLabel = invite ? 'Copy lời mời' : 'Copy ticket';
+
     $('ticket-preview').textContent = ticket.length > 40
       ? ticket.slice(0, 22) + '…' + ticket.slice(-10) + '  (' + ticket.length + ' ký tự)'
       : ticket;
@@ -330,7 +348,7 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
     $('btn-copy').addEventListener('click', function () {
       var btn = $('btn-copy');
       copyText(ticket).then(function () { btn.textContent = 'Đã copy'; }, function () { btn.textContent = 'Không copy được'; })
-        .then(function () { setTimeout(function () { btn.textContent = 'Copy ticket'; }, 2000); });
+        .then(function () { setTimeout(function () { btn.textContent = copyLabel; }, 2000); });
     });
 
     show('view-link');
@@ -350,7 +368,7 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
   var t = readTicket();
   if (t.kind === 'none') show('view-landing');
   else if (t.kind === 'invalid') show('view-invalid');
-  else runLink(t.ticket);
+  else runLink(t.ticket, t.kind);
 
   window.addEventListener('hashchange', function () { location.reload(); });
 })();

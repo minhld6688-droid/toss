@@ -1,8 +1,11 @@
 // In-memory mock of the shell (VITE_MOCK=1). Simulates tickets, host mode, remote
 // admin control and transfers with progress so the UI can be built and screenshotted
-// without Rust. Implements the same surface as Commands (+ ExtraCommands).
+// without Rust. Implements the same surface as Commands (+ CommandsV05 + ExtraCommands).
+// URL switches: ?host=1 ?remote=1 ?wizard=1 ?net=relay|medium|direct|probing ?share=1 ?deeplink=1|exists
+//   v0.5: ?push=1 (Anh Hùng sends an incoming push 1 s after start) ?invite=1 (toss://i/… deep link arrives)
+//         ?lan=blocked (macOS blocks the local network) ?contacts=0 (empty book) ?restored=1 (paused + queued pushes after a "restart")
 import type {
-  AppState, Commands, ConnectReport, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
+  AppState, Commands, CommandsV05, ConnectReport, Contact, IncomingPush, InviteInfo, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
   NetConfig, NetDiagUi, TicketInfo, TicketSpec, TransferEvent, TransferState,
 } from "./ipc-types";
 import type { ExtraCommands } from "./ipc-extra";
@@ -123,7 +126,7 @@ function tfBase(p: Partial<TransferState> & { id: string; job: string }): Transf
   return {
     op: "get", side: "client", peer: "Máy tổng", status: "connecting", bytes_done: 0, bytes_total: 0,
     files_done: 0, files_total: 0, speed_bps: 0, eta_s: null, path: "unknown", rtt_ms: null, streams: 0, dest: null, error: null,
-    started_at: now(), ...p,
+    started_at: now(), contact: null, ...p,
   };
 }
 
@@ -266,6 +269,54 @@ function seedShares() {
 // jobs already refused once by start_get ("đã nhận xong"); the second try (sheet "Tải lại") goes through
 const reloadOk = new Set<string>();
 
+// ---- v0.5 contacts / invites / pushes --------------------------------------
+const lanBlocked = params.get("lan") === "blocked";
+const contacts: Contact[] = params.get("contacts") === "0" ? [] : [
+  { id: hex(64), name: "Từ Đạt – Mac", their_name: "MacBook của Đạt", platform: "macos", added_at: now() - 9 * 86400, auto_accept: true, online: true, last_seen: now(), rtt_ms: 12 },
+  { id: hex(64), name: "Chị Lan – PC", their_name: "DESKTOP-LAN", platform: "windows", added_at: now() - 21 * 86400, auto_accept: true, online: false, last_seen: now() - 2 * 3600 - 600, rtt_ms: null },
+  { id: hex(64), name: "Anh Hùng – iMac", their_name: "iMac của Hùng", platform: "macos", added_at: now() - 3 * 86400, auto_accept: false, online: true, last_seen: now(), rtt_ms: 31 },
+];
+const pushes: IncomingPush[] = [];
+const hung = () => contacts.find((c) => c.name.startsWith("Anh Hùng"));
+const dat = () => contacts.find((c) => c.name.startsWith("Từ Đạt"));
+const lan = () => contacts.find((c) => c.name.startsWith("Chị Lan"));
+
+function makeInvite(name: string, days: number): InviteInfo {
+  const body = b32enc(new TextEncoder().encode(JSON.stringify({ name })));
+  const invite = "tossinv1" + body + "ab" + b32enc(crypto.getRandomValues(new Uint8Array(20)));
+  return { invite, web_url: `https://${state.page_host}/#${invite}`, deep_link: `toss://i/${invite}`, exp: now() + days * 86400, name: state.device_name };
+}
+function decodeInvite(text: string): InviteInfo {
+  const m = text.match(/tossinv1[a-z2-7]{16,}/i);
+  if (!m) throw new Error("Không phải lời mời Toss hợp lệ");
+  const invite = m[0].toLowerCase();
+  let name = "Mai – Laptop";
+  try {
+    const raw = new TextDecoder().decode(b32dec(invite.slice(8)));
+    const j = JSON.parse(raw.slice(0, raw.lastIndexOf("}") + 1));
+    if (j && typeof j.name === "string") name = j.name;
+  } catch { /* demo name */ }
+  return { invite, web_url: `https://${state.page_host}/#${invite}`, deep_link: `toss://i/${invite}`, exp: now() + 6 * 86400, name };
+}
+let issuedInvites = 0;
+
+function seedRestored() {
+  // what a restart leaves behind: a half-sent push (paused), one queued for an offline contact, one just received
+  const d = dat(), l = lan(), h = hung();
+  if (d) transfers.set("r1-0001", tfBase({
+    id: "r1-0001", job: "11B2 - Retouch", op: "put", peer: d.name, contact: d.id, status: "paused",
+    bytes_done: 0.6 * GB, bytes_total: 1.6 * GB, files_done: 41, files_total: 108, path: "direct", rtt_ms: 12, started_at: now() - 900,
+  }));
+  if (l) transfers.set("r2-0002", tfBase({
+    id: "r2-0002", job: "12A3 - Chọn", op: "put", peer: l.name, contact: l.id, status: "connecting", started_at: now() - 300,
+  }));
+  if (h) transfers.set("r3-0003", tfBase({
+    id: "r3-0003", job: "10C1 - Ảnh lớp", op: "put", side: "host", peer: h.name, contact: h.id, status: "done",
+    bytes_done: 2.3 * GB, bytes_total: 2.3 * GB, files_done: 188, files_total: 188, path: "direct", rtt_ms: 31,
+    dest: `${state.dest_dir}/${h.name}/10C1 - Ảnh lớp`, started_at: now() - 5000,
+  }));
+}
+
 // ---- v0.4 diagnostics ------------------------------------------------------
 // ?net=relay (default: symmetric NAT, no port mapping, firewall missing) | medium | direct | probing
 const scenario = params.get("net") ?? "relay";
@@ -274,7 +325,13 @@ const RELAY = "https://aps1-1.relay.n0.iroh.link./";
 const PORT_REASON = "Router không hỗ trợ UPnP — mở cổng UDP 41820 thủ công để editor ở xa nối trực tiếp";
 
 function mockDiag(): NetDiagUi {
-  const base = { relay_url: RELAY, relay_connected: true, custom_relay: state.net.relay_urls.length > 0, direct_addrs: ["192.168.1.20:41820", "113.190.12.45:41820"], bind_port: 41820, mdns: state.net.mdns, firewall, log_dir: "/Users/minh/Library/Application Support/toss/logs" };
+  const d = mockDiag0();
+  return lanBlocked
+    ? { ...d, lan_blocked: true, reasons: ["macOS đang chặn Toss truy cập mạng cục bộ — vào Cài đặt hệ thống → Quyền riêng tư & Bảo mật → Mạng cục bộ và bật Toss, rồi mở lại Toss", ...d.reasons] }
+    : d;
+}
+function mockDiag0(): NetDiagUi {
+  const base = { lan_blocked: false, relay_url: RELAY, relay_connected: true, custom_relay: state.net.relay_urls.length > 0, direct_addrs: ["192.168.1.20:41820", "113.190.12.45:41820"], bind_port: 41820, mdns: state.net.mdns, firewall, log_dir: "/Users/minh/Library/Application Support/toss/logs" };
   switch (scenario) {
     case "direct": return {
       ...base, direct_addrs: ["113.190.12.45:41820", "[2402:800:6344:1c3::2]:41820", "192.168.1.20:41820"],
@@ -315,7 +372,7 @@ function mockReport(): ConnectReport {
 }
 
 // ---- api -----------------------------------------------------------------
-export const mockApi: Commands & ExtraCommands = {
+export const mockApi: Commands & CommandsV05 & ExtraCommands = {
   async get_state() { await sleep(60); return structuredClone(state); },
   async finish_setup({ device_name, dest_dir }) {
     state.device_name = device_name; state.dest_dir = dest_dir; state.first_run = false; return structuredClone(state);
@@ -418,6 +475,18 @@ export const mockApi: Commands & ExtraCommands = {
     // URL switches to exercise shell-initiated events: ?share=1 (right-click menu), ?deeplink=1 (new job) / ?deeplink=exists (already downloaded)
     if (params.get("share") === "1") setTimeout(() => emit("share", { path: params.get("path") ?? "/Users/minh/Pictures/Giao hàng/12A3 - RAW" }), 150);
     if (params.get("shareerror") === "1") setTimeout(() => emit("share:error", { msg: "Không mở được folder để chia sẻ" }), 150);
+    if (params.get("push") === "1" && hung()) {
+      const h = hung()!;
+      setTimeout(() => {
+        const p: IncomingPush = { push_id: hex(32), from_id: h.id, from_name: h.name, job: "12A3 - Ảnh lớp (đã chọn)", files: 214, bytes: 3.4 * GB, at: now() };
+        pushes.push(p);
+        emit("push:incoming", p);
+      }, 1000);
+    }
+    if (params.get("invite") === "1") {
+      const inv = makeInvite("Mai – Laptop", 7);
+      setTimeout(() => emit("invite", { invite: inv.invite }), 200);
+    }
     const dl = params.get("deeplink");
     if (dl) {
       const job = dl === "exists" ? "11B2 - RAW" : "12B1 - RAW";
@@ -427,6 +496,78 @@ export const mockApi: Commands & ExtraCommands = {
     }
   },
   async has_admin_ticket() { return adminTicket !== null; },
+
+  // ---- v0.5 ----------------------------------------------------------------
+  async list_contacts() { await sleep(60); return structuredClone(contacts); },
+  async create_invite({ days }) {
+    await sleep(250);
+    const info = makeInvite("", days);
+    issuedInvites++;
+    try { await navigator.clipboard.writeText(info.web_url); } catch { /* the real shell copies natively */ }
+    return info;
+  },
+  async revoke_invites() { await sleep(150); issuedInvites = 0; },
+  async parse_invite({ text }) { await sleep(120); return decodeInvite(text); },
+  async accept_invite({ text }) {
+    const info = decodeInvite(text);
+    await sleep(700);
+    if (params.get("invitefail") === "1") throw new Error("Máy kia không trả lời, hãy kiểm tra họ đang mở Toss");
+    const c: Contact = { id: hex(64), name: info.name, their_name: info.name, platform: /win|pc/i.test(info.name) ? "windows" : "macos", added_at: now(), auto_accept: true, online: true, last_seen: now(), rtt_ms: 18 };
+    contacts.push(c);
+    emit("contacts:changed", {});
+    return structuredClone(c);
+  },
+  async rename_contact({ id, name }) {
+    const c = contacts.find((x) => x.id === id); if (!c) throw new Error("Không tìm thấy máy này");
+    c.name = name.trim(); emit("contacts:changed", {});
+  },
+  async set_contact_auto_accept({ id, on }) {
+    const c = contacts.find((x) => x.id === id); if (!c) throw new Error("Không tìm thấy máy này");
+    c.auto_accept = on; emit("contacts:changed", {});
+  },
+  async remove_contact({ id }) {
+    const at = contacts.findIndex((x) => x.id === id); if (at < 0) throw new Error("Không tìm thấy máy này");
+    contacts.splice(at, 1); emit("contacts:changed", {});
+  },
+  async send_to_contact({ id, paths }) {
+    const c = contacts.find((x) => x.id === id); if (!c) throw new Error("Không tìm thấy máy này");
+    if (paths.length === 0) throw new Error("Chưa chọn file hoặc folder nào");
+    const tid = `p-${hex(6)}`;
+    const name = baseOf(paths[0]);
+    const job = paths.length > 1 ? `${paths.length} mục` : name;
+    const s = tfBase({ id: tid, job, op: "put", peer: c.name, contact: c.id });
+    transfers.set(tid, s);
+    emitTransfer({ type: "started", id: tid, job, op: "put", side: "client", peer: c.name, contact: c.id });
+    if (c.online) {
+      void (async () => {
+        await sleep(700);
+        if (s.status !== "connecting") return;
+        s.bytes_total = Math.round((0.8 + Math.random() * 2) * GB); s.files_total = 60 + Math.floor(Math.random() * 120);
+        s.status = "running"; s.path = "direct"; s.rtt_ms = c.rtt_ms ?? 10; s.streams = 8;
+        emitTransfer({ type: "manifest", id: tid, files: s.files_total, bytes: s.bytes_total, to_do_files: s.files_total, to_do_bytes: s.bytes_total });
+        runLoop(tid, 9 * MB);
+      })();
+    } // offline: stays "connecting" = "Chờ <tên> online" until presence sees them
+    return tid;
+  },
+  async list_incoming_pushes() { return structuredClone(pushes); },
+  async answer_push({ push_id, accept }) {
+    const at = pushes.findIndex((p) => p.push_id === push_id); if (at < 0) throw new Error("Yêu cầu này đã hết hạn");
+    const [p] = pushes.splice(at, 1);
+    if (!accept) return;
+    const tid = `in-${hex(6)}`;
+    const s = tfBase({ id: tid, job: p.job, op: "put", side: "host", peer: p.from_name, contact: p.from_id });
+    transfers.set(tid, s);
+    emitTransfer({ type: "started", id: tid, job: p.job, op: "put", side: "host", peer: p.from_name, contact: p.from_id });
+    void (async () => {
+      await sleep(600);
+      s.bytes_total = p.bytes; s.files_total = p.files; s.status = "running"; s.path = "direct"; s.rtt_ms = 31; s.streams = 8;
+      s.dest = `${state.dest_dir}/${p.from_name}/${p.job}`;
+      emitTransfer({ type: "manifest", id: tid, files: p.files, bytes: p.bytes, to_do_files: p.files, to_do_bytes: p.bytes });
+      runLoop(tid, 9 * MB);
+    })();
+  },
+  async open_local_network_settings() { console.info("[mock] open_local_network_settings"); },
 
   async get_diagnostics() { await sleep(120); return mockDiag(); },
   async add_firewall_rule() {
@@ -466,3 +607,6 @@ function fakeQr(text: string): string {
 seed();
 seedJobs();
 seedShares();
+if (params.get("restored") === "1") seedRestored();
+// screenshot / test hook (mock only): lets a script fire shell events such as drop:hover / drop:over
+(window as unknown as { __tossMock?: unknown }).__tossMock = { emit };

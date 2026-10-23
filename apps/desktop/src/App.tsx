@@ -8,8 +8,9 @@ import { Settings } from "./screens/Settings";
 import { TicketSheet } from "./components/TicketSheet";
 import { ShareAsk, ShareView } from "./components/ShareView";
 import { Wizard } from "./components/Wizard";
+import { AddDeviceSheet, ContactSheet, PushSheet } from "./components/Contacts";
 import { AnimatePresence, EASE, Icon } from "./components/ui";
-import { CometLayer } from "./components/Comet";
+import { CometLayer, centerOf } from "./components/Comet";
 import { TossMark } from "./components/TossMark";
 import { usePointerFx } from "./lib/pointer-fx";
 
@@ -30,6 +31,10 @@ export default function App() {
   const share = useStore((s) => s.share);
   const shareAsk = useStore((s) => s.shareAsk);
   const navPulse = useStore((s) => s.navPulse);
+  const contactCount = useStore((s) => s.contacts.length);
+  const addDevice = useStore((s) => s.addDevice);
+  const contactSheet = useStore((s) => s.contactSheet);
+  const pushSheet = useStore((s) => s.pushSheet && s.pushes.length > 0);
   const reduce = useReducedMotion();
   usePointerFx();
 
@@ -48,6 +53,10 @@ export default function App() {
         st.setApp(await api.get_state());
         await st.refreshTransfers();
       } catch (e) { st.toast(errorMessage(e), "error"); }
+      // v0.5: contact book, pushes waiting for an answer, and whether macOS blocks the local network
+      void st.refreshContacts();
+      void st.refreshPushes();
+      api.get_diagnostics().then((d) => useStore.getState().setLanBlocked(!!d.lan_blocked)).catch(() => undefined);
 
       const reg = async (p: Promise<() => void>) => { const off = await p; if (dead) off(); else offs.push(off); };
       await reg(on("transfer:event", (ev) => useStore.getState().applyEvent(ev)));
@@ -56,12 +65,33 @@ export default function App() {
       await reg(on("share", ({ path }) => useStore.getState().openShare(path)));
       await reg(on("share:error", ({ msg }) => useStore.getState().toast(msg, "error")));
       await reg(on("navigate", ({ screen }) => useStore.getState().setScreen(screen)));
-      await reg(on("drop:hover", ({ on: v }) => useStore.getState().setDropHover(v)));
-      await reg(on("drop", ({ paths }) => {
+      await reg(on("contacts:changed", () => { void useStore.getState().refreshContacts(); void useStore.getState().refreshPushes(); }));
+      await reg(on("contact:presence", ({ id, online, rtt_ms }) => useStore.getState().presence(id, online, rtt_ms)));
+      await reg(on("push:incoming", (p) => useStore.getState().addPush(p)));
+      await reg(on("net:lan_blocked", ({ blocked }) => useStore.getState().setLanBlocked(blocked)));
+      await reg(on("invite", ({ invite }) => useStore.getState().receiveInvite(invite)));
+      // the contact row (data-contact-id) under a point in window coordinates, for drag & drop
+      const contactAt = (x?: number, y?: number): string | null => {
+        if (x == null || y == null) return null;
+        const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-contact-id]");
+        return el?.dataset.contactId ?? null;
+      };
+      await reg(on("drop:hover", ({ on: v, x, y }) => {
+        const s = useStore.getState();
+        s.setDropHover(v);
+        s.setHoverContact(v ? contactAt(x, y) : null);
+      }));
+      await reg(on("drop:over", ({ x, y }) => useStore.getState().setHoverContact(contactAt(x, y))));
+      await reg(on("drop", ({ paths, x, y }) => {
         const s = useStore.getState();
         s.setDropHover(false);
+        s.setHoverContact(null);
         const sheet = s.sheet;
-        if (sheet && sheet.put && !sheet.admin) {
+        const target = contactAt(x, y);
+        if (target && paths.length > 0 && !sheet) {
+          const el = document.querySelector(`[data-contact-id="${target}"]`);
+          void s.sendToContact(target, paths, el ? centerOf(el) : undefined);
+        } else if (sheet && sheet.put && !sheet.admin) {
           api.start_put({ ticket: sheet.ticket, paths })
             .then(async () => { await s.refreshTransfers(); s.fly(); s.closeSheet(); s.setScreen("transfers"); s.toast("Đang trả file…"); })
             .catch((e) => s.toast(errorMessage(e), "error"));
@@ -77,6 +107,8 @@ export default function App() {
     return () => { dead = true; offs.forEach((f) => f()); };
   }, []);
 
+  // Home with a contact book: the drop overlay stays thin so the contact rows stay crisp and readable
+  const contactsDrop = dropHover && screen === "home" && contactCount > 0;
   const active = Object.values(transfers).filter((t) => t.status === "running" || t.status === "connecting" || t.status === "paused").length;
 
   if (!app) return (
@@ -165,6 +197,9 @@ export default function App() {
       </nav>
 
       <AnimatePresence>{sheet && <TicketSheet key="sheet" info={sheet} />}</AnimatePresence>
+      <AnimatePresence>{contactSheet && <ContactSheet key={`c-${contactSheet}`} id={contactSheet} />}</AnimatePresence>
+      <AnimatePresence>{addDevice && <AddDeviceSheet key="add-device" />}</AnimatePresence>
+      <AnimatePresence>{pushSheet && <PushSheet key="push" />}</AnimatePresence>
       <AnimatePresence>{shareAsk && !share && <ShareAsk key="share-ask" path={shareAsk} />}</AnimatePresence>
       <AnimatePresence>{share && <ShareView key={share.nonce} path={share.path} />}</AnimatePresence>
       {app.first_run && <Wizard />}
@@ -175,18 +210,26 @@ export default function App() {
             key="drop" className="fixed inset-0 z-20 pointer-events-none grid place-items-center"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.35, ease: EASE }}
           >
-            <div className="absolute inset-0 bg-accent/10 backdrop-blur-[2px]" />
+            <div className={`absolute inset-0 ${contactsDrop ? "bg-accent/[0.04]" : "bg-accent/10 backdrop-blur-[2px]"}`} />
             <svg className="absolute inset-3 w-[calc(100%-24px)] h-[calc(100%-24px)] overflow-visible" aria-hidden>
               <rect x="1" y="1" width="calc(100% - 2px)" height="calc(100% - 2px)" rx="24" fill="none" strokeWidth="2" strokeDasharray="10 18" strokeLinecap="round" className="march" style={{ stroke: "rgb(var(--accent))" }} />
             </svg>
-            {!reduce && [0, 1, 2].map((i) => (
+            {contactsDrop && (
+              <motion.div
+                className="absolute bottom-24 glass rounded-full px-4 py-2 text-sm flex items-center gap-2"
+                initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 360, damping: 24 }}
+              >
+                <Icon name="up" className="w-4 h-4 text-accent" weight="bold" />Thả vào một máy để gửi, hoặc chỗ khác để tạo link
+              </motion.div>
+            )}
+            {!contactsDrop && !reduce && [0, 1, 2].map((i) => (
               <motion.span
                 key={i} className="absolute w-40 h-40 rounded-full border border-accent/50"
                 initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 2.6, opacity: [0, 0.8, 0] }}
                 transition={{ duration: 2.4, ease: "easeOut", repeat: Infinity, delay: i * 0.8 }}
               />
             ))}
-            <motion.div
+            {!contactsDrop && <motion.div
               className="relative glass rounded-[28px] px-6 pt-4 pb-4 flex flex-col items-center gap-1"
               initial={{ scale: 0.85, y: 16 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 8 }}
               transition={{ type: "spring", stiffness: 360, damping: 24 }}
@@ -194,7 +237,7 @@ export default function App() {
               <TossMark className="w-24" speed={1.8} />
               <div className="title text-xl">Thả để <em>chia sẻ</em></div>
               <div className="text-xs text-mute">Toss tạo link ngay, copy sẵn vào clipboard</div>
-            </motion.div>
+            </motion.div>}
           </motion.div>
         )}
       </AnimatePresence>

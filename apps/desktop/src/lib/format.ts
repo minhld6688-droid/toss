@@ -37,6 +37,26 @@ export function fmtDate(unix: number): string {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** "vừa xong" / "5 phút trước" / "2 giờ trước" / "3 ngày trước"; 0 = never seen. */
+export function fmtAgo(unix: number, now = Date.now() / 1000): string {
+  if (!unix) return "chưa thấy online";
+  const s = Math.max(0, now - unix);
+  if (s < 60) return "vừa xong";
+  if (s < 3600) return `${Math.round(s / 60)} phút trước`;
+  if (s < 86400) return `${Math.floor(s / 3600)} giờ trước`;
+  return `${Math.floor(s / 86400)} ngày trước`;
+}
+
+export const PLATFORM_LABEL: Record<string, string> = { macos: "macOS", windows: "Windows", linux: "Linux" };
+
+/** Two-letter avatar text: first letters of the first two words ("Từ Đạt – Mac" → "TĐ"), or the first two letters. */
+export function initials(name: string): string {
+  const w = name.replace(/[–—-]/g, " ").split(/\s+/).filter(Boolean);
+  if (w.length === 0) return "?";
+  if (w.length === 1) return Array.from(w[0]).slice(0, 2).join("").toUpperCase();
+  return (Array.from(w[0])[0] + Array.from(w[1])[0]).toUpperCase();
+}
+
 export function shortId(id: string, n = 8): string {
   return id.length <= n ? id : `${id.slice(0, n)}…`;
 }

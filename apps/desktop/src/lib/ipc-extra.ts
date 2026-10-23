@@ -7,6 +7,8 @@ export interface ExtraCommands {
   ui_ready(): Promise<void>;
   /** True when an admin ticket (remote host) is stored in settings. Cheap: never dials the host. */
   has_admin_ticket(): Promise<boolean>;
+  /** v0.5: decode an invite (tossinv1…, toss://i/…, web link) without pairing, for the "Kết nối với <name>?" confirm. */
+  parse_invite(args: { text: string }): Promise<import("./ipc-types").InviteInfo>;
 }
 
 /** Extra events. */
@@ -14,7 +16,11 @@ export type ExtraEvents = {
   /** tray menu "Trạng thái" asks the UI to switch screen. */
   navigate: { screen: "home" | "transfers" | "settings" };
   /** OS drag is hovering over the window (true) or left it (false). */
-  "drop:hover": { on: boolean };
+  "drop:hover": { on: boolean; x?: number; y?: number };
+  /** v0.5: the drag moved; window-relative CSS px, so the UI can highlight the contact row under it. */
+  "drop:over": { x: number; y: number };
+  /** the drop itself also carries the position (x, y) */
+  "drop": { paths: string[]; x?: number; y?: number };
   /** the shell could not start a right-click share (bad path, no access…): show `msg` as a toast. */
   "share:error": { msg: string };
 };

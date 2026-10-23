@@ -6,6 +6,7 @@ import { baseName, midTruncate } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Badge, Disclosure, Dot, Icon, Nest, Row, Section, Segmented, Toggle } from "./ui";
 import { FirewallAllow } from "./Firewall";
+import { LanBlockedCard } from "./LanBlocked";
 
 type Tone = "ok" | "warn" | "bad" | "mute";
 
@@ -228,6 +229,9 @@ export function ConnectionSection() {
   const focus = useStore((s) => s.diagFocus);
   const { diag, err, reload } = useDiagnostics();
   const reduce = useReducedMotion();
+  const setLan = useStore((s) => s.setLanBlocked);
+  const lanBlocked = useStore((s) => s.lanBlocked);
+  useEffect(() => { if (diag) setLan(!!diag.lan_blocked); }, [diag, setLan]);
   const rootRef = useRef<HTMLDivElement>(null);
   const [adv, setAdv] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -256,6 +260,7 @@ export function ConnectionSection() {
   return (
     <div ref={rootRef} className="scroll-mt-3">
       <Section title="Kết nối">
+        <LanBlockedCard className="mb-3" />
         {!diag ? (
           err ? (
             <div className="flex items-center justify-between gap-2 text-sm">
@@ -302,9 +307,9 @@ export function ConnectionSection() {
               </div>
             )}
 
-            {diag.reasons.length > 0 && (
+            {diag.reasons.filter((r) => !(lanBlocked && /mạng cục bộ|mạng nội bộ/i.test(r))).length > 0 && (
               <ul className="space-y-2">
-                {diag.reasons.map((r, i) => (
+                {diag.reasons.filter((r) => !(lanBlocked && /mạng cục bộ|mạng nội bộ/i.test(r))).map((r, i) => (
                   <li key={i} className="flex gap-2 text-sm">
                     <Icon name="info" className="w-4 h-4 mt-0.5 shrink-0 text-warn" />
                     <span className="min-w-0">{r}</span>
