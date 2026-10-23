@@ -25,8 +25,36 @@ async function shot(page, name) { await page.waitForTimeout(250); await page.scr
 
 for (const scheme of ["light", "dark"]) {
   const ctx = await browser.newContext({ viewport: { width: 400, height: 600 }, deviceScaleFactor: 2, colorScheme: scheme, permissions: ["clipboard-read", "clipboard-write"] });
-  const page = await ctx.newPage();
   const sfx = scheme === "dark" ? "-dark" : "";
+  // ---- v0.5.1 in-app updates (ONLY=update runs just this block) ------------------------------------
+  {
+    const p = await ctx.newPage();
+    await p.goto(base + "?update=1&host=1&remote=1");
+    await p.getByText("Dán link hoặc kéo folder vào đây").waitFor();
+    await p.getByText("Có bản 0.5.2").first().waitFor({ timeout: 8000 });
+    await p.waitForTimeout(700);
+    if (scheme === "light") await shot(p, "16-update-banner.png");
+    await p.getByRole("button", { name: "Cài đặt" }).click();
+    await p.getByRole("heading", { name: "Cập nhật", exact: true }).waitFor();
+    await p.getByRole("heading", { name: "Cập nhật", exact: true }).evaluate((el) => { el.scrollIntoView({ block: "start" }); document.querySelector("main").scrollBy(0, -24); });
+    await p.waitForTimeout(700);
+    await shot(p, `16-update${sfx}.png`);
+    if (scheme === "light") {
+      await p.getByRole("button", { name: /Cập nhật & khởi động lại/ }).click();
+      await p.getByText(/Đang tải .* \/ /).waitFor({ timeout: 8000 });
+      await p.waitForTimeout(1200);
+      await shot(p, "16-update-progress.png");
+      await p.getByText("Máy tổng từ xa", { exact: true }).evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await p.getByRole("button", { name: "Cập nhật máy tổng" }).click();
+      await p.getByText(/Đã gửi lệnh/).waitFor({ timeout: 8000 });
+      await p.waitForTimeout(500);
+      await shot(p, "16-update-remote.png");
+    }
+    await p.close();
+  }
+  if (process.env.ONLY === "update") { await ctx.close(); continue; }
+
+  const page = await ctx.newPage();
   await page.goto(base + "?host=1&remote=1");
   await page.getByText("Dán link hoặc kéo folder vào đây").waitFor();
 

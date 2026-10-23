@@ -13,6 +13,7 @@ import { AnimatePresence, EASE, Icon } from "./components/ui";
 import { CometLayer, centerOf } from "./components/Comet";
 import { TossMark } from "./components/TossMark";
 import { usePointerFx } from "./lib/pointer-fx";
+import { listenUpdates } from "./lib/update";
 
 const TABS: { id: Screen; label: string; icon: "home" | "transfer" | "settings" }[] = [
   { id: "home", label: "Trang chính", icon: "home" },
@@ -70,6 +71,8 @@ export default function App() {
       await reg(on("push:incoming", (p) => useStore.getState().addPush(p)));
       await reg(on("net:lan_blocked", ({ blocked }) => useStore.getState().setLanBlocked(blocked)));
       await reg(on("invite", ({ invite }) => useStore.getState().receiveInvite(invite)));
+      // v0.5.1 in-app updates (background check, remote request, install progress)
+      for (const p of listenUpdates()) await reg(p);
       // the contact row (data-contact-id) under a point in window coordinates, for drag & drop
       const contactAt = (x?: number, y?: number): string | null => {
         if (x == null || y == null) return null;

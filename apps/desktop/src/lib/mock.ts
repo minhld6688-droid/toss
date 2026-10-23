@@ -4,9 +4,10 @@
 // URL switches: ?host=1 ?remote=1 ?wizard=1 ?net=relay|medium|direct|probing ?share=1 ?deeplink=1|exists
 //   v0.5: ?push=1 (Anh Hùng sends an incoming push 1 s after start) ?invite=1 (toss://i/… deep link arrives)
 //         ?lan=blocked (macOS blocks the local network) ?contacts=0 (empty book) ?restored=1 (paused + queued pushes after a "restart")
+//   v0.5.1: ?update=1 (0.5.2 available, announced 0.4 s after start) &force=1 (marked #force) ?remoteold=1 (remote host on 0.5.0)
 import type {
-  AppState, Commands, CommandsV05, ConnectReport, Contact, IncomingPush, InviteInfo, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
-  NetConfig, NetDiagUi, TicketInfo, TicketSpec, TransferEvent, TransferState,
+  AppState, Commands, CommandsV05, CommandsV051, ConnectReport, Contact, IncomingPush, InviteInfo, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
+  NetConfig, NetDiagUi, TicketInfo, TicketSpec, TransferEvent, TransferState, UpdateInfo,
 } from "./ipc-types";
 import type { ExtraCommands } from "./ipc-extra";
 
@@ -103,7 +104,7 @@ const defaultNet = (): NetConfig => ({
 });
 
 const state: AppState = {
-  version: "0.1.0",
+  version: "0.5.1",
   endpoint_id: HOST_ID,
   device_name: "MacBook của Minh",
   dest_dir: "/Users/minh/Toss",
@@ -114,6 +115,7 @@ const state: AppState = {
   context_menu: true,
   auto_receive: params.get("auto") !== "0",
   net: defaultNet(),
+  auto_update: hostOn,
 };
 let adminTicket: string | null = params.get("remote") === "1" ? "toss1mockadmin" + "abcdefghijklmnopqrstuvwxyz234567" : null;
 
@@ -249,9 +251,18 @@ function doCreate(spec: TicketSpec, remote: boolean): TicketInfo {
 function hostStatus(): HostStatus {
   const cfg = state.host ?? demoHost;
   const active = [...transfers.values()].filter((t) => t.status === "running").length;
-  return { device: remoteDevice(), version: "0.1.0", roots: cfg.roots.map((r) => r.alias), active, queued: 0, uptime_s: Math.floor((Date.now() - startedAt) / 1000) + 5400 };
+  return { device: remoteDevice(), version: adminTicket ? remoteVersion : state.version, roots: cfg.roots.map((r) => r.alias), active, queued: 0, uptime_s: Math.floor((Date.now() - startedAt) / 1000) + 5400 };
 }
 const remoteDevice = () => (adminTicket ? "Máy tổng - Studio" : state.device_name);
+
+// ---- v0.5.1 updates -----------------------------------------------------------
+const updateOn = params.get("update") === "1";
+const NEW_RELEASE: UpdateInfo = {
+  available: true, current: "0.5.1", version: "0.5.2", forced: params.get("force") === "1", date: "2026-10-23T08:00:00Z",
+  notes: "• Gửi file cho máy trong danh bạ ổn định hơn khi mạng LAN chập chờn\n• Máy tổng tự cập nhật theo lệnh từ máy quản lý\n• Sửa lỗi hạn link hiển thị lệch giờ" + (params.get("force") === "1" ? "\n#force" : ""),
+};
+let remoteVersion = params.get("remoteold") === "1" ? "0.5.0" : "0.5.1";
+let installing = false;
 
 let pickN = 0;
 let uiReadyDone = false;
@@ -372,7 +383,7 @@ function mockReport(): ConnectReport {
 }
 
 // ---- api -----------------------------------------------------------------
-export const mockApi: Commands & CommandsV05 & ExtraCommands = {
+export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
   async get_state() { await sleep(60); return structuredClone(state); },
   async finish_setup({ device_name, dest_dir }) {
     state.device_name = device_name; state.dest_dir = dest_dir; state.first_run = false; return structuredClone(state);
@@ -483,6 +494,7 @@ export const mockApi: Commands & CommandsV05 & ExtraCommands = {
         emit("push:incoming", p);
       }, 1000);
     }
+    if (updateOn) setTimeout(() => emit("update:available", structuredClone(NEW_RELEASE)), 400);
     if (params.get("invite") === "1") {
       const inv = makeInvite("Mai – Laptop", 7);
       setTimeout(() => emit("invite", { invite: inv.invite }), 200);
@@ -582,6 +594,37 @@ export const mockApi: Commands & CommandsV05 & ExtraCommands = {
   },
   async set_net({ net }) { await sleep(150); state.net = structuredClone(net); },
   async export_logs() { await sleep(400); return "/Users/minh/Desktop/toss-logs-2026-10-22-091500.zip"; },
+
+  // ---- v0.5.1 ----------------------------------------------------------------
+  async check_update() {
+    await sleep(900);
+    return updateOn ? structuredClone(NEW_RELEASE) : { available: false, current: state.version, version: null, notes: null, forced: false, date: null };
+  },
+  async install_update() {
+    if (!updateOn || installing) throw new Error("Bạn đang dùng bản mới nhất (hoặc đang cập nhật)");
+    installing = true;
+    const running = [...transfers.values()].filter((t) => t.status === "running").length;
+    if (running > 0 && params.get("updatewait") === "1") {
+      emit("update:phase", { phase: "waiting", active: running });
+      await sleep(2500);
+    }
+    const total = Math.round(14.6 * MB);
+    emit("update:phase", { phase: "downloading", active: 0 });
+    for (let d = 0; d < total; d += Math.round(total / 24)) {
+      emit("update:progress", { downloaded: d, total });
+      await sleep(160);
+    }
+    emit("update:progress", { downloaded: total, total });
+    emit("update:phase", { phase: "installing", active: 0 });
+    await sleep(1200); // the real shell restarts the app here
+  },
+  async set_auto_update({ on }) { state.auto_update = on; },
+  async remote_update() {
+    if (!adminTicket) throw new Error("Chưa có máy tổng từ xa");
+    await sleep(500);
+    if (remoteVersion === "0.5.0") throw new Error("Máy tổng đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này");
+    setTimeout(() => { remoteVersion = "0.5.2"; }, 15_000);
+  },
 };
 
 // deterministic pseudo-QR so the mock looks right (NOT scannable)

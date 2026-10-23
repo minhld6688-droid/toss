@@ -69,6 +69,8 @@ export const TOSS_ICONS = {
   offline: [S("M4.8 9.4a10 10 0 0 1 3.4-2.3"), S("M19.2 9.4a10 10 0 0 0-5.4-3"), S("M7.9 12.6a5.7 5.7 0 0 1 2.2-1.4"), S("M16.1 12.6a5.7 5.7 0 0 0-1.6-1.2"), DOT(12, 16.6, 1.6), S("M4.6 4.6l14.8 14.8")],
   // waiting: a ring and one hand, the spark where the hand points
   clock: [RING(12, 12, 8.4), S("M12 7.4V12l3.1 1.9"), DOT(12, 12, 1.1)],
+  // v0.5.1 update: two arcs chase each other around the new version, the spark at the centre
+  update: [S("M4.7 13.2a7.4 7.4 0 0 0 13.4 3.4"), S("M19.3 10.8A7.4 7.4 0 0 0 5.9 7.4"), S("M5.6 3.8v3.9h3.9"), S("M18.4 20.2v-3.9h-3.9"), DOT(12, 12, 1.5)],
   // qr: three finders and the data spark
   qr: [RECT(4, 4, 6.4, 6.4, 1.6), RECT(13.6, 4, 6.4, 6.4, 1.6), RECT(4, 13.6, 6.4, 6.4, 1.6), DOT(16.8, 16.8, 1.7), S("M13.8 20h6.2"), S("M20 13.8v.4")],
 } satisfies Record<string, Part[]>;
