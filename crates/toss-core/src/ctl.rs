@@ -154,6 +154,16 @@ impl CtlClient {
         }
     }
 
+    /// v0.5.1: asks the host's desktop app to update itself now (it checks the
+    /// release feed, installs and restarts; running transfers are paused and
+    /// resume after the restart). Fails on hosts older than 0.5.1.
+    pub async fn request_update(&self) -> Result<()> {
+        match self.request(CtlRequest::RequestUpdate).await? {
+            CtlResponse::Ok => Ok(()),
+            other => bail!("unexpected response {other:?}"),
+        }
+    }
+
     /// Closes the connection.
     pub async fn close(&self) {
         if let Some((conn, mut send, _)) = self.conn.lock().await.take() {
@@ -229,12 +239,12 @@ async fn serve_ctl(inner: &Arc<Inner>, conn: &Connection) -> Result<()> {
             .await?;
             return Ok(());
         }
-        let resp = answer(inner, req).await;
+        let resp = answer(inner, req, &device).await;
         write_msg(&mut send, &resp).await?;
     }
 }
 
-async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
+async fn answer(inner: &Arc<Inner>, req: CtlRequest, device: &str) -> CtlResponse {
     let other = |e: anyhow::Error| CtlResponse::Denied {
         reason: DenyReason::Other(format!("{e:#}")),
     };
@@ -244,6 +254,7 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
         };
     };
     let inner = inner.clone();
+    let device = device.to_string();
     let res = tokio::task::spawn_blocking(move || -> Result<CtlResponse> {
         Ok(match req {
             CtlRequest::Auth { .. } => CtlResponse::Ok,
@@ -270,6 +281,13 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest) -> CtlResponse {
             CtlRequest::ListJobs => CtlResponse::Jobs(inner.jobs.list()),
             CtlRequest::Revoke { id } => {
                 inner.jobs.revoke(id)?;
+                CtlResponse::Ok
+            }
+            CtlRequest::RequestUpdate => {
+                tracing::info!(%device, "update requested by admin");
+                inner.emit(crate::transfer::TransferEvent::UpdateRequested {
+                    device: device.clone(),
+                });
                 CtlResponse::Ok
             }
             CtlRequest::JobTicket { id } => {

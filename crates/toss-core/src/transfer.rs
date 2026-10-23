@@ -123,6 +123,12 @@ pub enum TransferEvent {
         /// Blocked now.
         blocked: bool,
     },
+    /// v0.5.1: an admin device asked this host (ctl `RequestUpdate`) to update
+    /// the app now. Only the desktop shell acts on it.
+    UpdateRequested {
+        /// Admin device name.
+        device: String,
+    },
 }
 
 /// Which side of a transfer this node is.

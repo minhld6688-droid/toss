@@ -185,6 +185,10 @@ pub enum CtlRequest {
         /// Ticket id.
         id: [u8; 16],
     },
+    /// v0.5.1: ask the host app to check for and install an app update now
+    /// (answered `Ok` once the request is handed to the app; the app may
+    /// restart shortly after). Appended last: indices above stay stable.
+    RequestUpdate,
 }
 
 /// `toss/ctl/1` response.

@@ -769,6 +769,9 @@ fn event_line(ev: &TransferEvent) -> Option<String> {
             p.push_id, p.from_name, p.from_id, p.job, p.files, p.bytes
         ),
         TransferEvent::LanBlocked { blocked } => format!("local network blocked: {blocked}"),
+        TransferEvent::UpdateRequested { device } => {
+            format!("update requested by {device} (only the desktop app updates itself)")
+        }
     })
 }
 
