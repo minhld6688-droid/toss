@@ -13,6 +13,11 @@ on:
         description: 'Release tag to create/update (e.g. v0.1.0)'
         required: true
         type: string
+      notes:
+        description: 'Release notes shown in the app updater; include #force to make every installed app update itself'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -96,11 +101,16 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # v0.5.1 in-app updater: signs the update bundles (.app.tar.gz / -setup.exe) and
+          # makes tauri-action upload latest.json, which installed apps poll.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
+          includeUpdaterJson: true
           tagName: ${{ env.TAG }}
           releaseName: 'Toss ${{ env.TAG }}'
-          releaseBody: 'Cài đặt: xem docs/INSTALL.md. Mac: tải Toss.dmg. Windows: tải Toss-setup.exe.'
+          releaseBody: '${{ github.event.inputs.notes }} Cài đặt: xem docs/INSTALL.md. Mac: tải Toss.dmg. Windows: tải Toss-setup.exe.'
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
