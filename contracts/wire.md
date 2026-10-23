@@ -229,3 +229,9 @@ control channel.
   `home is now relay …` only means the relay was *selected*.
 - `TransferEvent::Progress.path` reports `Direct` or `Relay` from the
   connection's selected path (`Connection::paths()`, see CHANGES.md).
+
+## 6. ALPN `toss/peer/1` — contacts (v0.5)
+
+Pairing, presence and push between contacts ("Danh bạ máy"). Invite string
+`tossinv1…`, `PeerReq`/`PeerResp`, push data phase = xfer/2 put semantics:
+see `contracts/contacts-v0.5.md` §2 and `contracts/CHANGES.md` (2026-10-23).
