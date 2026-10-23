@@ -2070,8 +2070,13 @@ mod tests {
             Some(("contacts:changed", json!({})))
         );
         assert_eq!(
-            v05_event(&json!({"type": "contact_presence", "id": "ab", "online": true, "rtt_ms": 12})),
-            Some(("contact:presence", json!({"id": "ab", "online": true, "rtt_ms": 12})))
+            v05_event(
+                &json!({"type": "contact_presence", "id": "ab", "online": true, "rtt_ms": 12})
+            ),
+            Some((
+                "contact:presence",
+                json!({"id": "ab", "online": true, "rtt_ms": 12})
+            ))
         );
         let (name, p) = v05_event(&json!({
             "type": "push_incoming", "push_id": "p", "from_id": "ab", "from_name": "Đạt",

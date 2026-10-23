@@ -176,9 +176,7 @@ pub fn ticket_from_url(url: &str) -> Option<String> {
         .or_else(|| body.strip_prefix("T/"))
         .unwrap_or(body);
     // toss://i/<invite> (and a bare toss://tossinv1…) is a pairing invite, not a ticket.
-    let is_invite_path = body
-        .get(..2)
-        .is_some_and(|p| p.eq_ignore_ascii_case("i/"));
+    let is_invite_path = body.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("i/"));
     if is_invite_path || starts_with_invite(body) {
         return None;
     }
@@ -199,7 +197,8 @@ pub fn invite_from_url(text: &str) -> Option<String> {
     let lower = text.trim().to_ascii_lowercase();
     let at = lower.find(INVITE_PREFIX)?;
     let before = &lower[..at];
-    if !(before.is_empty() || before == "toss://i/" || before == "toss://" || before.ends_with('#')) {
+    if !(before.is_empty() || before == "toss://i/" || before == "toss://" || before.ends_with('#'))
+    {
         return None;
     }
     let rest: String = lower[at + INVITE_PREFIX.len()..]
@@ -370,8 +369,14 @@ mod tests {
     #[test]
     fn invites_are_not_tickets() {
         let inv = "tossinv1mfrggzdfmz2gq5dsnfxgo3tp";
-        assert_eq!(invite_from_url(&format!("toss://i/{inv}")), Some(inv.into()));
-        assert_eq!(invite_from_url(&format!("  TOSS://I/{}/  ", inv.to_uppercase())), Some(inv.into()));
+        assert_eq!(
+            invite_from_url(&format!("toss://i/{inv}")),
+            Some(inv.into())
+        );
+        assert_eq!(
+            invite_from_url(&format!("  TOSS://I/{}/  ", inv.to_uppercase())),
+            Some(inv.into())
+        );
         assert_eq!(invite_from_url(inv), Some(inv.into()));
         assert_eq!(
             invite_from_url(&format!("https://host.dev/toss/#{inv}")),

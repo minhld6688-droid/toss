@@ -166,7 +166,10 @@ pub fn run() {
                     // Positions (CSS px, window-relative) let the UI hit-test the contact rows (v0.5).
                     WindowEvent::DragDrop(DragDropEvent::Enter { position, .. }) => {
                         let (x, y) = shell::css_pos(&w, position);
-                        let _ = h.emit("drop:hover", serde_json::json!({ "on": true, "x": x, "y": y }));
+                        let _ = h.emit(
+                            "drop:hover",
+                            serde_json::json!({ "on": true, "x": x, "y": y }),
+                        );
                     }
                     WindowEvent::DragDrop(DragDropEvent::Over { position }) => {
                         let (x, y) = shell::css_pos(&w, position);
@@ -188,7 +191,10 @@ pub fn run() {
                             }
                         }
                         if !files.is_empty() {
-                            let _ = h.emit("drop", serde_json::json!({ "paths": files, "x": x, "y": y }));
+                            let _ = h.emit(
+                                "drop",
+                                serde_json::json!({ "paths": files, "x": x, "y": y }),
+                            );
                         }
                     }
                     _ => {}
