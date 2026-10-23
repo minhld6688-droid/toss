@@ -136,6 +136,9 @@ ol.steps li::before {
 .note { background: var(--warn-bg); color: var(--warn-text); border-radius: 12px; padding: 10px 14px; font-size: 14px; margin: 0 0 16px; }
 .link-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
 .link-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.job { border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin: 0 0 18px; display: grid; gap: 2px; }
+.job-name { font-weight: 700; font-size: 17px; word-break: break-word; }
+.job-sub { font-size: 13px; color: var(--muted); }
 footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: center; }
 </style>
 </head>
@@ -163,6 +166,7 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
 
   <!-- Link: valid ticket in the fragment -->
   <section class="card" id="view-link" hidden data-state="opening">
+    <div class="job" id="job-line" hidden><span class="job-name" id="job-name"></span><span class="job-sub" id="job-sub"></span></div>
     <div id="state-opening">
       <div class="status"><div class="spinner" aria-hidden="true"></div><h1 style="margin:0">Đang mở Toss…</h1></div>
       <p class="muted" id="invite-intro" hidden>Lời mời kết nối máy: sau khi bạn đồng ý, hai máy nhớ nhau và gửi file qua lại không cần link nữa.</p>
@@ -195,8 +199,8 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
 
   <!-- Invalid -->
   <section class="card" id="view-invalid" hidden>
-    <h1>Link không hợp lệ</h1>
-    <p class="muted">Link này thiếu hoặc sai mã ticket. Hãy nhờ người gửi tạo và gửi lại link mới.</p>
+    <h1 id="invalid-title">Link không hợp lệ</h1>
+    <p class="muted" id="invalid-note">Link này thiếu hoặc sai mã ticket. Hãy nhờ người gửi tạo và gửi lại link mới.</p>
     <div class="stack" data-downloads></div>
   </section>
 </main>
@@ -223,6 +227,9 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
   // ---- ticket parsing -------------------------------------------------
   function readTicket() {
     var raw = location.hash.replace(/^#/, '');
+    // v0.5.2 short link: https://<host>/<9 base32 chars>, resolved by /api/s.
+    var short = /^\/([a-z2-7]{9})\/?$/i.exec(location.pathname);
+    if (!raw && short) return { kind: 'short', code: short[1].toLowerCase() };
     if (!raw) return { kind: 'none' };
     try { raw = decodeURIComponent(raw); } catch (e) { /* keep raw */ }
     raw = raw.trim();
@@ -362,12 +369,62 @@ footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: cen
 
   }
 
+  // ---- short links ----------------------------------------------------
+  function fmtDate(exp) {
+    var d = new Date(exp * 1000);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ' ' + p(d.getDate()) + '/' + p(d.getMonth() + 1);
+  }
+
+  function showMeta(m) {
+    if (!m) return;
+    var name, sub = [];
+    if (m.kind === 'invite') {
+      name = 'Lời mời từ ' + (m.name || 'một máy Toss');
+      if (m.platform) sub.push(m.platform === 'macos' ? 'Mac' : m.platform === 'windows' ? 'Windows' : m.platform);
+    } else {
+      name = m.job || 'Job Toss';
+      document.title = name + ' · Toss';
+      sub.push(m.get && m.put ? 'Tải về và gửi lại' : m.put ? 'Gửi file lên' : 'Tải về');
+    }
+    sub.push(m.exp ? 'hết hạn ' + fmtDate(m.exp) : 'không hết hạn');
+    $('job-name').textContent = name;
+    $('job-sub').textContent = sub.join(' · ');
+    $('job-line').hidden = false;
+  }
+
+  function invalid(title, note) {
+    if (title) $('invalid-title').textContent = title;
+    if (note) $('invalid-note').textContent = note;
+    show('view-invalid');
+  }
+
+  function resolveShort(code) {
+    show('view-link');
+    ['opening', 'opened', 'fallback'].forEach(function (s) { $('state-' + s).hidden = s !== 'opening'; });
+    fetch('/api/s?c=' + encodeURIComponent(code), { cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 404) throw { title: 'Không tìm thấy link', note: 'Link này không tồn tại hoặc gõ thiếu ký tự. Hãy nhờ người gửi gửi lại.' };
+        if (r.status === 410) throw { title: 'Link đã hết hạn', note: 'Hãy nhờ người gửi tạo link mới.' };
+        if (!r.ok) throw { title: 'Chưa mở được link', note: 'Máy chủ link đang bận. Thử tải lại trang sau ít phút.' };
+        return r.json();
+      })
+      .then(function (d) {
+        var kind = /^tossinv1/.test(d.t) ? 'invite' : 'ok';
+        if (!/^toss(inv)?1[a-z2-7]+$/.test(d.t || '')) throw {};
+        showMeta(d.meta);
+        runLink(d.t, kind);
+      })
+      .catch(function (e) { invalid(e && e.title, e && e.note); });
+  }
+
   // ---- boot -----------------------------------------------------------
   var platform = detectPlatform();
   renderDownloads(platform);
   var t = readTicket();
   if (t.kind === 'none') show('view-landing');
   else if (t.kind === 'invalid') show('view-invalid');
+  else if (t.kind === 'short') resolveShort(t.code);
   else runLink(t.ticket, t.kind);
 
   window.addEventListener('hashchange', function () { location.reload(); });

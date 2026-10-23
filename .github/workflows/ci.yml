@@ -39,6 +39,10 @@ jobs:
 
       # The Tauri crate's build script needs the frontend dist folder to exist,
       # so build the UI before checking the whole workspace.
+      - name: Short-link API (web/api, signed fixtures)
+        working-directory: web
+        run: npm ci && node --test tests/api.test.mjs && node scripts/csp-hash.mjs --check
+
       - name: Install desktop UI dependencies
         working-directory: apps/desktop
         run: |

@@ -4,7 +4,7 @@ import { useReducedMotion } from "motion/react";
 import type { Contact, IncomingPush, InviteInfo } from "../lib/ipc-types";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { fmtAgo, fmtBytes, fmtDate, fmtExpiry, initials, PLATFORM_LABEL, shortId } from "../lib/format";
-import { extractInvite } from "../lib/ticket";
+import { extractInvite, extractShort } from "../lib/ticket";
 import { useStore } from "../lib/store";
 import { Badge, Dot, EASE, Icon, Nest, Row, Segmented, Sheet, Toggle, motion } from "./ui";
 import { centerOf } from "./Comet";
@@ -320,6 +320,21 @@ function EnterTab({ initial }: { initial: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const invite = useMemo(() => extractInvite(text), [text]);
+  const short = useMemo(() => (invite ? null : extractShort(text)), [invite, text]);
+
+  // v0.5.2: a pasted short link is resolved to the invite it stands for.
+  useEffect(() => {
+    if (!short) return;
+    let alive = true;
+    api.expand_link({ text: short })
+      .then((long) => {
+        if (!alive) return;
+        if (extractInvite(long)) setText(long);
+        else setErr("Link này là link job, không phải lời mời kết nối");
+      })
+      .catch((e) => alive && setErr(errorMessage(e)));
+    return () => { alive = false; };
+  }, [short]);
 
   useEffect(() => {
     setInfo(null); setErr(null);

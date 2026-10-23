@@ -12,6 +12,7 @@ mod logs;
 mod services;
 mod settings;
 mod shell;
+mod shortlink;
 mod updater;
 
 use std::sync::Arc;
@@ -24,6 +25,10 @@ use crate::{config::HIDDEN_FLAG, core::Core, shell::Shell};
 pub fn run() {
     // stderr + `<data_dir>/logs/toss.log` (the "Xuất log" button zips that folder).
     logs::init(&settings::data_dir().join("logs"));
+
+    // reqwest (updater, short links) is built with `rustls-no-provider`: without a process
+    // default it panics when a client is built. iroh already links ring.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let core = Arc::new(Core::new());
     let start_hidden = std::env::args().any(|a| a == HIDDEN_FLAG);
@@ -99,6 +104,7 @@ pub fn run() {
             commands::create_invite,
             commands::revoke_invites,
             commands::parse_invite,
+            commands::expand_link,
             commands::accept_invite,
             commands::rename_contact,
             commands::set_contact_auto_accept,

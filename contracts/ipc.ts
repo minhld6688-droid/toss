@@ -54,6 +54,7 @@ export interface JobRecord {
   exp: number; created: number; revoked: boolean;
   last: { at: number; device: string; op: Op; files: number; bytes: number; ok: boolean; msg: string } | null;
   ticket: string;                     // re-signed string for display/copy (host side only)
+  web_url: string;                    // v0.5.2: link to share — short https://<page_host>/<code> when available, else the long #toss1… link
 }
 
 // ---- v0.4 network (mirrors crates/toss-core/src/net.rs) ------------------

@@ -6521,7 +6521,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "toss-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -6538,7 +6538,7 @@ dependencies = [
 
 [[package]]
 name = "toss-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6567,7 +6567,7 @@ dependencies = [
 
 [[package]]
 name = "toss-desktop"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6577,7 +6577,9 @@ dependencies = [
  "hostname",
  "plist",
  "qrcode",
+ "reqwest",
  "rust-ini",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",

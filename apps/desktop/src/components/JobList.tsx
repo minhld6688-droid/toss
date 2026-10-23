@@ -49,7 +49,7 @@ export function JobList({ load, revoke, reloadKey }: { load: () => Promise<JobRe
                 </div>
                 <div className="flex gap-1 shrink-0">
                   {j.ticket && !dead && (
-                    <button className="btn btn-icon btn-ghost" title="Sao chép link" onClick={() => void api.copy_text({ text: `https://${pageHost}/#${j.ticket}` }).then(() => toast("Đã chép link"))}>
+                    <button className="btn btn-icon btn-ghost" title="Sao chép link" onClick={() => void api.copy_text({ text: j.web_url || `https://${pageHost}/#${j.ticket}` }).then(() => toast("Đã chép link"))}>
                       <Icon name="copy" />
                     </button>
                   )}

@@ -1,6 +1,6 @@
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
-import { extractInvite, extractTicket } from "../lib/ticket";
+import { extractInvite, extractShort, extractTicket } from "../lib/ticket";
 import { fmtExpiry } from "../lib/format";
 import { useStore } from "../lib/store";
 import { Badge, Icon, Nest, Words } from "../components/ui";
@@ -27,7 +27,17 @@ export function Home() {
     const inv = extractInvite(t);
     if (inv) { receiveInvite(inv); setText(""); return true; }
     const found = extractTicket(t);
-    if (!found) return false;
+    if (!found) {
+      const short = extractShort(t);
+      if (!short) return false;
+      try {
+        const long = await api.expand_link({ text: short });
+        if (extractTicket(long) || extractInvite(long)) return handle(long);
+      } catch (e) {
+        toast(errorMessage(e), "error");
+      }
+      return true;
+    }
     const ok = await openTicket(t);
     if (ok) setText("");
     return ok;
@@ -101,7 +111,7 @@ export function Home() {
           spellCheck={false}
           onChange={(e) => {
             setText(e.target.value);
-            if (extractTicket(e.target.value) || extractInvite(e.target.value)) void handle(e.target.value);
+            if (extractTicket(e.target.value) || extractInvite(e.target.value) || extractShort(e.target.value)) void handle(e.target.value);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && text.trim()) void handle(text).then((ok) => { if (!ok) toast("Không phải link Toss", "error"); });

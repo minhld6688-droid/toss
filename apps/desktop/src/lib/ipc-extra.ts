@@ -9,6 +9,8 @@ export interface ExtraCommands {
   has_admin_ticket(): Promise<boolean>;
   /** v0.5: decode an invite (tossinv1…, toss://i/…, web link) without pairing, for the "Kết nối với <name>?" confirm. */
   parse_invite(args: { text: string }): Promise<import("./ipc-types").InviteInfo>;
+  /** v0.5.2: short link (https://host/<9 chars>) → the toss1… / tossinv1… it stands for; other text unchanged. */
+  expand_link(args: { text: string }): Promise<string>;
 }
 
 /** Extra events. */

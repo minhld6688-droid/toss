@@ -104,6 +104,9 @@ pub struct JobRecord {
     pub last: Option<JobLast>,
     /// Re-signed ticket string for display/copy; "" when this app did not mint it.
     pub ticket: String,
+    /// v0.5.2: link to share (short `https://<page_host>/<code>` when available, else the
+    /// long `#toss1…` link); "" when `ticket` is "".
+    pub web_url: String,
 }
 
 // ---- v0.5 "Danh bạ máy" (contracts/contacts-v0.5.md §3/§4) -----------------------------------------

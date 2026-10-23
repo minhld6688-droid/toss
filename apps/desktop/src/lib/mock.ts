@@ -53,13 +53,24 @@ function b32dec(s: string): Uint8Array {
 const HOST_ID = "q7x2k5m4v6b3n8c2w5e7r4t6y3u5i2o4p7a3s5d6f2g4h7j3k5l2";
 function hex(n: number) { return Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join(""); }
 
+function fakeCode(s: string): string {
+  const A = "abcdefghijklmnopqrstuvwxyz234567";
+  let h = 2166136261, out = "";
+  for (let i = 0; i < 9; i++) {
+    for (let k = 0; k < s.length; k++) h = Math.imul(h ^ s.charCodeAt(k) ^ i, 16777619) >>> 0;
+    out += A[h % 32];
+  }
+  return out;
+}
+
 function makeInfo(body: Omit<TicketInfo, "ticket" | "web_url" | "deep_link">): TicketInfo {
   const json = JSON.stringify(body);
   const ticket = "toss1" + b32enc(new TextEncoder().encode(json)) + b32enc(crypto.getRandomValues(new Uint8Array(24)));
   return withUrls({ ...body, ticket });
 }
 function withUrls(t: Omit<TicketInfo, "web_url" | "deep_link">): TicketInfo {
-  return { ...t, web_url: `https://${state.page_host}/#${t.ticket}`, deep_link: `toss://t/${t.ticket}` };
+  // v0.5.2: links are short (https://<page_host>/<9 chars>); the mock derives a stable fake code.
+  return { ...t, web_url: `https://${state.page_host}/${fakeCode(t.ticket)}`, deep_link: `toss://t/${t.ticket}` };
 }
 function decodeTicket(text: string): TicketInfo {
   const m = text.match(/toss1[a-z2-7]{16,}/i);
@@ -109,7 +120,7 @@ const state: AppState = {
   device_name: "MacBook của Minh",
   dest_dir: "/Users/minh/Toss",
   host: hostOn ? structuredClone(demoHost) : null,
-  page_host: "minhld6688-droid.github.io/toss",
+  page_host: "toss-link.vercel.app",
   autostart: true,
   first_run: wizard,
   context_menu: true,
@@ -224,7 +235,7 @@ function seedJobs() {
   const mk = (job: string, root: string, path: string, get: boolean, put: boolean, daysLeft: number, last: JobRecord["last"], revoked = false) => {
     const info = makeInfo({ id: hex(32), host: HOST_ID, job, root, path, ret: job, get, put, admin: false, exp: now() + daysLeft * 86400 });
     issued.set(info.ticket, info);
-    jobs.push({ id: info.id, job, root, path, get, put, exp: info.exp, created: now() - 86400 * 2, revoked, last, ticket: info.ticket });
+    jobs.push({ id: info.id, job, root, path, get, put, exp: info.exp, created: now() - 86400 * 2, revoked, last, ticket: info.ticket, web_url: info.web_url });
   };
   mk("12A3 - RAW", "RAW", "2026/12A3/RAW", true, false, 5, { at: now() - 600, device: "Anh Hùng - iMac", op: "get", files: 402, bytes: 5.6 * GB, ok: true, msg: "" });
   mk("12A3 - Retouch", "Retouch", "2026/12A3", false, true, 5, { at: now() - 7200, device: "Chị Lan - Win", op: "put", files: 96, bytes: 1.1 * GB, ok: true, msg: "" });
@@ -244,7 +255,7 @@ function doCreate(spec: TicketSpec, remote: boolean): TicketInfo {
     get: spec.get, put: spec.put, admin: false, exp: spec.days ? now() + spec.days * 86400 : 0,
   });
   issued.set(info.ticket, info);
-  jobs.unshift({ id: info.id, job: info.job, root: info.root, path: info.path, get: info.get, put: info.put, exp: info.exp, created: now(), revoked: false, last: null, ticket: remote ? "" : info.ticket });
+  jobs.unshift({ id: info.id, job: info.job, root: info.root, path: info.path, get: info.get, put: info.put, exp: info.exp, created: now(), revoked: false, last: null, ticket: remote ? "" : info.ticket, web_url: remote ? "" : info.web_url });
   return info;
 }
 
@@ -519,6 +530,7 @@ export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
     return info;
   },
   async revoke_invites() { await sleep(150); issuedInvites = 0; },
+  async expand_link({ text }) { await sleep(80); return text; },
   async parse_invite({ text }) { await sleep(120); return decodeInvite(text); },
   async accept_invite({ text }) {
     const info = decodeInvite(text);

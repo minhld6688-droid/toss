@@ -31,6 +31,7 @@ use crate::{
     ipc::{AppState, HostConfig, JobLast, JobRecord, NetDiagUi, Root, TicketInfo, TicketSpec},
     logs,
     settings::{data_dir, QuickShare, Settings},
+    shortlink::{self, ShortLinks},
 };
 
 /// Alias prefix reserved for quick-share roots.
@@ -67,6 +68,8 @@ pub struct Core {
     host_lock: Mutex<()>,
     /// The fixed UDP port the last start asked for but could not bind (fell back to random).
     port_fallback: StdMutex<Option<u16>>,
+    /// v0.5.2 short links this device made (`shortlinks.json`).
+    short: Arc<ShortLinks>,
 }
 
 impl Core {
@@ -76,6 +79,7 @@ impl Core {
 
     pub fn with_dir(dir: PathBuf) -> Core {
         let settings = Settings::load(&dir);
+        let short = Arc::new(ShortLinks::load(&dir));
         Core {
             data_dir: dir,
             app: OnceLock::new(),
@@ -86,6 +90,7 @@ impl Core {
             remote_tickets: StdMutex::new(HashMap::new()),
             host_lock: Mutex::new(()),
             port_fallback: StdMutex::new(None),
+            short,
         }
     }
 
@@ -683,7 +688,7 @@ impl Core {
         let node = self.node().await?;
         wait_for_relay(&node).await;
         let t = node.create_ticket(to_core_spec(spec))?;
-        Ok(self.info(&t))
+        Ok(self.info_short(&t).await)
     }
 
     pub async fn list_jobs(&self) -> Result<Vec<JobRecord>> {
@@ -697,7 +702,10 @@ impl Core {
                     .job_ticket(j.id)
                     .map(|t| t.to_string())
                     .unwrap_or_default();
-                job_record(j, ticket)
+                let web_url = self.web_url_or_bg(&ticket, j.revoked);
+                let mut r = job_record(j, ticket);
+                r.web_url = web_url;
+                r
             })
             .collect())
     }
@@ -715,12 +723,14 @@ impl Core {
     }
 
     // ---- tickets / transfers (client) -----------------------------------------------
-    pub fn parse_ticket(&self, text: &str) -> Result<TicketInfo> {
-        let t = Ticket::from_str(text.trim()).map_err(|e| anyhow!("không đọc được link ({e})"))?;
+    pub async fn parse_ticket(&self, text: &str) -> Result<TicketInfo> {
+        let text = shortlink::expand(text.trim()).await?;
+        let t = Ticket::from_str(&text).map_err(|e| anyhow!("không đọc được link ({e})"))?;
         Ok(self.info(&t))
     }
 
     pub async fn start_get(&self, ticket: String) -> Result<String> {
+        let ticket = shortlink::expand(ticket.trim()).await?;
         let t =
             Ticket::from_str(ticket.trim()).map_err(|e| anyhow!("không đọc được link ({e})"))?;
         if t.body.admin {
@@ -741,6 +751,7 @@ impl Core {
     }
 
     pub async fn start_put(&self, ticket: String, paths: Vec<String>) -> Result<String> {
+        let ticket = shortlink::expand(ticket.trim()).await?;
         let t =
             Ticket::from_str(ticket.trim()).map_err(|e| anyhow!("không đọc được link ({e})"))?;
         if t.body.admin || !t.body.put {
@@ -895,7 +906,7 @@ impl Core {
                 async move { c.create_ticket(spec).await }
             })
             .await?;
-        Ok(self.info(&t))
+        Ok(self.info_short(&t).await)
     }
 
     pub async fn remote_list_jobs(&self) -> Result<Vec<JobRecord>> {
@@ -1053,7 +1064,49 @@ impl Core {
 
     // ---- misc -------------------------------------------------------------------------------
     fn info(&self, t: &Ticket) -> TicketInfo {
-        ticket_info(t, &self.settings().page_host())
+        let mut info = ticket_info(t, &self.settings().page_host());
+        if let Some(u) = self.short.get(&info.ticket) {
+            info.web_url = u;
+        }
+        info
+    }
+
+    /// `info` for a ticket just minted: asks for a short link first (falls back to the
+    /// long one after a few seconds). Admin tickets always stay long.
+    async fn info_short(&self, t: &Ticket) -> TicketInfo {
+        let mut info = self.info(t);
+        if !t.body.admin {
+            let host = self.settings().page_host();
+            if let Some(u) = self.short.shorten(&host, &info.ticket).await {
+                info.web_url = u;
+            }
+        }
+        info
+    }
+
+    /// Short link of a stored job, or its long link while a short one is fetched in the
+    /// background (once per session) for the next refresh.
+    fn web_url_or_bg(&self, ticket: &str, revoked: bool) -> String {
+        if ticket.is_empty() {
+            return String::new();
+        }
+        let page_host = self.settings().page_host();
+        if let Some(u) = self.short.get(ticket) {
+            return u;
+        }
+        if !revoked && self.short.first_try(ticket) {
+            let (short, host, text) = (self.short.clone(), page_host.clone(), ticket.to_string());
+            tauri::async_runtime::spawn(async move { short.shorten(&host, &text).await });
+        }
+        match Ticket::from_str(ticket) {
+            Ok(t) => t.web_url(&page_host),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// The short-link cache (contacts.rs shortens invites with it).
+    pub fn short_links(&self) -> Arc<ShortLinks> {
+        self.short.clone()
     }
 }
 
@@ -1106,6 +1159,7 @@ fn job_record(j: toss_core::JobRecord, ticket: String) -> JobRecord {
         exp: j.exp,
         created: j.created,
         revoked: j.revoked,
+        web_url: String::new(),
         last: j.last.map(|e| JobLast {
             at: e.at,
             device: e.device,
@@ -1655,7 +1709,7 @@ mod tests {
             .web_url
             .starts_with(&format!("https://{}/#toss1", config::DEFAULT_PAGE_HOST)));
         assert_eq!(info.deep_link, format!("toss://t/{}", info.ticket));
-        let parsed = core.parse_ticket(&info.web_url).unwrap();
+        let parsed = core.parse_ticket(&info.web_url).await.unwrap();
         assert_eq!(
             (parsed.job.as_str(), parsed.get, parsed.put, parsed.admin),
             ("12A3 - RAW", true, true, false)
@@ -1665,7 +1719,7 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         // Re-signed with the host's current addresses: same job, same id
         // (the string only differs if the relay/direct addresses changed).
-        let relisted = core.parse_ticket(&jobs[0].ticket).unwrap();
+        let relisted = core.parse_ticket(&jobs[0].ticket).await.unwrap();
         assert_eq!(
             (
                 relisted.id.as_str(),
@@ -1676,7 +1730,7 @@ mod tests {
         );
         core.revoke(jobs[0].id.clone()).await.unwrap();
         assert!(core.list_jobs().await.unwrap()[0].revoked);
-        assert!(core.parse_ticket("khong phai link").is_err());
+        assert!(core.parse_ticket("khong phai link").await.is_err());
 
         // admin ticket
         let admin = core.create_admin_ticket(30).await.unwrap();
@@ -1916,7 +1970,7 @@ mod tests {
         assert_eq!(info.root, alias);
         assert_eq!((info.job.as_str(), info.path.as_str()), ("Lớp 12A3", ""));
         assert!(info.get && !info.put && !info.admin && info.exp > 0);
-        let parsed = core.parse_ticket(&info.web_url).unwrap();
+        let parsed = core.parse_ticket(&info.web_url).await.unwrap();
         assert_eq!(
             (parsed.id.as_str(), parsed.root.as_str()),
             (info.id.as_str(), alias.as_str())

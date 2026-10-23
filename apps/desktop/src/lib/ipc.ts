@@ -19,7 +19,7 @@ const COMMAND_NAMES: (keyof AllCommands)[] = [
   "share_folder", "list_quick_shares", "remove_quick_share", "set_context_menu", "set_auto_receive",
   "get_diagnostics", "add_firewall_rule", "test_connect", "set_net", "export_logs",
   "list_contacts", "create_invite", "revoke_invites", "accept_invite", "rename_contact", "set_contact_auto_accept",
-  "remove_contact", "send_to_contact", "list_incoming_pushes", "answer_push", "open_local_network_settings", "parse_invite",
+  "remove_contact", "send_to_contact", "list_incoming_pushes", "answer_push", "open_local_network_settings", "parse_invite", "expand_link",
   "check_update", "install_update", "set_auto_update", "remote_update",
 ];
 

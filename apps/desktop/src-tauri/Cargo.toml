@@ -26,6 +26,9 @@ tauri-plugin-clipboard-manager = "2"
 # v0.5.1 in-app updates (signed GitHub release feed, see tauri.conf.json plugins.updater).
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# v0.5.2 short links (POST/GET https://<page_host>/api/s); same reqwest as the updater.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

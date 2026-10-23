@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chromium } from 'playwright';
+import { makeHandler } from '../api/s.js';
+import FIX from './fixtures.json' with { type: 'json' };
 
 const web = join(dirname(fileURLToPath(import.meta.url)), '..');
 const shots = join(web, 'screenshots');
@@ -14,8 +16,17 @@ mkdirSync(shots, { recursive: true });
 execFileSync('node', [join(web, 'scripts/csp-hash.mjs'), '--check'], { stdio: 'inherit' });
 
 const cfg = JSON.parse(readFileSync(join(web, 'vercel.json'), 'utf8'));
-const headers = Object.fromEntries(cfg.headers[0].headers.map((h) => [h.key, h.value]));
+const headers = Object.fromEntries(cfg.headers.find((h) => h.source === '/(.*)').headers.map((h) => [h.key, h.value]));
+// v0.5.2 short links: /api/s backed by memory, seeded with real signed fixtures.
+const mem = new Map();
+const api = makeHandler({ load: async (c) => mem.get(c) ?? null, save: async (c, r) => { mem.set(c, r); } });
+async function shorten(t) {
+  const res = { statusCode: 0, setHeader() {}, end(s) { this.out = s; } };
+  await api({ method: 'POST', url: '/api/s', headers: { host: 'x' }, body: { t } }, res);
+  return JSON.parse(res.out).code;
+}
 const server = http.createServer((req, res) => {
+  if (req.url.startsWith('/api/s')) return void api(req, res);
   res.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
   res.end(readFileSync(join(web, 'index.html')));
 });
@@ -27,7 +38,7 @@ const b32 = 'abcdefghijklmnopqrstuvwxyz234567';
 let ticket = 'toss1';
 for (let i = 0; i < 330; i++) ticket += b32[(i * 7 + (i >> 3)) % 32];
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 const results = [];
 async function check(name, fn) {
   try { await fn(); results.push(['ok', name]); }
@@ -156,6 +167,39 @@ await check('mobile UA shows desktop-only note; dark scheme renders', async () =
   const sw = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
   assert(sw, 'no horizontal scroll at 390px');
   await page.screenshot({ path: join(shots, 'link-mobile-dark.png'), fullPage: true });
+  await ctx.close();
+});
+
+await check('short link: resolves via /api/s, shows the job, opens toss://t/<ticket>', async () => {
+  const code = await shorten(FIX.ticket);
+  const { ctx, page, problems, requests } = await open(code, { ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36' });
+  await page.waitForSelector('iframe', { state: 'attached' });
+  assert.equal(await page.locator('iframe').getAttribute('src'), 'toss://t/' + FIX.ticket);
+  assert.equal(await page.locator('#job-name').textContent(), FIX.job);
+  assert.match(await page.locator('#job-sub').textContent(), /Tải về và gửi lại · không hết hạn/);
+  assert.equal(await page.title(), FIX.job + ' · Toss');
+  await page.waitForTimeout(1700);
+  assert(await vis(page, 'state-fallback'));
+  await page.screenshot({ path: join(shots, 'short-link.png'), fullPage: true });
+  assert.deepEqual(requests.filter((u) => !u.startsWith(base) && !u.startsWith('data:') && !u.startsWith('toss:')), []);
+  assert.deepEqual(problems.filter((p) => /Content Security Policy|Refused/i.test(p)), []);
+  await ctx.close();
+});
+
+await check('short invite link opens toss://i/<invite> with the inviter name', async () => {
+  const code = await shorten(FIX.invite);
+  const { ctx, page } = await open(code.toUpperCase());
+  await page.waitForSelector('iframe', { state: 'attached' });
+  assert.equal(await page.locator('iframe').getAttribute('src'), 'toss://i/' + FIX.invite);
+  assert.equal(await page.locator('#job-name').textContent(), 'Lời mời từ ' + FIX.inviteName);
+  await ctx.close();
+});
+
+await check('unknown short code => "Không tìm thấy link"', async () => {
+  const { ctx, page } = await open('aaaaaaaaa');
+  await page.waitForSelector('#view-invalid:not([hidden])');
+  assert(await page.getByText('Không tìm thấy link').isVisible());
+  assert.equal(await page.locator('iframe').count(), 0);
   await ctx.close();
 });
 

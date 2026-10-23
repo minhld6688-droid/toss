@@ -6,7 +6,7 @@ finished work back by drag and drop. No server in the middle: a signed link carr
 [iroh](https://iroh.computer) handles connection, NAT traversal and relay fallback.
 
 - Tauri 2 desktop app (Mac + Windows), Rust core, React UI
-- Link `https://<page>/#<ticket>` opens the app via `toss://t/<ticket>`
+- Short link `https://toss-link.vercel.app/<code>` (or the long `https://<page>/#<ticket>`) opens the app via `toss://t/<ticket>`
 - Resumable, hash-verified transfers; host never overwrites finished files
 - Unattended host mode: starts hidden at logon, survives Windows Update restarts
 
@@ -44,11 +44,19 @@ Push a tag `v*` (e.g. `git tag v0.1.0 && git push --tags`). The workflow publish
 with stable asset names `Toss.dmg` and `Toss-setup.exe`, which the link page downloads from
 `releases/latest/download/`.
 
-## Deploy the link page
+## Deploy the link page (+ short links)
 
-Import the repo on Vercel with **Root Directory = `web`**, framework "Other", no build command.
-After editing the inline script in `web/index.html`, run `node web/scripts/csp-hash.mjs` to refresh the
-CSP hash in `web/vercel.json`. The deployed hostname must be what the desktop app uses as `page_host`.
+Import the repo on Vercel as project **`toss-link`** (→ `toss-link.vercel.app`, the app's default `page_host`),
+**Root Directory = `web`**, framework "Other", no build command. Then *Storage → Create → Blob* and connect the
+store to the project (sets `BLOB_READ_WRITE_TOKEN`), and redeploy.
+
+- `/api/s` (web/api/s.js) turns a signed ticket/invite into a short link `https://toss-link.vercel.app/<9 chars>`
+  and back. It verifies the ed25519 signature before storing (only real Toss links), refuses admin tickets, and
+  answers 410 once a link expires. The app verifies the ticket again, and the host checks it, so the service
+  cannot grant access by itself. If it is down, the app shares the long `#toss1…` link instead.
+- After editing the inline script in `web/index.html`, run `node web/scripts/csp-hash.mjs` to refresh the
+  CSP hash in `web/vercel.json`.
+- Tests: `cd web && node --test tests/api.test.mjs` (API, real signed fixtures) and the Playwright e2e above.
 
 ## License
 

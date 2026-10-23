@@ -13,6 +13,14 @@ export function extractInvite(text: string): string | null {
   return m ? m[0].toLowerCase() : null;
 }
 
+// v0.5.2 short link: https://<host>/<9 base32 chars>; the shell resolves it (expand_link).
+const SHORT = /(?:https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?\/([a-z2-7]{9})(?![a-z0-9])\/?/i;
+
+export function extractShort(text: string): string | null {
+  const m = text.match(SHORT);
+  return m ? m[0] : null;
+}
+
 export function extractTicket(text: string): string | null {
   const m = text.match(RE);
   return m ? m[0].toLowerCase() : null;

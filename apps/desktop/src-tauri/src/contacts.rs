@@ -58,7 +58,11 @@ impl Core {
     pub async fn create_invite(&self, days: u32) -> Result<InviteInfo> {
         let node = self.node().await?;
         let page_host = self.settings().page_host();
-        core_v05::create_invite(&node, days.clamp(1, 30), &page_host)
+        let mut info = core_v05::create_invite(&node, days.clamp(1, 30), &page_host)?;
+        if let Some(u) = self.short_links().shorten(&page_host, &info.invite).await {
+            info.web_url = u;
+        }
+        Ok(info)
     }
 
     pub async fn revoke_invites(&self) -> Result<()> {
@@ -68,13 +72,15 @@ impl Core {
 
     /// Decodes an invite (`tossinv1…`, `toss://i/…` or a web link) without pairing: the UI asks
     /// "Kết nối với <name>?" first. Additive command, not in the frozen contract.
-    pub fn parse_invite(&self, text: &str) -> Result<InviteInfo> {
-        core_v05::parse_invite(text.trim())
+    pub async fn parse_invite(&self, text: &str) -> Result<InviteInfo> {
+        let text = crate::shortlink::expand(text.trim()).await?;
+        core_v05::parse_invite(&text)
     }
 
     pub async fn accept_invite(&self, text: String) -> Result<Contact> {
+        let text = crate::shortlink::expand(text.trim()).await?;
         let node = self.node().await?;
-        core_v05::accept_invite(&node, text.trim()).await
+        core_v05::accept_invite(&node, &text).await
     }
 
     pub async fn rename_contact(&self, id: String, name: String) -> Result<()> {

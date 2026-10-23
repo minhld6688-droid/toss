@@ -190,7 +190,7 @@ pub async fn create_admin_ticket(core: C<'_>, days: u32) -> Res<TicketInfo> {
 // ---- tickets / transfers ---------------------------------------------------------------------------
 #[tauri::command(rename_all = "snake_case")]
 pub async fn parse_ticket(core: C<'_>, text: String) -> Res<TicketInfo> {
-    Ok(core.parse_ticket(&text)?)
+    Ok(core.parse_ticket(&text).await?)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -315,10 +315,17 @@ pub async fn revoke_invites(core: C<'_>) -> Res<()> {
     Ok(core.revoke_invites().await?)
 }
 
+/// Additive (not in ipc.ts), v0.5.2: turns a pasted short link (`https://<host>/<code>`) into the
+/// ticket / invite it stands for; any other text comes back unchanged.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn expand_link(text: String) -> Res<String> {
+    Ok(crate::shortlink::expand(&text).await?)
+}
+
 /// Additive (not in ipc.ts): decode an invite for the "Kết nối với <name>?" confirm, without pairing.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn parse_invite(core: C<'_>, text: String) -> Res<InviteInfo> {
-    Ok(core.parse_invite(&text)?)
+    Ok(core.parse_invite(&text).await?)
 }
 
 #[tauri::command(rename_all = "snake_case")]

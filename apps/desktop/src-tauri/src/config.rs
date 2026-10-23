@@ -1,7 +1,8 @@
 //! Build-time constants. The coordinator may change `DEFAULT_PAGE_HOST`.
 
 /// Host of the link page; links look like `https://<page_host>/#<ticket>`.
-pub const DEFAULT_PAGE_HOST: &str = "minhld6688-droid.github.io/toss";
+/// v0.5.2: Vercel, which also serves the short-link API (`/api/s`); GitHub Pages had no API.
+pub const DEFAULT_PAGE_HOST: &str = "toss-link.vercel.app";
 
 /// Name of the folder (under the platform data dir) holding settings, key, jobs.
 pub const DATA_DIR_NAME: &str = "toss";
