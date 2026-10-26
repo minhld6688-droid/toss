@@ -47,8 +47,8 @@
   ],
   "rewrites": [
     {
-      "source": "/:code([a-zA-Z2-7]{9})",
-      "destination": "/index.html"
+      "source": "/:code([a-zA-Z2-7]+)",
+      "destination": "/"
     }
   ]
 }
