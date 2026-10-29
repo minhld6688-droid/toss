@@ -181,7 +181,7 @@ function HowItWorks() {
       {open && (
         <ol className="card px-3.5 py-3 space-y-2.5 text-sm">
           <li className="flex gap-2.5"><span className="mono text-accent font-semibold">1</span><span><b className="font-medium">Gửi:</b> kéo folder thả vào tên một máy trong danh bạ{navigator.platform.toLowerCase().includes("mac") ? " — hoặc thả lên icon Toss trên thanh menu" : ""}. Máy nào cũng gửi và nhận như nhau.</span></li>
-          <li className="flex gap-2.5"><span className="mono text-accent font-semibold">2</span><span><b className="font-medium">Người lạ:</b> chọn “Tạo link”, gửi link cho họ. Họ bấm link là nhận; bật “Cho gửi lại” thì họ thả file vào để gửi ngược về.</span></li>
+          <li className="flex gap-2.5"><span className="mono text-accent font-semibold">2</span><span><b className="font-medium">Người lạ:</b> chọn “Tạo link”, gửi link cho họ. Họ bấm link là nhận; bật “Cho phép gửi file ngược lại” thì họ thả file vào để gửi về máy bạn.</span></li>
           <li className="flex gap-2.5"><span className="mono text-accent font-semibold">3</span><span><b className="font-medium">Thêm máy:</b> bấm “Thêm máy”, gửi lời mời một lần. Từ đó hai máy thấy nhau trong danh bạ.</span></li>
           <li><Hint>File nhận về nằm trong thư mục nhận (Cài đặt → Máy này). Truyền thẳng giữa hai máy, không qua máy chủ.</Hint></li>
         </ol>

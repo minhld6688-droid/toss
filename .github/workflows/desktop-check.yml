@@ -35,6 +35,23 @@ jobs:
         working-directory: apps/desktop
         run: npm ci && npm run build
       - name: Clippy toss-desktop
-        run: cargo clippy -p toss-desktop --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy -p toss-desktop --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.txt
       - name: Unit tests toss-desktop
-        run: cargo test -p toss-desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p toss-desktop 2>&1 | tee test.txt
+      # Job logs need a login to read; failures are also published as annotations (public).
+      - name: Report failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          for f in clippy.txt test.txt; do
+            [ -f "$f" ] || continue
+            body=$(grep -E "error|warning: unused|panicked|FAILED" "$f" | grep -v "^\s*Compiling" | head -40 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+            [ -n "$body" ] && echo "::error title=$f::$body"
+          done
+          exit 0
