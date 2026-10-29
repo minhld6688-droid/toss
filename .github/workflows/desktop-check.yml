@@ -6,7 +6,7 @@ name: desktop-check
 on:
   workflow_dispatch:
   push:
-    paths: ["apps/desktop/**", "crates/**", ".github/workflows/desktop-check.yml"]
+    paths: ["apps/desktop/**", "crates/**", ".github/workflows/desktop-check.yml", ".github/scripts/**"]
 
 permissions:
   contents: read
@@ -50,11 +50,4 @@ jobs:
       # Job logs need a login to read; failures are also published as annotations (public).
       - name: Report failures as annotations
         if: failure()
-        shell: bash
-        run: |
-          for f in clippy.txt test.txt; do
-            [ -f "$f" ] || continue
-            body=$(grep -E "^error|: error|^warning: unused|panicked|FAILED|failed|^ *--> |^[0-9 ]+\||^---- |assert" "$f" | head -60 | awk '{gsub(/%/,"%25"); gsub(/\r/,""); printf "%s%%0A", $0}')
-            [ -n "$body" ] && echo "::error title=$f::$body"
-          done
-          exit 0
+        run: node .github/scripts/annotate.mjs clippy.txt test.txt
