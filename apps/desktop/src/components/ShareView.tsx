@@ -4,7 +4,7 @@ import type { TicketInfo } from "../lib/ipc-types";
 import { api, errorMessage } from "../lib/ipc";
 import { baseName, midTruncate } from "../lib/format";
 import { useStore } from "../lib/store";
-import { Badge, FullSheet, Icon, Nest, Sheet, Words } from "./ui";
+import { Badge, FullSheet, Icon, Nest, Words } from "./ui";
 
 const DAYS = [
   { v: 1, label: "1 ngày" }, { v: 3, label: "3 ngày" }, { v: 7, label: "7 ngày" }, { v: 30, label: "30 ngày" }, { v: 0, label: "Không hết hạn" },
