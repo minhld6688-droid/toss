@@ -6,7 +6,7 @@ name: desktop-check
 on:
   workflow_dispatch:
   push:
-    paths: ["apps/desktop/src-tauri/**", ".github/workflows/desktop-check.yml"]
+    paths: ["apps/desktop/**", "crates/**", ".github/workflows/desktop-check.yml"]
 
 permissions:
   contents: read
