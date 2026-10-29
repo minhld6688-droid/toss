@@ -42,7 +42,10 @@ jobs:
         run: |
           set -o pipefail
           cargo clippy -p toss-desktop --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.txt
+      # Windows: the Tauri lib test binary cannot start on the runner (no app manifest for
+      # comctl32 v6), so tests run on macOS here and on Linux in ci.yml.
       - name: Unit tests toss-desktop
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -o pipefail

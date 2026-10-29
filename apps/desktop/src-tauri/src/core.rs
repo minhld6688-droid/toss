@@ -1697,9 +1697,15 @@ mod tests {
         };
         let info = core.create_ticket(spec).await.unwrap();
         assert!(info.ticket.starts_with("toss1"));
-        assert!(info
-            .web_url
-            .starts_with(&format!("https://{}/#toss1", config::DEFAULT_PAGE_HOST)));
+        // Long link offline; with network the short-link service gives https://<host>/<code>.
+        let host = config::DEFAULT_PAGE_HOST;
+        assert!(
+            info.web_url.starts_with(&format!("https://{host}/#toss1"))
+                || (info.web_url.starts_with(&format!("https://{host}/"))
+                    && !info.web_url.contains('#')),
+            "{}",
+            info.web_url
+        );
         assert_eq!(info.deep_link, format!("toss://t/{}", info.ticket));
         let parsed = core.parse_ticket(&info.web_url).await.unwrap();
         assert_eq!(
