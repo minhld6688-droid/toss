@@ -13,6 +13,8 @@ mod services;
 mod settings;
 mod shell;
 mod shortlink;
+#[cfg(target_os = "macos")]
+mod traydrop;
 mod updater;
 
 use std::sync::Arc;
@@ -236,6 +238,21 @@ pub fn run() {
         }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => shell::show_main(app),
+        // v0.6: files / folders dropped on the Dock icon → "Gửi tới ai?" (toss:// links are the
+        // deep-link plugin's).
+        #[cfg(target_os = "macos")]
+        RunEvent::Opened { urls } => {
+            let mut files = Vec::new();
+            for u in urls.iter().filter(|u| u.scheme() == "file") {
+                let Ok(p) = u.to_file_path() else { continue };
+                let p = p.to_string_lossy().into_owned();
+                match shell::ticket_from_file(&p) {
+                    Some(t) => shell::deliver_link(app, t),
+                    None => files.push(p),
+                }
+            }
+            shell::deliver_send(app, files);
+        }
         _ => {
             let _ = app;
         }

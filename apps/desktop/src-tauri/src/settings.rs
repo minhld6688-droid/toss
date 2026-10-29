@@ -121,9 +121,10 @@ impl Settings {
         Ok(())
     }
 
-    /// Effective auto-update flag (default: on when host mode is configured).
+    /// Effective auto-update flag. v0.6: every machine is the same, so an untouched
+    /// setting means on (machines are often reached only remotely).
     pub fn auto_update(&self) -> bool {
-        self.auto_update.unwrap_or(self.host.is_some())
+        self.auto_update.unwrap_or(true)
     }
 
     pub fn page_host(&self) -> String {
@@ -199,14 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_update_defaults_to_host_mode() {
+    fn auto_update_defaults_to_on() {
         let mut s = Settings::default();
-        assert!(!s.auto_update(), "a plain client does not update by itself");
+        assert!(s.auto_update(), "v0.6: every machine updates by itself unless turned off");
         s.host = Some(HostConfig::default());
-        assert!(
-            s.auto_update(),
-            "a host updates by itself unless turned off"
-        );
+        assert!(s.auto_update());
         s.auto_update = Some(false);
         assert!(!s.auto_update());
         s.host = None;

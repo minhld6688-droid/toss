@@ -11,9 +11,9 @@ import { LanBlockedCard } from "./LanBlocked";
 type Tone = "ok" | "warn" | "bad" | "mute";
 
 const LIKELIHOOD: Record<Likelihood, { label: string; tone: Tone; line: string }> = {
-  high: { label: "Cao", tone: "ok", line: "Editor sẽ nối trực tiếp tới máy này, tốc độ tối đa." },
-  medium: { label: "Trung bình", tone: "warn", line: "Hầu hết editor nối trực tiếp được. Mở cổng UDP trên router để chắc chắn hơn." },
-  low: { label: "Thấp", tone: "bad", line: "Editor ở xa nhiều khả năng phải đi qua relay, sẽ chậm." },
+  high: { label: "Cao", tone: "ok", line: "Máy khác sẽ nối thẳng tới máy này, tốc độ tối đa." },
+  medium: { label: "Trung bình", tone: "warn", line: "Hầu hết máy khác nối thẳng được. Mở cổng UDP trên router để chắc chắn hơn." },
+  low: { label: "Thấp", tone: "bad", line: "Máy ở xa nhiều khả năng phải đi vòng qua relay, sẽ chậm." },
   unknown: { label: "Đang đo", tone: "mute", line: "Toss đang đo mạng, vài giây nữa có kết quả." },
 };
 
@@ -123,12 +123,12 @@ function TestConnect({ onDone }: { onDone: () => void }) {
     <div className="space-y-2.5">
       {hasAdmin === false && (
         <input
-          className="input mono text-xs" placeholder="Dán link của máy tổng (toss1… hoặc https://…)" spellCheck={false}
+          className="input mono text-xs" placeholder="Dán một link Toss của máy kia (toss1… hoặc https://…)" spellCheck={false}
           value={link} onChange={(e) => setLink(e.target.value)} onKeyDown={(e) => e.key === "Enter" && link.trim() && !testing && void run()}
         />
       )}
       <button className="btn btn-primary w-full magnet" disabled={testing || hasAdmin === null || (hasAdmin === false && !link.trim())} onClick={run}>
-        <Icon name="signal" />{testing ? "Đang thử nối… (tới 8 giây)" : "Thử nối tới máy tổng"}<Nest />
+        <Icon name="signal" />{testing ? "Đang thử nối… (tới 8 giây)" : "Thử nối tới máy đó"}<Nest />
       </button>
       {report && <TestResult r={report} more={more} onMore={() => setMore((m) => !m)} />}
     </div>
@@ -206,7 +206,7 @@ function Advanced() {
       <Row title="Tìm máy trong mạng LAN" hint="mDNS: cùng mạng thì nối thẳng, không cần relay">
         <Toggle on={draft.mdns} label="mDNS" onChange={(mdns) => setDraft({ ...draft, mdns })} />
       </Row>
-      <Row title="Tự mở cổng trên router" hint="UPnP / NAT-PMP / PCP cho cổng UDP của máy tổng">
+      <Row title="Tự mở cổng trên router" hint="UPnP / NAT-PMP / PCP — giúp máy khác nối thẳng tới máy này">
         <Toggle on={draft.portmap} label="Mở cổng tự động" onChange={(portmap) => setDraft({ ...draft, portmap })} />
       </Row>
       <Row title="Luồng song song" hint="16 nhanh hơn trên đường xa, tốn RAM hơn">
@@ -302,7 +302,7 @@ export function ConnectionSection() {
 
             {diag.firewall === "missing" && (
               <div>
-                <p className="text-xs text-mute mb-2">Firewall đang chặn kết nối UDP vào Toss: editor ở xa sẽ chỉ nối được qua relay.</p>
+                <p className="text-xs text-mute mb-2">Firewall đang chặn kết nối UDP vào Toss: máy ở xa sẽ chỉ nối được qua relay (chậm).</p>
                 <FirewallAllow compact onDone={() => window.setTimeout(() => void reload(), 400)} />
               </div>
             )}

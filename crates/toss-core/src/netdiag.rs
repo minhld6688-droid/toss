@@ -237,23 +237,23 @@ pub(crate) fn reasons(f: &Facts, l: Likelihood) -> Vec<String> {
         });
     } else if !f.nat.udp {
         v.push(
-            "Mạng chặn UDP ra Internet — editor ở xa sẽ đi qua relay (chậm); cho phép UDP trên \
+            "Mạng chặn UDP ra Internet — máy ở xa sẽ đi qua relay (chậm); cho phép UDP trên \
              firewall/router"
                 .into(),
         );
     } else if f.nat.mapping_varies_by_dest == Some(true) && l != Likelihood::High {
         v.push(if f.is_host {
             format!(
-                "NAT đối xứng: editor ở xa sẽ đi qua relay — mở cổng UDP {port} trên router \
+                "NAT đối xứng: máy ở xa sẽ đi qua relay — mở cổng UDP {port} trên router \
                  (UPnP hoặc port forward) để nối trực tiếp"
             )
         } else {
-            "NAT đối xứng: editor ở xa sẽ đi qua relay".into()
+            "NAT đối xứng: máy ở xa sẽ đi qua relay".into()
         });
     }
     match f.portmap.status.as_str() {
         "mapped" => v.push(format!(
-            "Router đã mở cổng {}{} — editor ở xa nối trực tiếp được",
+            "Router đã mở cổng {}{} — máy ở xa nối trực tiếp được",
             f.portmap.external_addr.as_deref().unwrap_or("UDP"),
             f.portmap
                 .protocol
@@ -262,25 +262,25 @@ pub(crate) fn reasons(f: &Facts, l: Likelihood) -> Vec<String> {
                 .unwrap_or_default()
         )),
         "unavailable" if f.is_host && l != Likelihood::High => v.push(format!(
-            "Router không hỗ trợ UPnP — mở cổng UDP {port} thủ công để editor ở xa nối trực tiếp"
+            "Router không hỗ trợ UPnP — mở cổng UDP {port} thủ công để máy ở xa nối trực tiếp"
         )),
         "off" if f.is_host => v.push("Đã tắt mở cổng tự động (UPnP / NAT-PMP / PCP)".into()),
         _ => {}
     }
     if f.global_v6 {
-        v.push("Có IPv6 công cộng — editor có IPv6 nối thẳng được".into());
+        v.push("Có IPv6 công cộng — máy có IPv6 nối thẳng được".into());
     }
     if !f.mdns_cfg {
         v.push("Đã tắt mDNS — máy cùng mạng LAN chỉ tìm nhau qua địa chỉ trong link".into());
     }
     if f.is_host && f.port.is_none() {
         v.push(format!(
-            "Máy tổng đang chạy cổng UDP ngẫu nhiên — đặt cổng cố định {DEFAULT_HOST_PORT} để mở \
+            "Máy này đang chạy cổng UDP ngẫu nhiên — đặt cổng cố định {DEFAULT_HOST_PORT} để mở \
              cổng/firewall ổn định"
         ));
     }
     if l == Likelihood::Medium && f.is_host {
-        v.push("NAT dễ: đa số editor ở xa sẽ đục lỗ được để nối trực tiếp".into());
+        v.push("NAT dễ: đa số máy ở xa sẽ đục lỗ được để nối trực tiếp".into());
     }
     v
 }
@@ -421,7 +421,7 @@ pub(crate) async fn test_connect(inner: &Inner, ticket: &Ticket) -> ConnectRepor
                 connect_ms: ms(started.elapsed()),
                 direct_after_ms: None,
                 known_paths: known,
-                reason: format!("Không nối được máy tổng: {e:#}"),
+                reason: format!("Không nối được máy kia: {e:#}"),
             };
         }
     };
@@ -500,7 +500,7 @@ fn relay_reason(inner: &Inner, ticket: &Ticket) -> String {
         )
     });
     if addrs.is_empty() {
-        "Link không có địa chỉ trực tiếp của máy tổng (máy tổng chưa có mạng lúc tạo link) — \
+        "Link không có địa chỉ trực tiếp của máy gửi (máy đó chưa có mạng lúc tạo link) — \
          tạo link mới"
             .into()
     } else if report.as_ref().is_some_and(|r| !r.has_udp()) {
@@ -509,17 +509,17 @@ fn relay_reason(inner: &Inner, ticket: &Ticket) -> String {
         .as_ref()
         .is_some_and(|r| r.mapping_varies_by_dest() == Some(true))
     {
-        "Máy này sau NAT đối xứng — chỉ đi qua relay, trừ khi máy tổng mở cổng UDP (UPnP / \
+        "Máy này sau NAT đối xứng — chỉ đi qua relay, trừ khi máy kia mở cổng UDP (UPnP / \
          port forward)"
             .into()
     } else if !host_public {
         format!(
-            "Máy tổng không có địa chỉ công cộng trong link và hai máy không cùng mạng LAN — mở \
-             cổng UDP {DEFAULT_HOST_PORT} trên router của máy tổng"
+            "Máy kia không có địa chỉ công cộng trong link và hai máy không cùng mạng LAN — mở \
+             cổng UDP {DEFAULT_HOST_PORT} trên router của máy kia"
         )
     } else {
         format!(
-            "Chưa đục được NAT trong {} giây — kiểm tra firewall máy tổng (cho phép Toss qua \
+            "Chưa đục được NAT trong {} giây — kiểm tra firewall máy kia (cho phép Toss qua \
              UDP) và mở cổng UDP {DEFAULT_HOST_PORT} trên router",
             PROBE_WINDOW.as_secs()
         )

@@ -14,15 +14,14 @@ export function Wizard() {
   const [name, setName] = useState(app.device_name);
   const [dest, setDest] = useState(app.dest_dir);
   const [busy, setBusy] = useState(false);
-  // Host machines (host mode already on at first run) get one more step when the firewall would
-  // block editors from connecting directly. Once decided it stays, so the steps do not shift back.
+  // v0.6 every machine sends and receives: one more step when the firewall would block other
+  // machines from connecting directly. Once decided it stays, so the steps do not shift back.
   const [needsFw, setNeedsFw] = useState(false);
   useEffect(() => {
-    if (!app.host) return;
     let dead = false;
     api.get_diagnostics().then((d) => { if (!dead && d.firewall === "missing") setNeedsFw(true); }).catch(() => undefined);
     return () => { dead = true; };
-  }, [app.host]);
+  }, []);
   const steps = needsFw ? 4 : 3;
   const last = steps - 1;
   const fwStep = needsFw ? 2 : -1;
@@ -68,7 +67,7 @@ export function Wizard() {
             <TossMark className="w-32 -ml-2 mb-2" />
             <div className="text-xs text-mute mb-1">Bước 1/{steps}</div>
             <Words text="Tên máy của bạn" accent={["máy"]} className="text-[30px] mb-2" />
-            <p className="text-sm text-mute mb-4">Tên này hiện ở phía máy tổng khi bạn nhận hoặc trả file.</p>
+            <p className="text-sm text-mute mb-4">Người khác thấy tên này trong danh bạ và khi bạn gửi/nhận file. Đặt dễ nhận ra, vd. “Minh – MacBook”.</p>
             <input className="input h-12 text-base" autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && name.trim() && setStep(1)} />
           </>
         )}
@@ -76,7 +75,7 @@ export function Wizard() {
           <>
             <div className="text-xs text-mute mb-1">Bước 2/{steps}</div>
             <Words text="Thư mục nhận file" accent={["nhận"]} className="text-[30px] mb-2" />
-            <p className="text-sm text-mute mb-4">File nhận về sẽ nằm trong thư mục này, mỗi job một folder riêng.</p>
+            <p className="text-sm text-mute mb-4">File người khác gửi cho bạn sẽ nằm ở đây, mỗi lần nhận một folder riêng.</p>
             <div className="card p-3 flex items-center gap-2">
               <Icon name="folder" className="w-5 h-5 text-accent shrink-0" />
               <div className="mono text-xs break-all flex-1 selectable">{dest}</div>
@@ -104,7 +103,7 @@ export function Wizard() {
               initial={reduce ? false : { scale: 0, rotate: -60 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 420, damping: 14, delay: 0.2 }}
             ><Icon name="check" className="w-7 h-7" weight="bold" /></motion.div>
             <Words text="Xong rồi" accent={["rồi"]} className="text-[30px] mb-2" />
-            <p className="text-sm text-mute">Dán link từ máy tổng vào Trang chính để nhận file. Muốn dùng máy này làm máy tổng, bật “Chế độ máy tổng” trong Cài đặt.</p>
+            <p className="text-sm text-mute">Máy nào cũng gửi và nhận như nhau. Gửi: kéo folder thả vào tên một máy trong danh bạ, hoặc tạo link. Nhận: bấm link người khác gửi. Bước đầu tiên: “Thêm máy” để ghép với máy kia.</p>
             <div className="card p-3 mt-4 text-sm space-y-1">
               <div><span className="text-mute">Tên máy: </span>{name}</div>
               <div className="truncate"><span className="text-mute">Nhận về: </span><span className="mono text-xs">{dest}</span></div>

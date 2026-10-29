@@ -41,11 +41,11 @@ pub const QS_PREFIX: &str = "qs-";
 const QS_RETURN_DIR: &str = "Tra-ve";
 
 /// Prefix of the error text the UI uses to detect "no admin ticket stored".
-pub const NO_ADMIN: &str = "no_admin_ticket: Chưa có máy tổng từ xa";
+pub const NO_ADMIN: &str = "no_admin_ticket: Chưa kết nối máy nào để điều khiển";
 
 /// v0.5.1 `remote_update` on a host that cannot update remotely.
 pub const REMOTE_TOO_OLD: &str =
-    "Máy tổng đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này";
+    "Máy đó đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này";
 
 /// How often a host whose config could not be applied at startup (e.g. a root
 /// on a drive that is not mounted yet) tries again.
@@ -131,14 +131,6 @@ impl Core {
             .first_run
     }
 
-    pub fn host_mode(&self) -> bool {
-        self.settings
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .host
-            .is_some()
-    }
-
     // ---- node lifecycle -----------------------------------------------------
     /// The running node; starts it on first use (also called once at startup in the background).
     pub async fn node(&self) -> Result<Arc<Node>> {
@@ -220,16 +212,16 @@ impl Core {
             },
             Err(e) => e,
         };
-        tracing::error!("bật chế độ máy tổng thất bại: {err:#}");
+        tracing::error!("bật phục vụ link thất bại: {err:#}");
         if let Some(partial) = available_roots(h) {
             if let Ok(c) = to_core_host(&partial, false) {
                 match node.set_host(Some(c)).await {
                     Ok(()) => tracing::warn!(
-                        "chế độ máy tổng chạy với {}/{} thư mục gốc; sẽ thử lại",
+                        "phục vụ link chạy với {}/{} thư mục; sẽ thử lại",
                         partial.roots.len(),
                         h.roots.len()
                     ),
-                    Err(e) => tracing::error!("bật một phần chế độ máy tổng thất bại: {e:#}"),
+                    Err(e) => tracing::error!("bật một phần phục vụ link thất bại: {e:#}"),
                 }
             }
         }
@@ -252,7 +244,7 @@ impl Core {
                 }
                 if let Ok(c) = to_core_host(&h, false) {
                     if node.set_host(Some(c)).await.is_ok() {
-                        tracing::info!("chế độ máy tổng đã bật đầy đủ");
+                        tracing::info!("phục vụ link đã bật đầy đủ");
                         return;
                     }
                 }
@@ -755,7 +747,7 @@ impl Core {
         let t =
             Ticket::from_str(ticket.trim()).map_err(|e| anyhow!("không đọc được link ({e})"))?;
         if t.body.admin || !t.body.put {
-            bail!("Link này không cho phép trả file");
+            bail!("Link này không cho gửi file ngược lại");
         }
         if t.is_expired() {
             bail!("Link đã hết hạn");
@@ -843,8 +835,8 @@ impl Core {
         let node = self.node().await?;
         let c = tokio::time::timeout(Duration::from_secs(20), node.ctl(t))
             .await
-            .map_err(|_| anyhow!("Máy tổng không phản hồi (đang offline?)"))?
-            .context("không kết nối được máy tổng")?;
+            .map_err(|_| anyhow!("Máy kia không phản hồi (đang offline?)"))?
+            .context("không kết nối được máy kia")?;
         let c = Arc::new(c);
         *g = Some(c.clone());
         Ok(c)
@@ -884,7 +876,7 @@ impl Core {
         }
         self.with_ctl(|c| async move { c.request_update().await })
             .await
-            .map_err(|e| anyhow!("Không gửi được lệnh cập nhật tới máy tổng: {e:#}"))?;
+            .map_err(|e| anyhow!("Không gửi được lệnh cập nhật tới máy đó: {e:#}"))?;
         tracing::info!(host = %st.device, version = %st.version, "remote update requested");
         Ok(())
     }
@@ -1012,14 +1004,14 @@ impl Core {
             "" => self
                 .settings()
                 .admin_ticket
-                .ok_or_else(|| anyhow!("Chưa có máy tổng — dán một link của máy tổng để thử"))?,
+                .ok_or_else(|| anyhow!("Dán một link Toss của máy kia để thử nối"))?,
             t => t.to_string(),
         };
         let t = Ticket::from_str(&text).map_err(|e| anyhow!("không đọc được link ({e})"))?;
         let node = self.node().await?;
         tokio::time::timeout(Duration::from_secs(30), node.test_connect(&t))
             .await
-            .map_err(|_| anyhow!("Thử nối quá lâu, máy tổng không phản hồi"))
+            .map_err(|_| anyhow!("Thử nối quá lâu, máy kia không phản hồi"))
     }
 
     /// Saves `net` and applies it by restarting the node (deferred, and retried until idle,
@@ -1257,12 +1249,12 @@ fn to_core_host(h: &HostConfig, strict: bool) -> Result<CoreHost> {
         });
     }
     if h.return_root.trim().is_empty() {
-        bail!("Chưa chọn thư mục trả về");
+        bail!("Chưa chọn thư mục nhận file gửi lại");
     }
     let ret = PathBuf::from(h.return_root.trim());
     if let Err(e) = std::fs::create_dir_all(&ret) {
         if strict {
-            bail!("Không tạo được thư mục trả về {}: {e}", h.return_root);
+            bail!("Không tạo được thư mục nhận file gửi lại {}: {e}", h.return_root);
         }
     }
     let mut c = CoreHost::new(roots, ret);
@@ -1368,7 +1360,7 @@ impl Seen {
                 self.finished.insert(id.clone());
                 let (job, client) = self.open.remove(&id)?;
                 let verb = if v["dest"].is_null() {
-                    "Đã trả xong"
+                    "Đã gửi xong"
                 } else {
                     "Đã nhận xong"
                 };

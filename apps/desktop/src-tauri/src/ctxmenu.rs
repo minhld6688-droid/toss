@@ -1,4 +1,4 @@
-//! OS right-click integration: "Tạo link Toss" on folders.
+//! OS right-click integration: "Gửi bằng Toss" on folders (v0.6; was "Tạo link Toss").
 //!
 //! - Windows: per-user registry verbs under `HKCU\Software\Classes\Directory\shell\Toss`
 //!   (right-click on a folder) and `...\Directory\Background\shell\Toss` (right-click
@@ -11,7 +11,11 @@
 use anyhow::Result;
 
 /// Menu label (Explorer verb / Quick Action name).
-pub const LABEL: &str = "Tạo link Toss";
+pub const LABEL: &str = "Gửi bằng Toss";
+
+/// Quick Action names of older versions, removed when the current one is installed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const LEGACY_LABELS: [&str; 1] = ["Tạo link Toss"];
 
 /// argv flag carrying the folder to share.
 pub const SHARE_FLAG: &str = "--share";
@@ -146,7 +150,7 @@ mod tests {
             r#""C:\Users\Minh\AppData\Local\Toss\Toss.exe" --share "%V""#
         );
         for x in &e {
-            assert_eq!(x.label, "Tạo link Toss");
+            assert_eq!(x.label, "Gửi bằng Toss");
             assert_eq!(x.icon, format!("\"{exe}\",0"));
         }
     }

@@ -8,6 +8,24 @@
        the bundle's Info.plist. -->
   <key>NSLocalNetworkUsageDescription</key>
   <string>Toss cần truy cập mạng cục bộ để chuyển file trực tiếp giữa các máy trong cùng mạng (nhanh hơn nhiều so với qua relay).</string>
+  <!-- v0.6: folders / files dropped on the Dock icon open "Gửi tới ai?". Rank None: Toss never
+       becomes the default app for anything. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Folder hoặc file để gửi</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>None</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.folder</string>
+        <string>public.data</string>
+      </array>
+    </dict>
+  </array>
   <key>NSBonjourServices</key>
   <array>
     <string>_toss._udp</string>

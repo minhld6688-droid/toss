@@ -160,24 +160,3 @@ export function ShareView({ path }: { path: string }) {
     </FullSheet>
   );
 }
-
-/** "Tạo link chia sẻ folder này?" — shown when a folder is dropped on an idle window. */
-export function ShareAsk({ path }: { path: string }) {
-  const ask = useStore((s) => s.askShare);
-  const open = useStore((s) => s.openShare);
-  const close = () => ask(null);
-  return (
-    <Sheet onClose={close} title="Tạo link chia sẻ folder này?">
-      <div className="flex items-center gap-2.5 mb-1">
-        <span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="share" className="w-5 h-5" /></span>
-        <div className="title text-[22px]">Tạo link <em>chia sẻ</em> folder này?</div>
-      </div>
-      <div className="rounded-[14px] hair bg-line/[0.04] px-3 py-2.5 my-3">
-        <div className="truncate text-base font-medium">{baseName(path)}</div>
-        <div className="mono text-xs text-mute selectable whitespace-nowrap overflow-hidden" title={path}>{midTruncate(path, 24, 24)}</div>
-      </div>
-      <button className="btn btn-primary btn-lg w-full magnet" onClick={() => open(path)}>Tạo link<Nest /></button>
-      <button className="btn btn-ghost w-full mt-2" onClick={close}>Huỷ</button>
-    </Sheet>
-  );
-}

@@ -6,7 +6,7 @@ const { P0, P1, P2, REST } = MARK;
 const CYCLE = 2.9; // s
 
 /**
- * The Toss mark: a file tossed from máy tổng (dot) to the editor (ring), comet tail tapering behind it.
+ * The Toss mark: a file tossed from one machine (dot) to another (ring), comet tail tapering behind it.
  * `animate` loops the toss; otherwise (or with reduced motion) it holds the icon pose.
  */
 export function TossMark({ animate = true, className = "", speed = 1 }: { animate?: boolean; className?: string; speed?: number }) {

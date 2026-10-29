@@ -6,14 +6,15 @@ import { Home } from "./screens/Home";
 import { Transfers } from "./screens/Transfers";
 import { Settings } from "./screens/Settings";
 import { TicketSheet } from "./components/TicketSheet";
-import { ShareAsk, ShareView } from "./components/ShareView";
+import { ShareView } from "./components/ShareView";
+import { SendPicker } from "./components/SendPicker";
 import { Wizard } from "./components/Wizard";
 import { AddDeviceSheet, ContactSheet, PushSheet } from "./components/Contacts";
 import { AnimatePresence, EASE, Icon } from "./components/ui";
 import { CometLayer, centerOf } from "./components/Comet";
 import { TossMark } from "./components/TossMark";
 import { usePointerFx } from "./lib/pointer-fx";
-import { listenUpdates } from "./lib/update";
+import { listenUpdates, useUpdate } from "./lib/update";
 
 const TABS: { id: Screen; label: string; icon: "home" | "transfer" | "settings" }[] = [
   { id: "home", label: "Trang chính", icon: "home" },
@@ -30,7 +31,7 @@ export default function App() {
   const dropHover = useStore((s) => s.dropHover);
   const sheet = useStore((s) => s.sheet);
   const share = useStore((s) => s.share);
-  const shareAsk = useStore((s) => s.shareAsk);
+  const send = useStore((s) => s.send);
   const navPulse = useStore((s) => s.navPulse);
   const contactCount = useStore((s) => s.contacts.length);
   const addDevice = useStore((s) => s.addDevice);
@@ -63,7 +64,17 @@ export default function App() {
       await reg(on("transfer:event", (ev) => useStore.getState().applyEvent(ev)));
       await reg(on("host:status", (h) => useStore.getState().setHostStatus(h)));
       await reg(on("deep-link", ({ ticket }) => { void useStore.getState().receiveLink(ticket); }));
-      await reg(on("share", ({ path }) => useStore.getState().openShare(path)));
+      // v0.6: right-click "Gửi bằng Toss", menu bar / Dock icon and tray "Gửi folder…" all ask "Gửi tới ai?"
+      await reg(on("share", ({ path }) => useStore.getState().openSend([path])));
+      await reg(on("send", ({ paths }) => useStore.getState().openSend(paths)));
+      await reg(on("send:pick", () => { void useStore.getState().pickAndSend(); }));
+      await reg(on("tray:drag", () => {
+        // the window popped up under the menu bar icon mid-drag: show the contact book to drop on
+        const s = useStore.getState();
+        if (s.send || s.share) return;
+        useStore.setState({ screen: "home", sheet: null, sheetNote: null, contactSheet: null, addDevice: null, shareAsk: null });
+      }));
+      await reg(on("update:check", () => { useStore.getState().setScreen("settings"); void useUpdate.getState().runCheck(); }));
       await reg(on("share:error", ({ msg }) => useStore.getState().toast(msg, "error")));
       await reg(on("navigate", ({ screen }) => useStore.getState().setScreen(screen)));
       await reg(on("contacts:changed", () => { void useStore.getState().refreshContacts(); void useStore.getState().refreshPushes(); }));
@@ -91,18 +102,18 @@ export default function App() {
         s.setHoverContact(null);
         const sheet = s.sheet;
         const target = contactAt(x, y);
-        if (target && paths.length > 0 && !sheet) {
+        if (target && paths.length > 0 && !sheet && !s.share) {
           const el = document.querySelector(`[data-contact-id="${target}"]`);
           void s.sendToContact(target, paths, el ? centerOf(el) : undefined);
         } else if (sheet && sheet.put && !sheet.admin) {
           api.start_put({ ticket: sheet.ticket, paths })
-            .then(async () => { await s.refreshTransfers(); s.fly(); s.closeSheet(); s.setScreen("transfers"); s.toast("Đang trả file…"); })
+            .then(async () => { await s.refreshTransfers(); s.fly(); s.closeSheet(); s.setScreen("transfers"); s.toast("Đang gửi lại file…"); })
             .catch((e) => s.toast(errorMessage(e), "error"));
         } else if (!sheet && !s.share && paths.length > 0) {
-          // no ticket selected, not in a put flow: offer to share the dropped folder
-          s.askShare(paths[0]);
+          // dropped anywhere else: "Gửi tới ai?" (a contact, or a link)
+          s.openSend(paths);
         } else {
-          s.toast("Mở link trả hàng trước, rồi kéo folder vào");
+          s.toast("Link này chỉ để nhận — không gửi ngược được");
         }
       }));
       try { await api.ui_ready(); } catch { /* older shells */ }
@@ -203,12 +214,12 @@ export default function App() {
       <AnimatePresence>{contactSheet && <ContactSheet key={`c-${contactSheet}`} id={contactSheet} />}</AnimatePresence>
       <AnimatePresence>{addDevice && <AddDeviceSheet key="add-device" />}</AnimatePresence>
       <AnimatePresence>{pushSheet && <PushSheet key="push" />}</AnimatePresence>
-      <AnimatePresence>{shareAsk && !share && <ShareAsk key="share-ask" path={shareAsk} />}</AnimatePresence>
+      <AnimatePresence>{send && !share && <SendPicker key={`send-${send.nonce}`} paths={send.paths} />}</AnimatePresence>
       <AnimatePresence>{share && <ShareView key={share.nonce} path={share.path} />}</AnimatePresence>
       {app.first_run && <Wizard />}
 
       <AnimatePresence>
-        {dropHover && !sheet && !share && (
+        {dropHover && !sheet && !share && !send && (
           <motion.div
             key="drop" className="fixed inset-0 z-20 pointer-events-none grid place-items-center"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.35, ease: EASE }}
@@ -222,7 +233,7 @@ export default function App() {
                 className="absolute bottom-24 glass rounded-full px-4 py-2 text-sm flex items-center gap-2"
                 initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 360, damping: 24 }}
               >
-                <Icon name="up" className="w-4 h-4 text-accent" weight="bold" />Thả vào một máy để gửi, hoặc chỗ khác để tạo link
+                <Icon name="up" className="w-4 h-4 text-accent" weight="bold" />Thả vào tên một máy để gửi ngay
               </motion.div>
             )}
             {!contactsDrop && !reduce && [0, 1, 2].map((i) => (
@@ -238,8 +249,8 @@ export default function App() {
               transition={{ type: "spring", stiffness: 360, damping: 24 }}
             >
               <TossMark className="w-24" speed={1.8} />
-              <div className="title text-xl">Thả để <em>chia sẻ</em></div>
-              <div className="text-xs text-mute">Toss tạo link ngay, copy sẵn vào clipboard</div>
+              <div className="title text-xl">Thả để <em>gửi</em></div>
+              <div className="text-xs text-mute">Rồi chọn người nhận, hoặc tạo link</div>
             </motion.div>}
           </motion.div>
         )}

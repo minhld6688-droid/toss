@@ -496,6 +496,9 @@ export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
     uiReadyDone = true;
     // URL switches to exercise shell-initiated events: ?share=1 (right-click menu), ?deeplink=1 (new job) / ?deeplink=exists (already downloaded)
     if (params.get("share") === "1") setTimeout(() => emit("share", { path: params.get("path") ?? "/Users/minh/Pictures/Giao hàng/12A3 - RAW" }), 150);
+    // v0.6: ?send=1 = files dropped on the menu bar / Dock icon → "Gửi tới ai?"; ?traydrag=1 = a drag entered the menu bar icon
+    if (params.get("send") === "1") setTimeout(() => emit("send", { paths: ["/Users/minh/Pictures/Giao hàng/12A3 - Đã chọn", "/Users/minh/Pictures/Giao hàng/12A3 - Video"] }), 150);
+    if (params.get("traydrag") === "1") setTimeout(() => emit("tray:drag", {}), 150);
     if (params.get("shareerror") === "1") setTimeout(() => emit("share:error", { msg: "Không mở được folder để chia sẻ" }), 150);
     if (params.get("push") === "1" && hung()) {
       const h = hung()!;

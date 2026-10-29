@@ -1,3 +1,5 @@
+// Pre-0.6 mock-UI screenshots (0.5 wording: "máy tổng", "Dán link hoặc kéo folder vào đây"); kept for reference.
+// The current screens: npm run screenshots (scripts/screenshots-v06.mjs).
 // Mock-UI screenshots: node scripts/screenshots.mjs  (starts its own Vite dev server in mock mode)
 import { createServer } from "vite";
 import { chromium } from "playwright";

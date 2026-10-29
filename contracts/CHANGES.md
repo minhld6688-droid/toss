@@ -137,3 +137,13 @@ Why: the real-network e2e (Windows host, macOS client) never connected: the clie
 - The core event `update_requested {device}` (ctl `RequestUpdate` from an admin device) is consumed by the shell (not forwarded to the UI): notification "Cập nhật theo yêu cầu từ <device>", check, install after running transfers finish (≤ 10 min).
 - Before installing, the shell stops the node (`Node::shutdown`: transfers.json frozen as running, so client transfers resume after the restart).
 - `remote_update` reads `remote_status().version` first: < 0.5.1 → "Máy tổng đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này".
+
+## 2026-10-29 coordinator — v0.6 "máy nào cũng như nhau" (UI + shell, no wire / core API change) — APPROVED (owner request 29/10)
+Owner: no more "máy tổng / editor" roles; any machine makes a link or drops files on a contact, Blip-style; simpler settings, explanations inside the app, a visible update check.
+- UI wording: only *Gửi* / *Nhận* / *Gửi lại*. No "Chế độ máy tổng" switch: serving turns on by itself when a link is made (unchanged `share_folder`) or a fixed folder is added (Settings → Nâng cao → Folder cố định). Admin ticket = "Link điều khiển", remote host = "Điều khiển máy khác". Kết nối, Folder cố định, Link điều khiển, Điều khiển máy khác live under one collapsed "Nâng cao".
+- New UI sheet "Gửi tới ai?" (`SendPicker`): contacts (click or drop on a row) + "Tạo link". Opened by a drop on the window outside a contact row (was "Tạo link chia sẻ folder này?"), the right-click entry, the menu bar / Dock icon and tray "Gửi folder…".
+- Right-click label "Tạo link Toss" → "Gửi bằng Toss" (same `--share` flag; the shell still emits `share {path}`, the UI now opens "Gửi tới ai?"). macOS: the old `Tạo link Toss.workflow` is removed when the new Quick Action is installed.
+- Shell events (ipc-extra.ts): `send {paths}` (files dropped on the menu bar / Dock icon), `send:pick {}` (tray "Gửi folder…"), `tray:drag {}` (macOS: a drag entered the menu bar icon; the window pops up under it), `update:check {}` (tray "Kiểm tra cập nhật"). Tray menu: Mở Toss · Gửi folder… · Đang chuyển · Kiểm tra cập nhật · Thoát ("Trạng thái" removed).
+- macOS menu bar drop: `src-tauri/src/traydrop.rs` adds a transparent `NSView` (registered for file URLs) inside tray-icon's `TaoTrayTarget`; clicks are forwarded to its superview. Windows' notification area cannot accept drops (OS limit): right-click "Gửi bằng Toss" + window drop cover it.
+- macOS Dock drop: `CFBundleDocumentTypes` (public.folder, public.data, rank None) + `RunEvent::Opened` → `send`.
+- `auto_update` untouched now defaults to on for every machine (was: on only with host mode).

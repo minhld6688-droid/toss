@@ -36,9 +36,9 @@ export function FirewallAllow({ onDone, compact = false }: { onDone?: () => void
 }
 
 export const FIREWALL_WHY =
-  "Firewall của máy đang chặn các kết nối UDP vào Toss, nên editor ở xa chỉ nối được qua relay (chậm). Bấm nút rồi đồng ý một lần ở hộp thoại quyền quản trị.";
+  "Firewall của máy đang chặn các kết nối UDP vào Toss, nên máy ở xa chỉ nối được qua relay (chậm). Bấm nút rồi đồng ý một lần ở hộp thoại quyền quản trị.";
 
-/** Offered once when host mode is switched on and the firewall would block editors. */
+/** Offered once when serving starts and the firewall would block other machines. */
 export function FirewallSheet({ onClose }: { onClose: () => void }) {
   return (
     <Sheet onClose={onClose} title="Cho phép Toss qua firewall">

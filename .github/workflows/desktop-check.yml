@@ -1,0 +1,40 @@
+name: desktop-check
+
+# Compiles the desktop shell on macOS and Windows (clippy, warnings are errors), so code behind
+# cfg(target_os = "macos") / cfg(windows) — menu bar drag & drop, Dock drop, registry menu — is
+# checked before a release. Runs on every branch push that touches the shell.
+on:
+  workflow_dispatch:
+  push:
+    paths: ["apps/desktop/src-tauri/**", ".github/workflows/desktop-check.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build desktop UI (frontendDist must exist)
+        working-directory: apps/desktop
+        run: npm ci && npm run build
+      - name: Clippy toss-desktop
+        run: cargo clippy -p toss-desktop --all-targets -- -D warnings
+      - name: Unit tests toss-desktop
+        run: cargo test -p toss-desktop

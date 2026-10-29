@@ -53,7 +53,7 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
 
   async function create() {
     if (!job.trim()) { toast("Nhập tên job", "error"); return; }
-    if (!get && !put) { toast("Chọn Nhận và/hoặc Trả", "error"); return; }
+    if (!get && !put) { toast("Chọn Nhận và/hoặc Gửi lại", "error"); return; }
     setBusy(true);
     try {
       const info = await backend.create({ job: job.trim(), root, path, ret: ret.trim(), get, put, days });
@@ -67,7 +67,7 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
   }
 
   if (backend.roots.length === 0) {
-    return <div className="text-sm text-mute">Chưa có thư mục gốc nào. Thêm ít nhất một thư mục gốc trong cấu hình máy tổng.</div>;
+    return <div className="text-sm text-mute">Chưa có folder cố định nào. Thêm ở mục “Folder cố định”.</div>;
   }
 
   const crumbs = path.split("/").filter(Boolean);
@@ -126,14 +126,14 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
       )}
 
       <div className="flex items-center gap-4">
-        <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={get} onChange={(e) => setGet(e.target.checked)} />Nhận (máy tổng → máy khách)</label>
+        <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={get} onChange={(e) => setGet(e.target.checked)} />Cho người có link tải về</label>
       </div>
       <div className="flex items-center gap-4">
-        <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={put} onChange={(e) => setPut(e.target.checked)} />Trả (máy khách → máy tổng)</label>
+        <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={put} onChange={(e) => setPut(e.target.checked)} />Cho gửi lại (họ thả file vào → về máy này)</label>
       </div>
       {put && (
         <div>
-          <label className="label">Thư mục trả về (trong thư mục trả, để trống = tên job)</label>
+          <label className="label">Folder con nhận file gửi lại (để trống = tên job)</label>
           <input className="input mono" value={ret} placeholder={job || "tên job"} onChange={(e) => setRet(e.target.value.replace(/\\/g, "/"))} />
         </div>
       )}
@@ -149,7 +149,7 @@ export function LinkMaker({ backend, onCreated }: { backend: LinkBackend; onCrea
         <Icon name="link" weight="bold" />{busy ? "Đang tạo…" : "Tạo link"}<Nest />
       </button>
 
-      {result && <QrLink info={result} caption={`Link cho “${result.job}” — gửi cho editor hoặc quét QR`} />}
+      {result && <QrLink info={result} caption={`Link cho “${result.job}” — gửi cho người nhận hoặc cho họ quét QR`} />}
     </div>
   );
 }

@@ -67,12 +67,12 @@ function Item({ t, i }: { t: TransferState; i: number }) {
           <div className="text-xs text-mute truncate">
             {viaContact
               ? `${incoming ? "Nhận từ" : "Gửi tới"} ${peerName}`
-              : isHostSide ? `${t.op === "get" ? "Gửi cho" : "Nhận từ"} ${t.peer}` : t.op === "get" ? `Nhận từ ${t.peer}` : `Trả cho ${t.peer}`}
+              : isHostSide ? `${t.op === "get" ? "Gửi cho" : "Nhận từ"} ${t.peer} (qua link)` : t.op === "get" ? `Nhận từ ${t.peer}` : `Gửi lại cho ${t.peer}`}
           </div>
         </div>
         <div className="flex flex-col items-end gap-0.5 shrink-0">
           <div className="flex items-center gap-1">
-            {isHostSide && !viaContact && <Badge tone="warn">Máy tổng</Badge>}
+            {isHostSide && !viaContact && <Badge tone="warn">Link</Badge>}
             {pl && <Badge tone={t.path === "direct" ? "ok" : "mute"}>{pl}</Badge>}
             {pl && t.rtt_ms != null && <span className="mono text-[11px] text-mute" title="Độ trễ (RTT) của đường đang dùng">{t.rtt_ms} ms</span>}
           </div>

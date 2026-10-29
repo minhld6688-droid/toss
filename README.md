@@ -1,14 +1,14 @@
 # Toss
 
-Blip-style peer-to-peer file transfer for a photo studio. A **host** machine at the studio keeps the
-files; remote **editors** receive a job folder by clicking a link or scanning a QR code, and send
-finished work back by drag and drop. No server in the middle: a signed link carries the grant and
+Blip-style peer-to-peer file transfer. Every machine is the same (v0.6): drop a folder on a name in
+the contact book (or on the Toss menu bar icon on macOS) to send it, or make a link anyone can open to
+receive it — and send back into, if allowed. No server in the middle: a signed link carries the grant and
 [iroh](https://iroh.computer) handles connection, NAT traversal and relay fallback.
 
 - Tauri 2 desktop app (Mac + Windows), Rust core, React UI
 - Short link `https://toss-link.vercel.app/<code>` (or the long `https://<page>/#<ticket>`) opens the app via `toss://t/<ticket>`
 - Resumable, hash-verified transfers; host never overwrites finished files
-- Unattended host mode: starts hidden at logon, survives Windows Update restarts
+- Unattended machines: start hidden at logon, survive Windows Update restarts, can be driven remotely (control link)
 
 ## Layout
 

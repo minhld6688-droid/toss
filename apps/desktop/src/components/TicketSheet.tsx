@@ -37,26 +37,26 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
   }
 
   const doGet = (e?: { currentTarget: Element }) => run(() => api.start_get({ ticket: info.ticket }), "Đang nhận file…", e?.currentTarget);
-  const doPut = (paths: string[], from?: Element | null) => run(() => api.start_put({ ticket: info.ticket, paths }), "Đang trả file…", from);
+  const doPut = (paths: string[], from?: Element | null) => run(() => api.start_put({ ticket: info.ticket, paths }), "Đang gửi lại file…", from);
   async function pick() {
-    const p = await api.pick_folder({ title: "Chọn folder để trả" });
+    const p = await api.pick_folder({ title: "Chọn folder để gửi lại" });
     if (p) await doPut([p]);
   }
 
   if (info.admin) {
     return (
-      <Sheet onClose={close} title="Link admin">
-        <div className="flex items-center gap-2.5 mb-1"><span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="shield" className="w-5 h-5" /></span><div className="title text-[22px]">Link <em>admin</em></div></div>
+      <Sheet onClose={close} title="Link điều khiển">
+        <div className="flex items-center gap-2.5 mb-1"><span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="shield" className="w-5 h-5" /></span><div className="title text-[22px]">Link <em>điều khiển</em></div></div>
         <p className="text-sm text-mute mb-3">
-          Link này cho phép máy này xem folder và tạo link nhận/trả file trên máy tổng <span className="mono">{shortId(info.host, 8)}</span>. Chỉ dùng trên máy tin cậy.
+          Link này cho máy bạn đang dùng điều khiển máy <span className="mono">{shortId(info.host, 8)}</span> từ xa: xem folder cố định, tạo link, cập nhật máy đó. Chỉ dùng trên máy bạn tin.
         </p>
         <button
           className="btn btn-primary btn-lg w-full" disabled={busy || exp.expired}
           onClick={async () => {
-            try { await api.set_admin_ticket({ ticket: info.ticket }); close(); setScreen("settings"); toast("Đã kết nối máy tổng từ xa"); }
+            try { await api.set_admin_ticket({ ticket: info.ticket }); close(); setScreen("settings"); toast("Đã kết nối — xem trong Cài đặt → Nâng cao"); }
             catch (e) { toast(errorMessage(e), "error"); }
           }}
-        >Dùng làm máy tổng từ xa<Nest /></button>
+        >Điều khiển máy đó từ đây<Nest /></button>
         <button className="btn btn-ghost w-full mt-2" onClick={close}>Đóng</button>
       </Sheet>
     );
@@ -67,16 +67,16 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
       <div className="flex items-start justify-between gap-2 mb-1">
         <div className="min-w-0">
           <div className="title text-[26px] break-words">{info.job}</div>
-          <div className="text-xs text-mute">Máy tổng <span className="mono">{shortId(info.host, 8)}</span></div>
+          <div className="text-xs text-mute">Từ máy <span className="mono">{shortId(info.host, 8)}</span></div>
         </div>
         <div className="flex gap-1 shrink-0">
           {info.get && <Badge tone="accent">Nhận</Badge>}
-          {info.put && <Badge tone="ok">Trả</Badge>}
+          {info.put && <Badge tone="ok">Gửi lại</Badge>}
         </div>
       </div>
       <div className="text-xs mb-3"><span className={exp.expired ? "text-bad" : "text-mute"}>{exp.text}</span></div>
 
-      {exp.expired && <div className="rounded-[12px] bg-bad/10 text-bad text-sm px-3 py-2 mb-3">Link đã hết hạn. Nhờ máy tổng tạo link mới.</div>}
+      {exp.expired && <div className="rounded-[12px] bg-bad/10 text-bad text-sm px-3 py-2 mb-3">Link đã hết hạn. Nhờ người gửi tạo link mới.</div>}
 
       {note && (
         <div className={`rounded-[12px] text-sm px-3 py-2 mb-3 ${note.kind === "error" ? "bg-bad/10 text-bad" : "bg-ok/10 text-ok"}`}>{note.text}</div>
@@ -103,13 +103,13 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
           } : undefined}
         >
           <span className={`mx-auto mb-2 grid place-items-center w-10 h-10 rounded-full bg-ok/15 text-ok transition-transform duration-500 ${dropHover ? "drip up scale-110" : ""}`} style={{ transitionTimingFunction: "var(--spring)" }}><Icon name="up" className="w-5 h-5" weight="bold" /></span>
-          <div className="text-base font-medium">Kéo folder vào để trả</div>
-          <div className="text-xs text-mute mb-2">Thả folder hoặc file vào cửa sổ này</div>
+          <div className="text-base font-medium">Kéo folder vào để gửi lại</div>
+          <div className="text-xs text-mute mb-2">Người tạo link cho phép bạn gửi file ngược về máy họ — thả vào cửa sổ này</div>
           <button className="btn" disabled={busy} onClick={pick}><Icon name="folder" />Chọn folder…</button>
         </div>
       )}
 
-      {!info.get && !info.put && <div className="text-sm text-mute">Link này không có quyền nhận hay trả.</div>}
+      {!info.get && !info.put && <div className="text-sm text-mute">Link này không cho nhận hay gửi lại.</div>}
       <button className="btn btn-ghost w-full mt-2" onClick={close}>Đóng</button>
     </Sheet>
   );

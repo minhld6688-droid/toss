@@ -37,14 +37,14 @@ export function JobList({ load, revoke, reloadKey }: { load: () => Promise<JobRe
                 </div>
                 <div className="flex gap-1 shrink-0">
                   {j.get && <Badge tone="accent">Nhận</Badge>}
-                  {j.put && <Badge tone="ok">Trả</Badge>}
+                  {j.put && <Badge tone="ok">Gửi lại</Badge>}
                 </div>
               </div>
               <div className="flex items-center justify-between mt-1 gap-2">
                 <div className="text-xs min-w-0 truncate">
                   {j.revoked ? <span className="text-bad">Đã thu hồi</span> : <span className={exp.expired ? "text-bad" : "text-mute"}>{exp.text}</span>}
                   {j.last && (
-                    <span className="text-mute"> · {j.last.device} {j.last.op === "get" ? "nhận" : "trả"} {fmtBytes(j.last.bytes)} {fmtDate(j.last.at)}{j.last.ok ? "" : " (lỗi)"}</span>
+                    <span className="text-mute"> · {j.last.device} {j.last.op === "get" ? "nhận" : "gửi lại"} {fmtBytes(j.last.bytes)} {fmtDate(j.last.at)}{j.last.ok ? "" : " (lỗi)"}</span>
                   )}
                 </div>
                 <div className="flex gap-1 shrink-0">

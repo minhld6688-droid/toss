@@ -1,5 +1,5 @@
-//! macOS Finder Quick Action "Tạo link Toss": an Automator "Run Shell Script"
-//! service bundle at `~/Library/Services/Tạo link Toss.workflow` that runs
+//! macOS Finder Quick Action "Gửi bằng Toss": an Automator "Run Shell Script"
+//! service bundle at `~/Library/Services/Gửi bằng Toss.workflow` that runs
 //! `open -n -a Toss --args --share "<folder>"` for every selected folder.
 //!
 //! `-n` starts a short-lived second process even when Toss is already running
@@ -19,7 +19,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::ctxmenu::{LABEL, SHARE_FLAG};
+use crate::ctxmenu::{LABEL, LEGACY_LABELS, SHARE_FLAG};
 
 /// Shell script run by the Quick Action (input passed "as arguments").
 pub fn shell_command() -> String {
@@ -337,13 +337,14 @@ fn files() -> [(&'static str, String); 2] {
 /// Writes the bundle into `services` (atomically: built in a temp folder next to
 /// it, then renamed over the old one). Returns false if it was already up to date.
 pub fn install(services: &Path) -> Result<bool> {
+    let legacy = remove_legacy(services);
     let target = services.join(bundle_name());
     let files = files();
     let current = files
         .iter()
         .all(|(rel, body)| fs::read(target.join(rel)).ok().as_deref() == Some(body.as_bytes()));
     if current {
-        return Ok(false);
+        return Ok(legacy);
     }
     fs::create_dir_all(services)
         .with_context(|| format!("không tạo được {}", services.display()))?;
@@ -370,11 +371,24 @@ pub fn install(services: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Deletes the bundle. Returns false if there was none.
+/// Deletes bundles left by older versions under their old names. True if any was removed.
+fn remove_legacy(services: &Path) -> bool {
+    let mut any = false;
+    for old in LEGACY_LABELS {
+        let p = services.join(format!("{old}.workflow"));
+        if p.exists() && fs::remove_dir_all(&p).is_ok() {
+            any = true;
+        }
+    }
+    any
+}
+
+/// Deletes the bundle (and old-named ones). Returns false if there was none.
 pub fn remove(services: &Path) -> Result<bool> {
+    let legacy = remove_legacy(services);
     let target = services.join(bundle_name());
     if !target.exists() {
-        return Ok(false);
+        return Ok(legacy);
     }
     fs::remove_dir_all(&target).with_context(|| format!("không xoá được {}", target.display()))?;
     Ok(true)
@@ -404,7 +418,7 @@ mod tests {
         let svc = svc.as_dictionary().unwrap();
         assert_eq!(
             svc["NSMenuItem"].as_dictionary().unwrap()["default"].as_string(),
-            Some("Tạo link Toss")
+            Some("Gửi bằng Toss")
         );
         assert_eq!(svc["NSMessage"].as_string(), Some("runWorkflowAsService"));
         assert_eq!(
@@ -454,8 +468,12 @@ mod tests {
     fn install_is_atomic_idempotent_and_removable() {
         let dir = std::env::temp_dir().join(format!("toss-services-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let bundle = dir.join("Tạo link Toss.workflow");
+        let bundle = dir.join("Gửi bằng Toss.workflow");
+        // A Quick Action left by 0.5 under its old name is cleaned up.
+        let old = dir.join("Tạo link Toss.workflow");
+        fs::create_dir_all(old.join("Contents")).unwrap();
         assert!(install(&dir).unwrap(), "first install writes");
+        assert!(!old.exists(), "old-named bundle removed");
         assert!(bundle.join("Contents/Info.plist").is_file());
         assert!(bundle.join("Contents/document.wflow").is_file());
         assert!(!install(&dir).unwrap(), "second install is a no-op");

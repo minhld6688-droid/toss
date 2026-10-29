@@ -13,7 +13,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
-use tauri_plugin_notification::NotificationExt as _;
 
 use crate::{config, core::Core, ctxmenu::SHARE_FLAG};
 
@@ -279,22 +278,30 @@ pub fn handle_args(app: &AppHandle, args: &[String], cwd: &Path) -> bool {
 
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Mở Toss", true, None::<&str>)?;
-    let status = MenuItem::with_id(app, "status", "Trạng thái", true, None::<&str>)?;
+    let send = MenuItem::with_id(app, "send", "Gửi folder…", true, None::<&str>)?;
+    let transfers = MenuItem::with_id(app, "transfers", "Đang chuyển", true, None::<&str>)?;
+    let update = MenuItem::with_id(app, "update", "Kiểm tra cập nhật", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Thoát", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &status, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &send, &transfers, &update, &sep, &quit])?;
 
-    let mut b = TrayIconBuilder::with_id("toss")
-        .tooltip("Toss")
+    let mut b = TrayIconBuilder::with_id(TRAY_ID)
+        .tooltip("Toss — kéo folder vào đây để gửi")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main(app),
-            "status" => {
+            "send" => {
                 show_main(app);
-                let _ = app.emit("navigate", serde_json::json!({ "screen": "transfers" }));
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move { notify_host_status(&app).await });
+                deliver(app, "send:pick", json!({}));
+            }
+            "transfers" => {
+                show_main(app);
+                let _ = app.emit("navigate", json!({ "screen": "transfers" }));
+            }
+            "update" => {
+                show_main(app);
+                deliver(app, "update:check", json!({}));
             }
             "quit" => {
                 let app = app.clone();
@@ -319,28 +326,86 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     if let Some(icon) = app.default_window_icon() {
         b = b.icon(icon.clone());
     }
-    b.build(app)?;
+    let tray = b.build(app)?;
+
+    // v0.6 (macOS): files dragged onto the menu bar icon, Blip-style.
+    #[cfg(target_os = "macos")]
+    {
+        let h = app.clone();
+        let res = tray.with_inner_tray_icon(move |inner| {
+            let Some(item) = inner.ns_status_item() else {
+                return Err("no status item");
+            };
+            crate::traydrop::attach(&item, Box::new(move |ev| on_tray_drag(&h, ev)))
+        });
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("menu bar drag & drop unavailable: {e}"),
+            Err(e) => tracing::warn!("menu bar drag & drop unavailable: {e}"),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = tray;
     Ok(())
 }
 
-/// Tray "Trạng thái" on a host machine: a native notification with the host summary.
-async fn notify_host_status(app: &AppHandle) {
-    let core = app.state::<Arc<Core>>().inner().clone();
-    if !core.host_mode() {
+/// Id of the one tray / menu bar icon.
+pub const TRAY_ID: &str = "toss";
+
+/// Files to send (dropped on the menu bar / Dock icon, or the tray "Gửi folder…"): the UI asks
+/// "Gửi tới ai?" (a contact, or a link).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn deliver_send(app: &AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
         return;
     }
-    let body = match core.host_status().await {
-        Ok(v) if !v.is_null() => format!(
-            "Máy tổng “{}” · {} đang chạy · {} chờ · {} thư mục gốc",
-            v["device"].as_str().unwrap_or(""),
-            v["active"],
-            v["queued"],
-            v["roots"].as_array().map(|r| r.len()).unwrap_or(0)
-        ),
-        Ok(_) => "Chế độ máy tổng đang tắt".to_string(),
-        Err(e) => format!("Không lấy được trạng thái: {e:#}"),
+    show_main(app);
+    deliver(app, "send", json!({ "paths": paths }));
+}
+
+/// Called on the main thread by the menu bar drop view; the work happens elsewhere so the
+/// drag is answered at once.
+#[cfg(target_os = "macos")]
+fn on_tray_drag(app: &AppHandle, ev: crate::traydrop::TrayDrag) {
+    let app = app.clone();
+    std::thread::spawn(move || match ev {
+        crate::traydrop::TrayDrag::Enter => {
+            pop_under_tray(&app);
+            let _ = app.emit("tray:drag", json!({}));
+        }
+        crate::traydrop::TrayDrag::Drop(paths) => {
+            let mut files = Vec::new();
+            for p in paths {
+                match ticket_from_file(&p) {
+                    Some(t) => deliver_link(&app, t),
+                    None => files.push(p),
+                }
+            }
+            deliver_send(&app, files);
+        }
+    });
+}
+
+/// Shows the window right under the menu bar icon (when it was hidden), like a popover.
+#[cfg(target_os = "macos")]
+fn pop_under_tray(app: &AppHandle) {
+    let Some(w) = app.get_webview_window(config::MAIN_WINDOW) else {
+        return;
     };
-    let _ = app.notification().builder().title("Toss").body(body).show();
+    let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+    if !visible {
+        if let Some(Ok(Some(r))) = app.tray_by_id(TRAY_ID).map(|t| t.rect()) {
+            let scale = w.scale_factor().unwrap_or(1.0);
+            let pos = r.position.to_physical::<f64>(scale);
+            let size = r.size.to_physical::<f64>(scale);
+            if let Ok(ws) = w.outer_size() {
+                let x = pos.x + size.width / 2.0 - f64::from(ws.width) / 2.0;
+                let y = pos.y + size.height + 6.0 * scale;
+                let _ = w.set_position(tauri::PhysicalPosition::new(x.max(0.0), y.max(0.0)));
+            }
+        }
+    }
+    show_main(app);
 }
 
 #[cfg(test)]

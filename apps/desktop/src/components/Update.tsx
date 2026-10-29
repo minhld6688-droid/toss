@@ -1,4 +1,4 @@
-// v0.5.1 in-app updates: Settings → Cập nhật, the Home banner, and "Cập nhật máy tổng" for the remote host.
+// v0.5.1 in-app updates: Settings → Cập nhật, the Home banner, and "Cập nhật máy đó" for the remote host.
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import type { HostStatus } from "../lib/ipc-types";
@@ -101,7 +101,7 @@ export function UpdateSection() {
         {phase && !avail && <InstallProgress />}
         {error && <div className="text-sm text-bad">{error}</div>}
 
-        <Row title="Tự động cập nhật" hint="Tự cài bản mới khi không có file đang chuyển">
+        <Row title="Tự động cập nhật" hint="Tự cài bản mới lúc không có file đang chuyển — nên bật cho máy không có người ngồi">
           <Toggle on={app.auto_update} label="Tự động cập nhật" onChange={async (on) => {
             try { await api.set_auto_update({ on }); patch({ auto_update: on }); } catch (e) { toast(errorMessage(e), "error"); }
           }} />
@@ -159,7 +159,7 @@ function BannerPhase() {
   return <span className="text-mute">Đang tải bản mới{total ? ` · ${Math.round((downloaded / total) * 100)}%` : "…"}</span>;
 }
 
-/** Remote host card: ask the máy tổng to update itself, then watch its version change. */
+/** Remote machine card: ask the controlled machine to update itself, then watch its version change. */
 export function RemoteUpdate({ status, onStatus }: { status: HostStatus; onStatus: (s: HostStatus) => void }) {
   const toast = useStore((s) => s.toast);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "updated" | "timeout">("idle");
@@ -187,7 +187,7 @@ export function RemoteUpdate({ status, onStatus }: { status: HostStatus; onStatu
         if (s.version !== before) {
           window.clearInterval(timer.current!); timer.current = null;
           setNewVersion(s.version); setState("updated"); onStatus(s);
-          toast(`Máy tổng đã lên bản ${s.version}`);
+          toast(`Máy kia đã lên bản ${s.version}`);
         }
       } catch { /* restarting: offline for a moment */ }
     }, 10_000);
@@ -197,11 +197,11 @@ export function RemoteUpdate({ status, onStatus }: { status: HostStatus; onStatu
     <div className="space-y-1.5">
       <button className="btn w-full" disabled={state === "sending" || state === "sent"} onClick={() => void send()}>
         <Spinner on={state === "sending" || state === "sent"} />
-        {state === "sending" ? "Đang gửi lệnh…" : "Cập nhật máy tổng"}
+        {state === "sending" ? "Đang gửi lệnh…" : "Cập nhật máy đó"}
       </button>
-      {state === "sent" && <div className="text-xs text-mute flex gap-1.5" aria-live="polite"><Icon name="clock" className="w-3.5 h-3.5 mt-px shrink-0" /><span>Đã gửi lệnh — máy tổng sẽ tự cập nhật và khởi động lại</span></div>}
-      {state === "updated" && <div className="text-xs text-ok flex gap-1.5"><Icon name="check" className="w-3.5 h-3.5 mt-px shrink-0" weight="bold" /><span>Máy tổng đã lên bản {newVersion}</span></div>}
-      {state === "timeout" && <div className="text-xs text-mute">Chưa thấy bản mới sau 5 phút — máy tổng có thể đang chờ file chuyển xong. Bấm làm mới để xem lại.</div>}
+      {state === "sent" && <div className="text-xs text-mute flex gap-1.5" aria-live="polite"><Icon name="clock" className="w-3.5 h-3.5 mt-px shrink-0" /><span>Đã gửi lệnh — máy đó sẽ tự cập nhật và khởi động lại</span></div>}
+      {state === "updated" && <div className="text-xs text-ok flex gap-1.5"><Icon name="check" className="w-3.5 h-3.5 mt-px shrink-0" weight="bold" /><span>Máy đó đã lên bản {newVersion}</span></div>}
+      {state === "timeout" && <div className="text-xs text-mute">Chưa thấy bản mới sau 5 phút — máy đó có thể đang chờ file chuyển xong. Bấm làm mới để xem lại.</div>}
       {err && <div className="text-xs text-bad">{err}</div>}
     </div>
   );

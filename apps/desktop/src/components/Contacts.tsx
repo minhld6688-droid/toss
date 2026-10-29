@@ -101,7 +101,7 @@ export function ContactsSection() {
   return (
     <section className="mb-4 rise" style={{ "--i": 0 } as React.CSSProperties}>
       <div className="flex items-center justify-between mb-2">
-        <h2 className="h-section !mb-0">Danh bạ máy</h2>
+        <h2 className="h-section !mb-0">Danh bạ</h2>
         <button className="btn !h-8 !px-3" onClick={() => openAdd("invite")}><Icon name="plus" weight="bold" />Thêm máy</button>
       </div>
 
@@ -298,7 +298,7 @@ function InviteTab() {
 
   return (
     <div className="space-y-3">
-      {!info && <p className="text-sm text-mute">Tạo một lời mời rồi gửi cho máy kia (editor, máy tổng, máy ở nhà…). Mỗi lời mời ghép được nhiều máy cho tới khi hết hạn hoặc bị huỷ.</p>}
+      {!info && <p className="text-sm text-mute">Tạo một lời mời rồi gửi cho máy kia (máy ở studio, máy ở nhà, máy của đồng nghiệp…). Mỗi lời mời ghép được nhiều máy cho tới khi hết hạn hoặc bị huỷ.</p>}
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm text-mute">Hiệu lực</span>
         <Segmented label="Hiệu lực lời mời" value={days} onChange={setDays} options={[{ value: 1, label: "1 ngày" }, { value: 7, label: "7 ngày" }, { value: 30, label: "30 ngày" }]} />

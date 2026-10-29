@@ -174,7 +174,7 @@ async fn diagnostics_json_shape() {
     );
     assert!(!rep.ok);
     assert!(
-        rep.reason.starts_with("Không nối được máy tổng"),
+        rep.reason.starts_with("Không nối được máy kia"),
         "{}",
         rep.reason
     );

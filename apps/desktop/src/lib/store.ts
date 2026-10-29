@@ -30,6 +30,8 @@ interface Store {
   share: { path: string; nonce: number } | null;
   /** folder dropped on the window, waiting for "Tạo link chia sẻ folder này?" */
   shareAsk: string | null;
+  /** v0.6 "Gửi tới ai?": files/folders waiting for a recipient (a contact, or a link) */
+  send: { paths: string[]; nonce: number } | null;
   /** bumped after every share / remove so the settings list reloads */
   sharesRev: number;
   recents: Recent[];
@@ -86,6 +88,11 @@ interface Store {
   openShare(path: string): void;
   closeShare(): void;
   askShare(path: string | null): void;
+  /** v0.6: open "Gửi tới ai?" for these paths (window drop, menu bar / Dock icon, right-click, tray) */
+  openSend(paths: string[]): void;
+  closeSend(): void;
+  /** v0.6: pick a folder, then "Gửi tới ai?" */
+  pickAndSend(): Promise<void>;
   bumpShares(): void;
   toast(text: string, kind?: "info" | "error"): void;
   refreshTransfers(): Promise<void>;
@@ -132,6 +139,7 @@ export const useStore = create<Store>((set, get) => ({
   sheetNote: null,
   share: null,
   shareAsk: null,
+  send: null,
   sharesRev: 0,
   recents: loadRecents(),
   toasts: [],
@@ -186,7 +194,7 @@ export const useStore = create<Store>((set, get) => ({
   openContact: (id) => set({ contactSheet: id }),
   closeContact: () => set({ contactSheet: null }),
   setHoverContact: (hoverContact) => set((s) => (s.hoverContact === hoverContact ? s : { hoverContact })),
-  receiveInvite: (invite) => set({ addDevice: { tab: "enter", text: invite }, contactSheet: null, sheet: null, sheetNote: null, share: null, shareAsk: null, screen: "home" }),
+  receiveInvite: (invite) => set({ addDevice: { tab: "enter", text: invite }, contactSheet: null, sheet: null, sheetNote: null, share: null, shareAsk: null, send: null, screen: "home" }),
 
   async sendToContact(id, paths, origin) {
     const c = get().contacts.find((x) => x.id === id);
@@ -194,7 +202,7 @@ export const useStore = create<Store>((set, get) => ({
       await api.send_to_contact({ id, paths });
       await get().refreshTransfers();
       get().fly(origin);
-      set({ screen: "transfers", contactSheet: null });
+      set({ screen: "transfers", contactSheet: null, send: null });
       get().toast(c && !c.online ? `${c.name} đang offline, sẽ gửi khi máy online` : `Đang gửi cho ${c?.name ?? "máy kia"}…`);
       return true;
     } catch (e) {
@@ -218,7 +226,7 @@ export const useStore = create<Store>((set, get) => ({
   async openTicket(text) {
     const info = await parseAndRemember(text);
     if (!info) return false;
-    set({ sheet: info, sheetNote: null, share: null, shareAsk: null, screen: "home" });
+    set({ sheet: info, sheetNote: null, share: null, shareAsk: null, send: null, screen: "home" });
     return true;
   },
 
@@ -227,29 +235,37 @@ export const useStore = create<Store>((set, get) => ({
     if (!info) return;
     const exp = info.exp && info.exp <= Date.now() / 1000;
     if (!get().app?.auto_receive || !info.get || info.admin || exp) {
-      set({ sheet: info, sheetNote: null, share: null, shareAsk: null, screen: "home" });
+      set({ sheet: info, sheetNote: null, share: null, shareAsk: null, send: null, screen: "home" });
       return;
     }
     try {
       await api.start_get({ ticket: info.ticket });
       await get().refreshTransfers();
       get().fly();
-      set({ sheet: null, sheetNote: null, share: null, shareAsk: null, screen: "transfers" });
+      set({ sheet: null, sheetNote: null, share: null, shareAsk: null, send: null, screen: "transfers" });
       get().toast(`Đang nhận ${info.job}…`);
     } catch (e) {
       const msg = errorMessage(e);
       if (EXISTS_RE.test(msg)) {
-        set({ share: null, shareAsk: null, sheet: info, sheetNote: { kind: "exists", text: "Job này đã nhận xong trước đó. Bấm Tải lại nếu muốn nhận lại." }, screen: "home" });
+        set({ share: null, shareAsk: null, send: null, sheet: info, sheetNote: { kind: "exists", text: "Job này đã nhận xong trước đó. Bấm Tải lại nếu muốn nhận lại." }, screen: "home" });
       } else {
         // unknown rejection: show the sheet so the user can retry by hand, and say why
-        set({ share: null, shareAsk: null, sheet: info, sheetNote: { kind: "error", text: msg }, screen: "home" });
+        set({ share: null, shareAsk: null, send: null, sheet: info, sheetNote: { kind: "error", text: msg }, screen: "home" });
       }
     }
   },
   closeSheet: () => set({ sheet: null, sheetNote: null }),
-  openShare: (path) => set({ share: { path, nonce: Date.now() }, shareAsk: null, sheet: null, sheetNote: null }),
+  openShare: (path) => set({ share: { path, nonce: Date.now() }, shareAsk: null, send: null, sheet: null, sheetNote: null }),
   closeShare: () => set({ share: null, screen: "home" }),
   askShare: (shareAsk) => set({ shareAsk }),
+  openSend: (paths) => set({ send: { paths, nonce: Date.now() }, shareAsk: null, share: null, sheet: null, sheetNote: null, contactSheet: null, addDevice: null, screen: "home" }),
+  closeSend: () => set({ send: null }),
+  async pickAndSend() {
+    try {
+      const p = await api.pick_folder({ title: "Chọn folder để gửi" });
+      if (p) get().openSend([p]);
+    } catch (e) { get().toast(errorMessage(e), "error"); }
+  },
   bumpShares: () => set((s) => ({ sharesRev: s.sharesRev + 1 })),
 
   toast(text, kind = "info") {
@@ -323,8 +339,8 @@ export const useStore = create<Store>((set, get) => ({
 }));
 
 export function retryText(code: string, secs: number): string {
-  if (code === "busy") return `Máy tổng đang bận, thử lại sau ${secs} giây`;
-  if (code === "host_offline") return `Máy tổng đang offline, thử lại sau ${secs} giây`;
+  if (code === "busy") return `Máy gửi đang bận, thử lại sau ${secs} giây`;
+  if (code === "host_offline") return `Máy gửi đang offline, thử lại sau ${secs} giây`;
   return `Lỗi, thử lại sau ${secs} giây`;
 }
 
@@ -333,8 +349,8 @@ export function errorText(code: string, msg: string): string {
     case "denied": return "Link không có quyền truy cập";
     case "expired": return "Link đã hết hạn";
     case "revoked": return "Link đã bị thu hồi";
-    case "host_offline": return "Máy tổng đang offline";
-    case "busy": return "Máy tổng đang bận";
+    case "host_offline": return "Máy gửi đang offline";
+    case "busy": return "Máy gửi đang bận";
     case "hash_mismatch": return "File bị lỗi khi truyền (sai mã kiểm tra)";
     case "io": return `Lỗi ghi/đọc file: ${msg}`;
     default: return msg || "Có lỗi xảy ra";

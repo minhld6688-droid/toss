@@ -15,7 +15,7 @@ export interface ExtraCommands {
 
 /** Extra events. */
 export type ExtraEvents = {
-  /** tray menu "Trạng thái" asks the UI to switch screen. */
+  /** tray menu "Đang chuyển" asks the UI to switch screen. */
   navigate: { screen: "home" | "transfers" | "settings" };
   /** OS drag is hovering over the window (true) or left it (false). */
   "drop:hover": { on: boolean; x?: number; y?: number };
@@ -25,4 +25,12 @@ export type ExtraEvents = {
   "drop": { paths: string[]; x?: number; y?: number };
   /** the shell could not start a right-click share (bad path, no access…): show `msg` as a toast. */
   "share:error": { msg: string };
+  /** v0.6: files dropped on the menu bar / Dock icon → "Gửi tới ai?" */
+  "send": { paths: string[] };
+  /** v0.6: tray "Gửi folder…" → pick a folder, then "Gửi tới ai?" */
+  "send:pick": Record<string, never>;
+  /** v0.6 (macOS): a drag entered the menu bar icon; the window popped up — show the contact book */
+  "tray:drag": Record<string, never>;
+  /** v0.6: tray "Kiểm tra cập nhật" */
+  "update:check": Record<string, never>;
 };
