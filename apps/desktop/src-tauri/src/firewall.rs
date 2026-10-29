@@ -32,6 +32,7 @@ const TTL: Duration = Duration::from_secs(30);
 /// A check that hangs must not hang the diagnostics panel.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Display name of the rule we add (and replace).
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 pub const RULE_NAME: &str = "Toss";
 
 static CACHE: Mutex<Option<(Instant, FirewallState)>> = Mutex::new(None);
@@ -89,6 +90,7 @@ fn add_rule_impl() -> Result<()> {
 
 /// Prints `ok` or `missing`. Reads `$env:TOSS_EXE`. One line (no here-strings, no quoting issues).
 /// Collects the filters first: an empty pipeline into `Get-NetFirewallRule` would list every rule.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 const WIN_CHECK_PS: &str = "$ErrorActionPreference='Stop'; \
 $exe=$env:TOSS_EXE; \
 $on=@(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'True' }); \
@@ -100,6 +102,7 @@ if (@($r | Where-Object { $_.Action -eq 'Block' }).Count -gt 0) { 'missing'; exi
 if (@($r | Where-Object { $_.Action -eq 'Allow' }).Count -gt 0) { 'ok'; exit 0 }; \
 'missing'";
 
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
@@ -107,6 +110,7 @@ fn ps_quote(s: &str) -> String {
 /// The elevated script: replaces every rule called "Toss", adds a UDP inbound allow for `exe`
 /// on all profiles, and leaves the error text in `log` when it fails (the elevated process has
 /// no console we can read).
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 fn win_add_script(exe: &str, log: &str) -> String {
     format!(
         "$ErrorActionPreference='Stop'; try {{ \
@@ -120,12 +124,14 @@ New-NetFirewallRule -DisplayName {name} -Direction Inbound -Action Allow -Protoc
 }
 
 /// UTF-16LE + base64, the form `powershell -EncodedCommand` takes.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 fn encoded_command(script: &str) -> String {
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     data_encoding::BASE64.encode(&bytes)
 }
 
 /// Runs elevated through `Start-Process -Verb RunAs`; exit 1223 = UAC refused.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 fn win_launcher_script(encoded: &str) -> String {
     format!(
         "try {{ $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
@@ -260,6 +266,7 @@ fn parse_app_blocked(out: &str) -> FirewallState {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 fn parse_win_check(out: &str) -> FirewallState {
     match out.trim().lines().last().map(str::trim) {
         Some("ok") => FirewallState::Ok,
