@@ -199,9 +199,11 @@ fn add_rule_impl() -> Result<()> {
 
 // ---- macOS -------------------------------------------------------------------------------------
 
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 const SOCKETFILTERFW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
 
 /// The `.app` bundle around `exe` (`…/Toss.app/Contents/MacOS/Toss` → `…/Toss.app`), else `exe`.
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 fn app_target(exe: &Path) -> PathBuf {
     exe.ancestors()
         .find(|p| p.extension().is_some_and(|e| e == "app"))
@@ -209,16 +211,19 @@ fn app_target(exe: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// AppleScript string literal body (`\` and `"` escaped).
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 fn osa_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// `do shell script … with administrator privileges` for `--add` + `--unblockapp`.
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 fn mac_admin_script(app: &str) -> String {
     let q = sh_quote(app);
     let cmd = format!("{SOCKETFILTERFW} --add {q} ; {SOCKETFILTERFW} --unblockapp {q}");
@@ -229,6 +234,7 @@ fn mac_admin_script(app: &str) -> String {
 }
 
 /// `--getglobalstate`: "Firewall is disabled. (State = 0)" → off.
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 fn parse_global_state(out: &str) -> Option<bool> {
     let o = out.to_lowercase();
     if o.contains("disabled") || o.contains("state = 0") {
@@ -241,6 +247,7 @@ fn parse_global_state(out: &str) -> Option<bool> {
 }
 
 /// `--getappblocked <app>`: blocked / permitted / not in the list.
+#[cfg_attr(windows, allow(dead_code))] // macOS helpers; unit-tested on every OS
 fn parse_app_blocked(out: &str) -> FirewallState {
     let o = out.to_lowercase();
     if o.contains("not blocked") || o.contains("permitted") || o.contains("allowed") {

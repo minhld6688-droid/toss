@@ -11,6 +11,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: never
+
 concurrency:
   group: desktop-check-${{ github.ref }}
   cancel-in-progress: true
@@ -51,7 +54,7 @@ jobs:
         run: |
           for f in clippy.txt test.txt; do
             [ -f "$f" ] || continue
-            body=$(grep -E "error|warning: unused|panicked|FAILED" "$f" | grep -v "^\s*Compiling" | head -40 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+            body=$(grep -E "^error|: error|^warning: unused|panicked|FAILED|^ *--> |^[0-9 ]+\|" "$f" | head -60 | perl -pe 's/%/%25/g; s/\r//g; s/\n/%0A/g')
             [ -n "$body" ] && echo "::error title=$f::$body"
           done
           exit 0
