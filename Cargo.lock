@@ -3905,11 +3905,18 @@ name = "toss-ls"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "futures-util",
+ "if-addrs",
  "localsend",
+ "pem",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
- "toss-core",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
