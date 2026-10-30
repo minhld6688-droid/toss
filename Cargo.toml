@@ -4,7 +4,7 @@ members = ["crates/toss-core", "crates/toss-cli", "crates/toss-ls", "apps/deskto
 exclude = ["third_party"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 license = "MIT"
 

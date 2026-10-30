@@ -115,6 +115,19 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+      # v0.8.1: the whole bundle must be signed (ad-hoc "-" via tauri.conf.json signingIdentity)
+      # so macOS ties Local Network permission to com.minhfatz.toss. A bundle with only the
+      # linker's signature ("Info.plist=not bound") never gets the permission the user grants.
+      - name: Verify macOS bundle signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=$(find . -type d -path '*/bundle/macos/Toss.app' -print0 | xargs -0 -r ls -td | head -n 1)
+          codesign -dv "$app" 2>&1 | tee /tmp/cs.txt
+          grep -q '^Identifier=com.minhfatz.toss$' /tmp/cs.txt || { echo "::error::Toss.app bundle is not signed as com.minhfatz.toss"; exit 1; }
+          if grep -q 'Info.plist=not bound' /tmp/cs.txt; then echo "::error::Info.plist not bound"; exit 1; fi
+
       # tauri-action names files like Toss_0.1.0_universal.dmg / Toss_0.1.0_x64-setup.exe.
       # The link page needs fixed names, so upload copies under the stable names.
       - name: Upload installer under stable asset name
