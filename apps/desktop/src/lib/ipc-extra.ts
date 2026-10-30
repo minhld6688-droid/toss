@@ -1,4 +1,4 @@
-// UI-only additions on top of the frozen contract (ipc-types.ts is a verbatim copy of contracts/ipc.ts).
+// UI-only additions on top of the frozen contract (the frozen contract itself lives in contracts/ipc.ts, imported as @contracts/ipc).
 // The Rust shell implements these too; they are additive and optional for any other shell.
 
 /** Extra commands: the UI calls `ui_ready` once its listeners are registered so
@@ -8,7 +8,7 @@ export interface ExtraCommands {
   /** True when an admin ticket (remote host) is stored in settings. Cheap: never dials the host. */
   has_admin_ticket(): Promise<boolean>;
   /** v0.5: decode an invite (tossinv1…, toss://i/…, web link) without pairing, for the "Kết nối với <name>?" confirm. */
-  parse_invite(args: { text: string }): Promise<import("./ipc-types").InviteInfo>;
+  parse_invite(args: { text: string }): Promise<import("@contracts/ipc").InviteInfo>;
   /** v0.5.2: short link (https://host/<9 chars>) → the toss1… / tossinv1… it stands for; other text unchanged. */
   expand_link(args: { text: string }): Promise<string>;
 }

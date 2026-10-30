@@ -1,6 +1,6 @@
 // v0.5.1 in-app updates: UI state shared by Settings → Cập nhật and the Home banner.
 import { create } from "zustand";
-import type { UpdateInfo, UpdatePhase } from "./ipc-types";
+import type { UpdateInfo, UpdatePhase } from "@contracts/ipc";
 import { api, errorMessage, on } from "./ipc";
 
 export type CheckState = "idle" | "checking" | "done" | "error";

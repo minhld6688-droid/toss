@@ -1,13 +1,13 @@
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useReducedMotion } from "motion/react";
-import type { Contact, IncomingPush, InviteInfo } from "../lib/ipc-types";
-import { api, errorMessage, isMock } from "../lib/ipc";
-import { fmtAgo, fmtBytes, fmtDate, fmtExpiry, initials, PLATFORM_LABEL, shortId } from "../lib/format";
+import type { Contact, InviteInfo } from "@contracts/ipc";
+import { api, errorMessage } from "../lib/ipc";
+import { fmtAgo, fmtDate, fmtExpiry, initials, PLATFORM_LABEL, shortId } from "../lib/format";
 import { extractInvite, extractShort } from "../lib/ticket";
 import { useStore } from "../lib/store";
 import { Badge, Dot, EASE, Icon, Nest, Row, Segmented, Sheet, Toggle, motion } from "./ui";
-import { centerOf } from "./Comet";
+import { SendActions, useRowDrop } from "./Nearby";
 
 const platformIcon = (p: string) => (p === "macos" ? "laptop" : "desktop");
 
@@ -40,28 +40,20 @@ function presenceLine(c: Contact) {
 // ---------------------------------------------------------------------------------------------
 function ContactRow({ c, i }: { c: Contact; i: number }) {
   const dropHover = useStore((s) => s.dropHover);
-  const hovered = useStore((s) => s.hoverContact === c.id);
-  const waiting = useStore((s) => s.pushes.some((p) => p.from_id === c.id));
+  const hovered = useStore((s) => s.hoverKey === c.id);
+  const waiting = useStore((s) => s.incoming.some((p) => p.from_key === c.id || p.from_key === `t:${c.id}`));
   const openContact = useStore((s) => s.openContact);
-  const setHover = useStore((s) => s.setHoverContact);
-  const sendTo = useStore((s) => s.sendToContact);
+  const drop = useRowDrop(c.id);
   const target = dropHover && !hovered;
   const reduce = useReducedMotion();
 
   return (
     <li className="rise" style={{ "--i": 3 + i } as React.CSSProperties}>
       <div
-        role="button" tabIndex={0} data-contact-id={c.id} aria-label={`${c.name}, ${c.online ? "online" : "offline"}`}
+        role="button" tabIndex={0} data-send-key={c.id} aria-label={`${c.name}, ${c.online ? "online" : "offline"}`}
         onClick={() => openContact(c.id)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openContact(c.id); } }}
-        // mock mode has no native drag events: plain HTML5 drag & drop stands in for them
-        onDragOver={isMock ? (e) => { e.preventDefault(); setHover(c.id); } : undefined}
-        onDragLeave={isMock ? () => setHover(null) : undefined}
-        onDrop={isMock ? (e) => {
-          e.preventDefault(); setHover(null);
-          const names = Array.from(e.dataTransfer.files).map((f) => f.name);
-          void sendTo(c.id, names.length ? names : ["Folder demo"], centerOf(e.currentTarget));
-        } : undefined}
+        {...drop}
         className={`group relative flex items-center gap-3 px-3.5 py-2.5 cursor-pointer outline-none transition-[background-color,box-shadow] duration-500 ease-aura focus-visible:bg-line/[0.06] ${hovered ? "bg-accent/15 shadow-[inset_0_0_0_2px_rgb(var(--accent))]" : target ? "bg-accent/[0.06]" : "hover:bg-line/[0.05]"}`}
       >
         <motion.div animate={{ scale: hovered && !reduce ? 1.12 : 1 }} transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 18 }}>
@@ -89,40 +81,23 @@ function ContactRow({ c, i }: { c: Contact; i: number }) {
 export function ContactsSection() {
   const contacts = useStore((s) => s.contacts);
   const loaded = useStore((s) => s.contactsLoaded);
-  const pushes = useStore((s) => s.pushes);
-  const sheetOpen = useStore((s) => s.pushSheet);
   const dropHover = useStore((s) => s.dropHover);
   const openAdd = useStore((s) => s.openAddDevice);
-  const setPushSheet = useStore((s) => s.setPushSheet);
   const refresh = useStore((s) => s.refreshContacts);
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const first = pushes[0];
   return (
-    <section className="mb-4 rise" style={{ "--i": 0 } as React.CSSProperties}>
+    <section className="mb-4 rise" style={{ "--i": 2 } as React.CSSProperties}>
       <div className="flex items-center justify-between mb-2">
         <h2 className="h-section !mb-0">Danh bạ</h2>
-        <button className="btn !h-8 !px-3" onClick={() => openAdd("invite")}><Icon name="plus" weight="bold" />Thêm máy</button>
+        <button className="btn !h-8 !px-3" onClick={() => openAdd("invite")}><Icon name="invite" />Mời máy ở xa</button>
       </div>
-
-      {first && !sheetOpen && (
-        <button
-          className="w-full mb-2 rounded-[16px] bg-accent/10 hair border-accent/40 px-3.5 py-2.5 text-left flex items-center gap-2.5 active:scale-[0.99] transition-transform duration-300"
-          onClick={() => setPushSheet(true)}
-        >
-          <span className="grid place-items-center w-8 h-8 rounded-full bg-accent/20 text-accent shrink-0"><Icon name="down" className="w-4 h-4" weight="bold" /></span>
-          <span className="min-w-0 flex-1 text-sm"><b className="font-semibold">{first.from_name}</b> muốn gửi <span className="truncate">{first.job}</span>{pushes.length > 1 ? ` (+${pushes.length - 1})` : ""}</span>
-          <span className="text-xs font-semibold text-accent shrink-0">Xem</span>
-        </button>
-      )}
 
       {contacts.length === 0 ? (
         loaded && (
-          <div className="rounded-[20px] border border-dashed border-line/25 bg-line/[0.04] px-4 py-4 text-center">
-            <span className="mx-auto mb-2 grid place-items-center w-10 h-10 rounded-full bg-accent/15 text-accent"><Icon name="contact" className="w-5 h-5" weight="bold" /></span>
-            <div className="text-base font-medium">Chưa có máy nào trong danh bạ</div>
-            <div className="text-xs text-mute mt-0.5 mb-3">Ghép một lần bằng link mời, sau đó kéo file thả vào tên máy là gửi.</div>
-            <button className="btn btn-primary" onClick={() => openAdd("invite")}><Icon name="invite" />Mời máy khác</button>
+          <div className="rounded-[20px] border border-dashed border-line/25 bg-line/[0.04] px-4 py-3.5 text-center">
+            <div className="text-base font-medium">Danh bạ đang trống</div>
+            <div className="text-xs text-mute mt-0.5">Máy ở xa (khác mạng) ghép với bạn một lần bằng link mời, sau đó hiện ở đây.</div>
           </div>
         )
       ) : (
@@ -142,7 +117,6 @@ export function ContactSheet({ id }: { id: string }) {
   const close = useStore((s) => s.closeContact);
   const refresh = useStore((s) => s.refreshContacts);
   const toast = useStore((s) => s.toast);
-  const sendTo = useStore((s) => s.sendToContact);
   const [name, setName] = useState(c?.name ?? "");
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -159,14 +133,6 @@ export function ContactSheet({ id }: { id: string }) {
     finally { setBusy(false); }
   }
 
-  async function pickAndSend(e: React.MouseEvent) {
-    const from = centerOf(e.currentTarget);
-    try {
-      const p = await api.pick_folder({ title: `Chọn folder để gửi cho ${c!.name}` });
-      if (p) await sendTo(c!.id, [p], from);
-    } catch (err) { toast(errorMessage(err), "error"); }
-  }
-
   return (
     <Sheet onClose={close} title={c.name}>
       <div className="flex items-center gap-3 mb-3">
@@ -180,9 +146,7 @@ export function ContactSheet({ id }: { id: string }) {
         </div>
       </div>
 
-      <button className="btn btn-primary btn-lg w-full magnet" onClick={pickAndSend}>
-        <Icon name="up" weight="bold" />Gửi folder…<Nest />
-      </button>
+      <SendActions targetKey={c.id} name={c.name} />
       <div className="text-xs text-mute text-center mt-1.5 mb-3">
         {c.online ? "Hoặc kéo file thả thẳng vào tên máy ở Trang chính." : `${c.name} đang offline: file sẽ nằm trong hàng chờ và tự gửi khi máy online.`}
       </div>
@@ -410,101 +374,6 @@ export function AddDeviceSheet() {
       </div>
       {tab === "invite" ? <InviteTab key="i" /> : <EnterTab key={`e-${add.text}`} initial={add.text} />}
       <button className="btn btn-ghost w-full mt-2" onClick={close}>Đóng</button>
-    </Sheet>
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
-// Incoming push sheet
-// ---------------------------------------------------------------------------------------------
-function pushLine(p: IncomingPush) {
-  return `${p.files} file · ${fmtBytes(p.bytes)}`;
-}
-
-export function PushSheet() {
-  const pushes = useStore((s) => s.pushes);
-  const contacts = useStore((s) => s.contacts);
-  const setOpen = useStore((s) => s.setPushSheet);
-  const remove = useStore((s) => s.removePush);
-  const refresh = useStore((s) => s.refreshTransfers);
-  const fly = useStore((s) => s.fly);
-  const setScreen = useStore((s) => s.setScreen);
-  const toast = useStore((s) => s.toast);
-  const reduce = useReducedMotion();
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const p = pushes[0];
-  useEffect(() => { if (!p) setOpen(false); }, [p, setOpen]);
-  if (!p) return null;
-  const from = contacts.find((c) => c.id === p.from_id);
-  const rest = pushes.slice(1);
-
-  async function answer(x: IncomingPush, accept: boolean, el?: Element | null) {
-    setBusy(x.push_id);
-    try {
-      await api.answer_push({ push_id: x.push_id, accept });
-      remove(x.push_id);
-      if (accept) {
-        await refresh();
-        fly(el ? centerOf(el) : undefined);
-        setScreen("transfers");
-        toast(`Đang nhận ${x.job} từ ${x.from_name}…`);
-      } else toast(`Đã từ chối ${x.job}`);
-    } catch (e) { toast(errorMessage(e), "error"); }
-    setBusy(null);
-  }
-
-  return (
-    <Sheet onClose={() => setOpen(false)} title={`${p.from_name} muốn gửi file`}>
-      <div className="flex items-center gap-3 mb-3">
-        <div className="relative shrink-0">
-          <Avatar c={{ name: p.from_name, online: true }} size={52} />
-          {!reduce && (
-            <motion.span
-              className="absolute inset-0 rounded-full border-2 border-accent pointer-events-none"
-              initial={{ scale: 1, opacity: 0.8 }} animate={{ scale: 1.6, opacity: 0 }}
-              transition={{ duration: 1.8, ease: "easeOut", repeat: Infinity }}
-            />
-          )}
-        </div>
-        <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-mute">Yêu cầu gửi file</div>
-          <div className="title text-[24px] leading-tight"><em className="block truncate">{p.from_name}</em>muốn gửi file</div>
-          {from && <div className="text-xs text-mute flex items-center gap-1"><Icon name={platformIcon(from.platform)} className="w-3.5 h-3.5" />{PLATFORM_LABEL[from.platform] ?? from.platform}</div>}
-        </div>
-      </div>
-
-      <div className="rounded-[16px] hair bg-line/[0.04] px-3.5 py-3 mb-3 flex items-center gap-3">
-        <span className="grid place-items-center w-10 h-10 rounded-full bg-accent/15 text-accent shrink-0"><Icon name="folder" className="w-5 h-5" /></span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-base font-semibold tracking-tight" title={p.job}>{p.job}</div>
-          <div className="text-sm text-mute mono">{pushLine(p)}</div>
-        </div>
-      </div>
-
-      <div className="flex gap-2">
-        <button className="btn btn-primary btn-lg flex-1 magnet" disabled={busy !== null} onClick={(e) => answer(p, true, e.currentTarget)}>Nhận<Nest name="down" /></button>
-        <button className="btn btn-lg" disabled={busy !== null} onClick={() => answer(p, false)}>Từ chối</button>
-      </div>
-
-      {rest.length > 0 && (
-        <div className="mt-3">
-          <div className="text-xs text-mute px-1 mb-1.5">Còn {rest.length} yêu cầu đang chờ</div>
-          <ul className="card divide-y divide-line/10 overflow-hidden">
-            {rest.map((x) => (
-              <li key={x.push_id} className="flex items-center gap-2.5 px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{x.job}</div>
-                  <div className="truncate text-xs text-mute">{x.from_name} · {pushLine(x)}</div>
-                </div>
-                <button className="btn btn-icon" aria-label={`Nhận ${x.job}`} disabled={busy !== null} onClick={(e) => answer(x, true, e.currentTarget)}><Icon name="check" weight="bold" /></button>
-                <button className="btn btn-icon btn-danger" aria-label={`Từ chối ${x.job}`} disabled={busy !== null} onClick={() => answer(x, false)}><Icon name="x" weight="bold" /></button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <button className="btn btn-ghost w-full mt-2" onClick={() => setOpen(false)}>Để sau</button>
     </Sheet>
   );
 }

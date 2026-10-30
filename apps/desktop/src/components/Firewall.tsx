@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { useReducedMotion } from "motion/react";
 import { api, errorMessage } from "../lib/ipc";
 import { useStore } from "../lib/store";
-import { Icon, Nest, Sheet } from "./ui";
+import { EASE, Icon, Nest, Sheet, motion } from "./ui";
 
 /** "Cho phép Toss qua firewall": one button, one OS prompt (UAC / admin password). Shared by the
  *  setup wizard, the host-mode prompt and the Kết nối section. */
@@ -52,5 +53,37 @@ export function FirewallSheet({ onClose }: { onClose: () => void }) {
         <button className="btn btn-ghost w-full" onClick={onClose}>Để sau</button>
       </div>
     </Sheet>
+  );
+}
+
+const FW_DISMISS = "toss.fw.dismissed";
+function fwDismissed(): boolean {
+  try { return localStorage.getItem(FW_DISMISS) === "1"; } catch { return false; }
+}
+
+/** Non-blocking banner on Home (v0.8: replaces the setup-wizard step): the firewall would stop other machines from connecting. */
+export function FirewallNotice({ className = "" }: { className?: string }) {
+  const fw = useStore((s) => s.firewall);
+  const setFirewall = useStore((s) => s.setFirewall);
+  const reduce = useReducedMotion();
+  const [hidden, setHidden] = useState(fwDismissed);
+  if (fw !== "missing" || hidden) return null;
+  return (
+    <motion.div
+      className={`rounded-[20px] border border-warn/40 bg-warn/10 p-3.5 ${className}`}
+      initial={reduce ? false : { opacity: 0, y: -8, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.6, ease: EASE }}
+    >
+      <div className="flex items-start gap-3">
+        <span className="grid place-items-center w-9 h-9 rounded-full bg-warn/20 text-warn shrink-0"><Icon name="shield" className="w-[18px] h-[18px]" weight="bold" /></span>
+        <div className="min-w-0">
+          <div className="text-base font-medium">Cho phép Toss qua firewall</div>
+          <div className="text-xs text-mute mt-0.5">Firewall đang chặn máy khác nối vào Toss, nên chỉ máy ở xa nối được và sẽ chậm. Bấm một lần và đồng ý.</div>
+        </div>
+      </div>
+      <div className="flex gap-2 mt-3">
+        <div className="flex-1"><FirewallAllow compact onDone={() => window.setTimeout(() => setFirewall("ok"), 900)} /></div>
+        <button className="btn btn-ghost" onClick={() => { try { localStorage.setItem(FW_DISMISS, "1"); } catch { /* ignore */ } setHidden(true); }}>Để sau</button>
+      </div>
+    </motion.div>
   );
 }

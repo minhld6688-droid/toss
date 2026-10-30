@@ -5,10 +5,14 @@
 //   v0.5: ?push=1 (Anh Hùng sends an incoming push 1 s after start) ?invite=1 (toss://i/… deep link arrives)
 //         ?lan=blocked (macOS blocks the local network) ?contacts=0 (empty book) ?restored=1 (paused + queued pushes after a "restart")
 //   v0.5.1: ?update=1 (0.5.2 available, announced 0.4 s after start) &force=1 (marked #force) ?remoteold=1 (remote host on 0.5.0)
+//   v0.8 (nearby + LocalSend): devices around: iPhone của Hùng (LocalSend), Máy tổng studio (Toss), Từ Đạt (contact); Galaxy của Lan shows up
+//         2.5 s in, "PC dựng phim" on the first "Quét lại". Demo mode (no switches): a LocalSend ask after 6 s, a text message after 16 s.
+//         ?quiet=1 (no automatic ask / text) ?incoming=1|2 (Toss stranger ask, +LocalSend ask) at 0.6 s ?text=1 (text message at 0.6 s)
+//         ?nearby=0 (nothing around) ?lsport=busy (53317 taken → 53318) ?policy=off|everyone ?fw=ok|missing (Windows firewall)
 import type {
-  AppState, Commands, CommandsV05, CommandsV051, ConnectReport, Contact, IncomingPush, InviteInfo, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
-  NetConfig, NetDiagUi, TicketInfo, TicketSpec, TransferEvent, TransferState, UpdateInfo,
-} from "./ipc-types";
+  AppState, Commands, CommandsV05, CommandsV051, CommandsV08, ConnectReport, Contact, Incoming, IncomingPush, InviteInfo, Nearby, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
+  NetConfig, NetDiagUi, Received, TicketInfo, TicketSpec, TransferEvent, TransferState, UpdateInfo,
+} from "@contracts/ipc";
 import type { ExtraCommands } from "./ipc-extra";
 
 const MB = 1024 * 1024;
@@ -115,7 +119,7 @@ const defaultNet = (): NetConfig => ({
 });
 
 const state: AppState = {
-  version: "0.5.1",
+  version: "0.8.0",
   endpoint_id: HOST_ID,
   device_name: "MacBook của Minh",
   dest_dir: "/Users/minh/Toss",
@@ -126,7 +130,11 @@ const state: AppState = {
   context_menu: true,
   auto_receive: params.get("auto") !== "0",
   net: defaultNet(),
-  auto_update: hostOn,
+  auto_update: true,
+  receive_policy: (["off", "contacts", "everyone"] as const).find((p) => p === params.get("policy")) ?? "contacts",
+  ls_enabled: true,
+  ls_port: params.get("lsport") === "busy" ? 53318 : 53317,
+  ls_trusted: [{ fingerprint: "a91c55d0e3b7", alias: "Galaxy của Lan" }],
 };
 let adminTicket: string | null = params.get("remote") === "1" ? "toss1mockadmin" + "abcdefghijklmnopqrstuvwxyz234567" : null;
 
@@ -159,6 +167,15 @@ function seed() {
     dest: `${state.dest_dir}/12A3 - RAW`, started_at: now() - 60,
   }));
   runLoop("a3-0003", 6 * MB);
+  // LocalSend transfers: no contact, direct path
+  transfers.set("ls-0001", tfBase({
+    id: "ls-0001", job: "12 ảnh từ máy tổng", op: "put", peer: "iPhone của Hùng", status: "done", bytes_done: 41 * MB, bytes_total: 41 * MB,
+    files_done: 12, files_total: 12, path: "direct", started_at: now() - 1800,
+  }));
+  transfers.set("ls-0002", tfBase({
+    id: "ls-0002", job: "IMG_2024 (3 file)", op: "put", side: "host", peer: "Galaxy của Lan", status: "done", bytes_done: 9 * MB, bytes_total: 9 * MB,
+    files_done: 3, files_total: 3, path: "direct", dest: `${state.dest_dir}/Galaxy của Lan`, started_at: now() - 2400,
+  }));
   if (params.get("busy") === "1") {
     transfers.set("a4-0004", tfBase({ id: "a4-0004", job: "10C1 - RAW", status: "connecting", error: "Máy tổng đang bận, thử lại sau 30 giây" }));
   }
@@ -181,6 +198,7 @@ function runLoop(id: string, perTick: number) {
       window.clearInterval(t); timers.delete(id);
       emitTransfer({ type: "progress", id, bytes_done: s.bytes_total, bytes_total: s.bytes_total, files_done: s.files_total, files_total: s.files_total, speed_bps: 0, eta_s: 0, path: s.path, rtt_ms: s.rtt_ms, streams: 0 });
       emitTransfer({ type: "done", id, files: s.files_total, bytes: s.bytes_total, elapsed_s: Math.max(1, now() - s.started_at), dest: s.dest });
+      onFinished(s);
       return;
     }
     emitTransfer({ type: "progress", id, bytes_done: Math.round(s.bytes_done), bytes_total: s.bytes_total, files_done: s.files_done, files_total: s.files_total, speed_bps: s.speed_bps, eta_s: s.eta_s, path: s.path, rtt_ms: s.rtt_ms, streams: s.streams });
@@ -269,10 +287,10 @@ const remoteDevice = () => (adminTicket ? "Máy tổng - Studio" : state.device_
 // ---- v0.5.1 updates -----------------------------------------------------------
 const updateOn = params.get("update") === "1";
 const NEW_RELEASE: UpdateInfo = {
-  available: true, current: "0.5.1", version: "0.5.2", forced: params.get("force") === "1", date: "2026-10-23T08:00:00Z",
+  available: true, current: "0.8.0", version: "0.8.1", forced: params.get("force") === "1", date: "2026-10-23T08:00:00Z",
   notes: "• Gửi file cho máy trong danh bạ ổn định hơn khi mạng LAN chập chờn\n• Máy tổng tự cập nhật theo lệnh từ máy quản lý\n• Sửa lỗi hạn link hiển thị lệch giờ" + (params.get("force") === "1" ? "\n#force" : ""),
 };
-let remoteVersion = params.get("remoteold") === "1" ? "0.5.0" : "0.5.1";
+let remoteVersion = params.get("remoteold") === "1" ? "0.5.0" : "0.8.0";
 let installing = false;
 
 let pickN = 0;
@@ -298,7 +316,7 @@ const contacts: Contact[] = params.get("contacts") === "0" ? [] : [
   { id: hex(64), name: "Chị Lan – PC", their_name: "DESKTOP-LAN", platform: "windows", added_at: now() - 21 * 86400, auto_accept: true, online: false, last_seen: now() - 2 * 3600 - 600, rtt_ms: null },
   { id: hex(64), name: "Anh Hùng – iMac", their_name: "iMac của Hùng", platform: "macos", added_at: now() - 3 * 86400, auto_accept: false, online: true, last_seen: now(), rtt_ms: 31 },
 ];
-const pushes: IncomingPush[] = [];
+const incomings: Incoming[] = [];
 const hung = () => contacts.find((c) => c.name.startsWith("Anh Hùng"));
 const dat = () => contacts.find((c) => c.name.startsWith("Từ Đạt"));
 const lan = () => contacts.find((c) => c.name.startsWith("Chị Lan"));
@@ -337,6 +355,119 @@ function seedRestored() {
     bytes_done: 2.3 * GB, bytes_total: 2.3 * GB, files_done: 188, files_total: 188, path: "direct", rtt_ms: 31,
     dest: `${state.dest_dir}/${h.name}/10C1 - Ảnh lớp`, started_at: now() - 5000,
   }));
+}
+
+// ---- v0.8 nearby + LocalSend ---------------------------------------------------------
+const noNearby = params.get("nearby") === "0";
+const nearbyList: Nearby[] = [];
+const receivedList: Received[] = [];
+const IPHONE = "l:7f3a91c2d4e0";
+const STUDIO = `t:${hex(64)}`;
+const GALAXY = "l:a91c55d0e3b7";
+const LAN_PC = "l:5d20c8f1aa93";
+const lsFp = (key: string) => key.slice(2);
+
+function seedNearby() {
+  if (noNearby) return;
+  nearbyList.push(
+    { key: IPHONE, kind: "localsend", name: "iPhone của Hùng", model: "iPhone", platform: "ios", contact_id: null, trusted: false },
+    { key: STUDIO, kind: "toss", name: "Máy tổng studio", model: "Toss", platform: "windows", contact_id: null, trusted: false },
+  );
+  const d = dat();
+  if (d) nearbyList.push({ key: `t:${d.id}`, kind: "toss", name: d.name, model: "Toss", platform: d.platform, contact_id: d.id, trusted: d.auto_accept });
+}
+const GALAXY_ENTRY: Nearby = { key: GALAXY, kind: "localsend", name: "Galaxy của Lan", model: "Samsung", platform: "android", contact_id: null, trusted: false };
+const LAN_ENTRY: Nearby = { key: LAN_PC, kind: "toss_lan", name: "PC dựng phim", model: "Toss", platform: "windows", contact_id: null, trusted: false };
+
+function nearbyView(): Nearby[] {
+  return nearbyList.map((n) => {
+    const c = n.contact_id ? contacts.find((x) => x.id === n.contact_id) : undefined;
+    const trusted = n.kind === "localsend" ? state.ls_trusted.some((t) => t.fingerprint === lsFp(n.key)) : !!c?.auto_accept;
+    return { ...n, trusted };
+  });
+}
+function addNearby(n: Nearby) {
+  if (noNearby || nearbyList.some((x) => x.key === n.key)) return false;
+  nearbyList.push({ ...n });
+  emit("nearby:changed", {});
+  return true;
+}
+function recipient(key: string): { name: string; contact: Contact | null; online: boolean } {
+  const c = contacts.find((x) => x.id === key) ?? (key.startsWith("t:") ? contacts.find((x) => x.id === key.slice(2)) : undefined);
+  const n = nearbyList.find((x) => x.key === key || (c && x.contact_id === c.id));
+  if (c) return { name: c.name, contact: c, online: c.online || !!n };
+  if (n) return { name: n.name, contact: null, online: true };
+  throw new Error("Máy này không còn trong mạng — bấm Quét lại");
+}
+
+function simulatePush(s: TransferState, rtt: number) {
+  void (async () => {
+    await sleep(700);
+    if (s.status !== "connecting") return;
+    s.bytes_total = Math.round((0.8 + Math.random() * 2) * GB); s.files_total = 60 + Math.floor(Math.random() * 120);
+    s.status = "running"; s.path = "direct"; s.rtt_ms = rtt; s.streams = 8;
+    emitTransfer({ type: "manifest", id: s.id, files: s.files_total, bytes: s.bytes_total, to_do_files: s.files_total, to_do_bytes: s.bytes_total });
+    runLoop(s.id, 9 * MB);
+  })();
+}
+
+const sentPaths = new Map<string, string[]>();
+function startPush(peerName: string, contact: Contact | null, online: boolean, paths: string[], job?: string): string {
+  if (paths.length === 0) throw new Error("Chưa chọn file hoặc folder nào");
+  const tid = `p-${hex(6)}`;
+  const j = job ?? (paths.length > 1 ? `${paths.length} mục` : baseOf(paths[0]));
+  const s = tfBase({ id: tid, job: j, op: "put", peer: peerName, contact: contact?.id ?? null });
+  sentPaths.set(tid, paths);
+  transfers.set(tid, s);
+  emitTransfer({ type: "started", id: tid, job: j, op: "put", side: "client", peer: peerName, contact: contact?.id ?? null });
+  if (online) simulatePush(s, contact?.rtt_ms ?? 8); // offline contact: stays "connecting" = "Chờ <tên> online" until presence sees them
+  return tid;
+}
+
+/** A finished receive lands in the "Đã nhận" history (the real shell also notifies). */
+function onFinished(s: TransferState) {
+  const incoming = (s.side === "client" && s.op === "get") || (s.side === "host" && s.op === "put");
+  if (!incoming) return;
+  const r: Received = { id: s.id, from_name: s.peer, job: s.job, files: s.files_total, bytes: s.bytes_total, dest: s.dest ?? `${state.dest_dir}/${s.job}`, at: now() };
+  receivedList.unshift(r);
+  emit("received", r);
+}
+
+function seedReceived() {
+  receivedList.push(
+    { id: "rcv-1", from_name: "Từ Đạt – Mac", job: "10C1 - Ảnh lớp", files: 188, bytes: 2.3 * GB, dest: `${state.dest_dir}/Từ Đạt – Mac/10C1 - Ảnh lớp`, at: now() - 5000 },
+    { id: "rcv-2", from_name: "iPhone của Hùng", job: "IMG_1980.HEIC", files: 3, bytes: 14 * MB, dest: `${state.dest_dir}/iPhone của Hùng`, at: now() - 86400 },
+  );
+}
+
+const TOSS_ASK = (): Incoming => ({
+  id: `push-${hex(8)}`, source: "toss", from_key: STUDIO, from_name: "Máy tổng studio", stranger: true,
+  job: "12A3 - Ảnh lớp (đã chọn)", files: 214, bytes: 3.4 * GB, names: ["IMG_4001.CR3", "IMG_4002.CR3", "IMG_4003.CR3", "IMG_4004.CR3", "IMG_4005.CR3"], at: now(),
+});
+const LS_ASK = (): Incoming => ({
+  id: `ls-${hex(8)}`, source: "localsend", from_key: IPHONE, from_name: "iPhone của Hùng", stranger: true,
+  job: "12 ảnh từ iPhone", files: 12, bytes: 38 * MB, names: ["IMG_2041.HEIC", "IMG_2042.HEIC", "IMG_2043.HEIC", "IMG_2044.HEIC", "IMG_2045.HEIC"], at: now(),
+});
+function fireIncoming(a: Incoming) {
+  incomings.push(a);
+  emit("incoming", structuredClone(a));
+}
+function scheduleDemoEvents() {
+  const inc = params.get("incoming");
+  const text = params.get("text") === "1";
+  const quiet = params.get("quiet") === "1";
+  if (params.get("push") === "1" && hung()) {
+    const h = hung()!;
+    setTimeout(() => fireIncoming({ id: hex(32), source: "toss", from_key: h.id, from_name: h.name, stranger: false, job: "12A3 - Ảnh lớp (đã chọn)", files: 214, bytes: 3.4 * GB, names: [], at: now() }), 1000);
+  }
+  if (inc) {
+    setTimeout(() => fireIncoming(TOSS_ASK()), 600);
+    if (inc === "2") setTimeout(() => fireIncoming(LS_ASK()), 700);
+  } else if (!quiet && !noNearby) setTimeout(() => fireIncoming(LS_ASK()), 6000);
+  if (text) setTimeout(() => emit("text", { from_name: "iPhone của Hùng", text: "Mật khẩu wifi studio: toss-2007-vui\nhttps://toss-link.vercel.app/abc234xyz", at: now() }), 600);
+  else if (!quiet && !noNearby && !inc) setTimeout(() => emit("text", { from_name: "iPhone của Hùng", text: "Mật khẩu wifi studio: toss-2007-vui\nhttps://toss-link.vercel.app/abc234xyz", at: now() }), 16000);
+  setTimeout(() => addNearby(GALAXY_ENTRY), 2500);
+  if (params.get("lsport") === "busy") setTimeout(() => emit("ls:port", { port: 53318, fallback: true }), 400);
 }
 
 // ---- v0.4 diagnostics ------------------------------------------------------
@@ -394,7 +525,7 @@ function mockReport(): ConnectReport {
 }
 
 // ---- api -----------------------------------------------------------------
-export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
+export const mockApi: Commands & CommandsV05 & CommandsV051 & CommandsV08 & ExtraCommands = {
   async get_state() { await sleep(60); return structuredClone(state); },
   async finish_setup({ device_name, dest_dir }) {
     state.device_name = device_name; state.dest_dir = dest_dir; state.first_run = false; return structuredClone(state);
@@ -500,14 +631,7 @@ export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
     if (params.get("send") === "1") setTimeout(() => emit("send", { paths: ["/Users/minh/Pictures/Giao hàng/12A3 - Đã chọn", "/Users/minh/Pictures/Giao hàng/12A3 - Video"] }), 150);
     if (params.get("traydrag") === "1") setTimeout(() => emit("tray:drag", {}), 150);
     if (params.get("shareerror") === "1") setTimeout(() => emit("share:error", { msg: "Không mở được folder để chia sẻ" }), 150);
-    if (params.get("push") === "1" && hung()) {
-      const h = hung()!;
-      setTimeout(() => {
-        const p: IncomingPush = { push_id: hex(32), from_id: h.id, from_name: h.name, job: "12A3 - Ảnh lớp (đã chọn)", files: 214, bytes: 3.4 * GB, at: now() };
-        pushes.push(p);
-        emit("push:incoming", p);
-      }, 1000);
-    }
+    scheduleDemoEvents();
     if (updateOn) setTimeout(() => emit("update:available", structuredClone(NEW_RELEASE)), 400);
     if (params.get("invite") === "1") {
       const inv = makeInvite("Mai – Laptop", 7);
@@ -556,45 +680,85 @@ export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
     const at = contacts.findIndex((x) => x.id === id); if (at < 0) throw new Error("Không tìm thấy máy này");
     contacts.splice(at, 1); emit("contacts:changed", {});
   },
-  async send_to_contact({ id, paths }) {
-    const c = contacts.find((x) => x.id === id); if (!c) throw new Error("Không tìm thấy máy này");
-    if (paths.length === 0) throw new Error("Chưa chọn file hoặc folder nào");
-    const tid = `p-${hex(6)}`;
-    const name = baseOf(paths[0]);
-    const job = paths.length > 1 ? `${paths.length} mục` : name;
-    const s = tfBase({ id: tid, job, op: "put", peer: c.name, contact: c.id });
-    transfers.set(tid, s);
-    emitTransfer({ type: "started", id: tid, job, op: "put", side: "client", peer: c.name, contact: c.id });
-    if (c.online) {
-      void (async () => {
-        await sleep(700);
-        if (s.status !== "connecting") return;
-        s.bytes_total = Math.round((0.8 + Math.random() * 2) * GB); s.files_total = 60 + Math.floor(Math.random() * 120);
-        s.status = "running"; s.path = "direct"; s.rtt_ms = c.rtt_ms ?? 10; s.streams = 8;
-        emitTransfer({ type: "manifest", id: tid, files: s.files_total, bytes: s.bytes_total, to_do_files: s.files_total, to_do_bytes: s.bytes_total });
-        runLoop(tid, 9 * MB);
-      })();
-    } // offline: stays "connecting" = "Chờ <tên> online" until presence sees them
-    return tid;
+  async send_to_contact({ id, paths }) { return mockApi.send_to({ key: id, paths }); },
+  async list_incoming_pushes() {
+    return incomings.filter((p) => p.source === "toss").map((p): IncomingPush => ({ push_id: p.id, from_id: p.from_key, from_name: p.from_name, job: p.job, files: p.files, bytes: p.bytes, at: p.at }));
   },
-  async list_incoming_pushes() { return structuredClone(pushes); },
-  async answer_push({ push_id, accept }) {
-    const at = pushes.findIndex((p) => p.push_id === push_id); if (at < 0) throw new Error("Yêu cầu này đã hết hạn");
-    const [p] = pushes.splice(at, 1);
+  async answer_push({ push_id, accept }) { return mockApi.answer_incoming({ id: push_id, accept, always: false }); },
+  async open_local_network_settings() { console.info("[mock] open_local_network_settings"); },
+
+  // ---- v0.8 nearby + LocalSend ---------------------------------------------------
+  async list_nearby() { await sleep(60); return structuredClone(nearbyView()); },
+  async rescan_nearby() {
+    await sleep(900);
+    addNearby(LAN_ENTRY);
+  },
+  async send_to({ key, paths }) {
+    const r = recipient(key);
+    return startPush(r.name, r.contact, r.online, paths);
+  },
+  async send_text({ key, text }) {
+    const r = recipient(key);
+    if (!text.trim()) throw new Error("Chưa có chữ nào để gửi");
+    if (new TextEncoder().encode(text).length > 60 * 1024) throw new Error("Tin chữ dài quá 60 KB");
+    await sleep(300);
+    console.info("[mock] send_text →", r.name, text);
+  },
+  async list_incoming() { return structuredClone(incomings); },
+  async answer_incoming({ id, accept, always }) {
+    const at = incomings.findIndex((p) => p.id === id); if (at < 0) throw new Error("Yêu cầu này đã hết hạn");
+    const [p] = incomings.splice(at, 1);
+    if (always) {
+      const n = nearbyList.find((x) => x.key === p.from_key);
+      if (p.source === "localsend") {
+        if (!state.ls_trusted.some((t) => t.fingerprint === lsFp(p.from_key))) state.ls_trusted.push({ fingerprint: lsFp(p.from_key), alias: p.from_name });
+      } else if (n && !n.contact_id) {
+        const c: Contact = { id: hex(64), name: p.from_name, their_name: p.from_name, platform: n.platform, added_at: now(), auto_accept: true, online: true, last_seen: now(), rtt_ms: 9 };
+        contacts.push(c); n.contact_id = c.id;
+        emit("contacts:changed", {});
+      }
+      emit("nearby:changed", {});
+    }
     if (!accept) return;
+    const c = contacts.find((x) => x.id === p.from_key || `t:${x.id}` === p.from_key) ?? null;
     const tid = `in-${hex(6)}`;
-    const s = tfBase({ id: tid, job: p.job, op: "put", side: "host", peer: p.from_name, contact: p.from_id });
+    const s = tfBase({ id: tid, job: p.job, op: "put", side: "host", peer: p.from_name, contact: c?.id ?? null });
     transfers.set(tid, s);
-    emitTransfer({ type: "started", id: tid, job: p.job, op: "put", side: "host", peer: p.from_name, contact: p.from_id });
+    emitTransfer({ type: "started", id: tid, job: p.job, op: "put", side: "host", peer: p.from_name, contact: c?.id ?? null });
     void (async () => {
       await sleep(600);
-      s.bytes_total = p.bytes; s.files_total = p.files; s.status = "running"; s.path = "direct"; s.rtt_ms = 31; s.streams = 8;
+      s.bytes_total = p.bytes; s.files_total = p.files; s.status = "running"; s.path = "direct"; s.rtt_ms = 9; s.streams = 8;
       s.dest = `${state.dest_dir}/${p.from_name}/${p.job}`;
       emitTransfer({ type: "manifest", id: tid, files: p.files, bytes: p.bytes, to_do_files: p.files, to_do_bytes: p.bytes });
-      runLoop(tid, 9 * MB);
+      runLoop(tid, p.bytes > GB ? 9 * MB : 2 * MB);
     })();
   },
-  async open_local_network_settings() { console.info("[mock] open_local_network_settings"); },
+  async set_receive_policy({ policy }) { state.receive_policy = policy; },
+  async set_ls_enabled({ on }) { state.ls_enabled = on; state.ls_port = on ? (params.get("lsport") === "busy" ? 53318 : 53317) : null; },
+  async forget_trusted({ fingerprint }) {
+    state.ls_trusted = state.ls_trusted.filter((t) => t.fingerprint !== fingerprint);
+    emit("nearby:changed", {});
+  },
+  async list_received() { return structuredClone(receivedList); },
+  async resend({ id }) {
+    const t = transfers.get(id); if (!t) throw new Error("Không tìm thấy lượt gửi này");
+    const c = t.contact ? contacts.find((x) => x.id === t.contact) ?? null : null;
+    const nearbyNow = nearbyList.some((n) => n.name === t.peer);
+    if (!c && !nearbyNow && !t.contact) throw new Error("Máy kia không còn trong mạng — bấm Quét lại ở Trang chính");
+    return startPush(t.peer, c, c ? c.online : true, sentPaths.get(id) ?? [t.job], t.job);
+  },
+  async pick_files({ title }) {
+    await sleep(150); void title;
+    return ["/Users/minh/Pictures/Giao hàng/IMG_4021.CR3", "/Users/minh/Pictures/Giao hàng/IMG_4022.CR3", "/Users/minh/Pictures/Giao hàng/IMG_4023.CR3"];
+  },
+  async web_share_start({ paths }) {
+    await sleep(350);
+    if (paths.length === 0) throw new Error("Chưa chọn file hoặc folder nào");
+    const urls = ["http://192.168.1.20:53317", "http://10.0.0.5:53317"];
+    return { urls, qr_svg: fakeQr(urls[0]) };
+  },
+  async web_share_stop() { await sleep(100); },
+  async request_local_network() { console.info("[mock] request_local_network"); },
 
   async get_diagnostics() { await sleep(120); return mockDiag(); },
   async add_firewall_rule() {
@@ -638,7 +802,7 @@ export const mockApi: Commands & CommandsV05 & CommandsV051 & ExtraCommands = {
     if (!adminTicket) throw new Error("Chưa có máy tổng từ xa");
     await sleep(500);
     if (remoteVersion === "0.5.0") throw new Error("Máy tổng đang chạy bản cũ, chưa hỗ trợ cập nhật từ xa — cập nhật tay lần này");
-    setTimeout(() => { remoteVersion = "0.5.2"; }, 15_000);
+    setTimeout(() => { remoteVersion = "0.8.1"; }, 15_000);
   },
 };
 
@@ -666,5 +830,7 @@ seed();
 seedJobs();
 seedShares();
 if (params.get("restored") === "1") seedRestored();
+seedNearby();
+seedReceived();
 // screenshot / test hook (mock only): lets a script fire shell events such as drop:hover / drop:over
 (window as unknown as { __tossMock?: unknown }).__tossMock = { emit };

@@ -1,7 +1,7 @@
 {
   "name": "toss-desktop-ui",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.8.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,8 +11,7 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "screenshots": "node scripts/screenshots-v06.mjs",
-    "screenshots:v05": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots-v08.mjs"
   },
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
