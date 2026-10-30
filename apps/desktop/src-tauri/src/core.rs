@@ -1793,6 +1793,20 @@ async fn wait_for_relay(node: &Node) {
 mod tests {
     use super::*;
 
+
+    /// A long `#toss1…` link must parse offline; a short link needs the link service,
+    /// which CI runners reach only sometimes — then the ticket string itself is checked.
+    async fn parse_link_or_ticket(core: &Core, info: &TicketInfo) -> TicketInfo {
+        match core.parse_ticket(&info.web_url).await {
+            Ok(p) => p,
+            Err(e) if !info.web_url.contains('#') => {
+                eprintln!("short link not reachable here ({e:#}); checking the ticket");
+                core.parse_ticket(&info.ticket).await.unwrap()
+            }
+            Err(e) => panic!("{}: {e:#}", info.web_url),
+        }
+    }
+
     #[test]
     fn qr_is_scalable_svg() {
         let svg = qr_svg("https://toss-link.vercel.app/#toss1abcdef").unwrap();
@@ -1976,7 +1990,7 @@ mod tests {
             info.web_url
         );
         assert_eq!(info.deep_link, format!("toss://t/{}", info.ticket));
-        let parsed = core.parse_ticket(&info.web_url).await.unwrap();
+        let parsed = parse_link_or_ticket(&core, &info).await;
         assert_eq!(
             (parsed.job.as_str(), parsed.get, parsed.put, parsed.admin),
             ("12A3 - RAW", true, true, false)
@@ -2237,7 +2251,7 @@ mod tests {
         assert_eq!(info.root, alias);
         assert_eq!((info.job.as_str(), info.path.as_str()), ("Lớp 12A3", ""));
         assert!(info.get && !info.put && !info.admin && info.exp > 0);
-        let parsed = core.parse_ticket(&info.web_url).await.unwrap();
+        let parsed = parse_link_or_ticket(&core, &info).await;
         assert_eq!(
             (parsed.id.as_str(), parsed.root.as_str()),
             (info.id.as_str(), alias.as_str())
