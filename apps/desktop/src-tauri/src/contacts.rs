@@ -101,7 +101,11 @@ impl Core {
     pub async fn send_to_contact(&self, id: String, paths: Vec<String>) -> Result<String> {
         let paths = crate::nearby::check_paths(paths)?;
         let node = self.node().await?;
-        Ok(node.send_to_contact(clean_id(&id)?, paths).await?.id.clone())
+        Ok(node
+            .send_to_contact(clean_id(&id)?, paths)
+            .await?
+            .id
+            .clone())
     }
 
     pub async fn list_incoming_pushes(&self) -> Result<Vec<IncomingPush>> {

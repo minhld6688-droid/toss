@@ -64,6 +64,51 @@ const HOST_RETRY: Duration = Duration::from_secs(30);
 /// How often a deferred node restart (network settings saved during a transfer) is retried.
 const RESTART_RETRY: Duration = Duration::from_secs(15);
 
+/// v0.8: true while files are received into the fallback folder (the chosen one is unusable).
+static DEST_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where received files actually go: the chosen folder when usable, else `~/Toss`.
+/// A chosen folder on a drive that is not plugged in (macOS `/Volumes/<name>`, a missing
+/// Windows drive letter) is never created — that would make a phantom folder in place of the
+/// drive — so receiving keeps working into the fallback until the drive is back.
+pub(crate) fn effective_dest(chosen: &str) -> (PathBuf, bool) {
+    let p = PathBuf::from(chosen);
+    let ok = if p.is_dir() {
+        !std::fs::metadata(&p)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(true)
+    } else if on_removable_root(&p) {
+        false
+    } else {
+        std::fs::create_dir_all(&p).is_ok()
+    };
+    if ok {
+        return (p, false);
+    }
+    let fb = dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Toss");
+    let _ = std::fs::create_dir_all(&fb);
+    (fb, true)
+}
+
+/// `/Volumes/<name>/…` (macOS) or a drive letter whose root is missing (Windows).
+fn on_removable_root(p: &Path) -> bool {
+    let mut comps = p.components();
+    if cfg!(target_os = "macos") || cfg!(test) {
+        let parts: Vec<_> = p.components().take(3).collect();
+        if parts.len() >= 3 && parts[1].as_os_str() == "Volumes" {
+            return !PathBuf::from_iter(&parts).is_dir();
+        }
+    }
+    if cfg!(windows) {
+        if let Some(std::path::Component::Prefix(pre)) = comps.next() {
+            return !Path::new(&format!("{}\\", pre.as_os_str().to_string_lossy())).is_dir();
+        }
+    }
+    false
+}
+
 pub struct Core {
     data_dir: PathBuf,
     app: OnceLock<AppHandle>,
@@ -214,7 +259,7 @@ impl Core {
         let node = Arc::new(node);
         // v0.5: pushes land under the receive folder; v0.8: who may send without asking.
         let s = self.settings();
-        node.set_inbox_dir(PathBuf::from(&s.dest_dir));
+        node.set_inbox_dir(self.inbox());
         node.set_receive_policy(s.receive_policy);
         // Forward events before host mode starts emitting them.
         self.spawn_forwarder(&node);
@@ -477,8 +522,36 @@ impl Core {
     }
 
     /// Pushes (Toss and LocalSend) land under the current receive folder.
+    /// The folder pushes, LocalSend files and links land in right now (see [`effective_dest`]).
+    /// Tells the user once when it switches to / back from the fallback.
+    pub(crate) fn inbox(&self) -> PathBuf {
+        let chosen = self.settings().dest_dir;
+        let (dest, fb) = effective_dest(&chosen);
+        let was = DEST_FALLBACK.swap(fb, std::sync::atomic::Ordering::SeqCst);
+        if fb != was {
+            let msg = if fb {
+                format!(
+                    "Không ghi được vào “{chosen}” (ổ chưa cắm?) — file nhận tạm vào {}",
+                    dest.display()
+                )
+            } else {
+                format!("Đã nhận lại thư mục “{chosen}”")
+            };
+            tracing::warn!("{msg}");
+            if let Some(app) = self.app.get() {
+                notify(app, &msg);
+            }
+        }
+        dest
+    }
+
+    /// Re-checks the receive folder (drive plugged in / out) and applies it live.
+    pub(crate) fn refresh_inbox(&self) {
+        self.set_dest_dir_live();
+    }
+
     fn set_dest_dir_live(&self) {
-        let dest = PathBuf::from(self.settings().dest_dir);
+        let dest = self.inbox();
         if let Ok(guard) = self.node.try_read() {
             if let Some(n) = guard.as_ref() {
                 n.set_inbox_dir(dest.clone());
@@ -785,7 +858,7 @@ impl Core {
         if t.is_expired() {
             bail!("Link đã hết hạn");
         }
-        let dest = PathBuf::from(self.settings().dest_dir);
+        let dest = self.inbox();
         std::fs::create_dir_all(&dest)
             .with_context(|| format!("không tạo được thư mục {}", dest.display()))?;
         let node = self.node().await?;
@@ -1324,7 +1397,10 @@ fn to_core_host(h: &HostConfig, strict: bool) -> Result<CoreHost> {
     let ret = PathBuf::from(h.return_root.trim());
     if let Err(e) = std::fs::create_dir_all(&ret) {
         if strict {
-            bail!("Không tạo được thư mục nhận file gửi lại {}: {e}", h.return_root);
+            bail!(
+                "Không tạo được thư mục nhận file gửi lại {}: {e}",
+                h.return_root
+            );
         }
     }
     let mut c = CoreHost::new(roots, ret);
@@ -1549,9 +1625,7 @@ fn core_effects(seen: &mut Seen, v: Value) -> Vec<Effect> {
             let msg = TextMsg {
                 from_name: v["from_name"].as_str().unwrap_or("Máy khác").to_string(),
                 text: v["text"].as_str().unwrap_or("").to_string(),
-                at: v["at"]
-                    .as_u64()
-                    .unwrap_or_else(toss_core::util::now_unix),
+                at: v["at"].as_u64().unwrap_or_else(toss_core::util::now_unix),
             };
             fx.push(Effect::Emit(
                 "text",
@@ -2218,7 +2292,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((f.job.as_str(), f.path.as_str()), ("file", "file.txt"));
-        let parent_alias = quick_share_alias(&toss_core::paths::canonicalize(&dir).unwrap().to_string_lossy());
+        let parent_alias = quick_share_alias(
+            &toss_core::paths::canonicalize(&dir)
+                .unwrap()
+                .to_string_lossy(),
+        );
         assert_eq!(f.root, parent_alias);
         core.remove_quick_share(parent_alias).await.unwrap();
         assert!(core
@@ -2392,5 +2470,18 @@ mod tests {
             Some(("net:lan_blocked", json!({"blocked": true})))
         );
         assert_eq!(v05_event(&json!({"type": "progress", "id": "x"})), None);
+    }
+
+    #[test]
+    fn missing_drive_falls_back_and_is_never_created() {
+        let (p, fb) = effective_dest("/Volumes/Ổ không có 123/Toss");
+        assert!(fb);
+        assert!(p.ends_with("Toss"));
+        assert!(!Path::new("/Volumes/Ổ không có 123").exists());
+        let tmp = std::env::temp_dir().join(format!("toss-dest-{}", std::process::id()));
+        let (p2, fb2) = effective_dest(tmp.to_str().unwrap());
+        assert!(!fb2);
+        assert_eq!(p2, tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

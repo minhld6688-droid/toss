@@ -91,7 +91,9 @@ pub fn addr_ip(addr: &str) -> Option<String> {
     }
     let (host, _) = addr.rsplit_once(':')?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    host.parse::<std::net::IpAddr>().ok().map(|ip| ip.to_string())
+    host.parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
 }
 
 /// ipc.ts `Nearby.platform` for a LocalSend device.
@@ -187,14 +189,21 @@ pub fn ls_job(names: &[String], files: u32) -> String {
             .unwrap_or("")
             .to_string()
     };
-    let nested = names.iter().any(|n| n.replace('\\', "/").trim_matches('/').contains('/'));
+    let nested = names
+        .iter()
+        .any(|n| n.replace('\\', "/").trim_matches('/').contains('/'));
     if let Some(first) = names.first() {
         let t = top(first);
         if nested && !t.is_empty() && names.iter().all(|n| top(n) == t) {
             return t;
         }
         if files <= 1 && !t.is_empty() {
-            return first.replace('\\', "/").rsplit('/').next().unwrap_or(&t).to_string();
+            return first
+                .replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .unwrap_or(&t)
+                .to_string();
         }
     }
     format!("{} file", files.max(names.len() as u32))
@@ -473,7 +482,9 @@ impl V08 {
             tr.speed_bps = 0;
             tr.eta_s = None;
         }
-        Some(json!({ "type": "error", "id": id, "code": "cancelled", "msg": "cancelled", "retry_in_s": null }))
+        Some(
+            json!({ "type": "error", "id": id, "code": "cancelled", "msg": "cancelled", "retry_in_s": null }),
+        )
     }
 
     fn upsert(&self, id: &str, f: impl FnOnce(&mut LsTransfer)) -> LsTransfer {
@@ -638,7 +649,8 @@ impl V08 {
                     });
                 } else {
                     let dest = t.dest.clone().unwrap_or_else(|| {
-                        Path::new(&s.dest_dir)
+                        crate::core::effective_dest(&s.dest_dir)
+                            .0
                             .join(toss_core::paths::sanitize_component(&t.peer, "LocalSend"))
                             .to_string_lossy()
                             .into_owned()
@@ -798,7 +810,7 @@ impl Core {
         if !s.ls_enabled || self.v08.ls().is_some() {
             return Ok(());
         }
-        let (ls, rx) = Ls::start(&s.device_name, self.data_dir(), Path::new(&s.dest_dir))
+        let (ls, rx) = Ls::start(&s.device_name, self.data_dir(), &self.inbox())
             .await
             .context("không bật được LocalSend")?;
         *self.v08.ls_port.lock().unwrap_or_else(|p| p.into_inner()) = Some(ls.port());
@@ -913,9 +925,7 @@ impl Core {
                 })?;
             }
         } else {
-            self.node()
-                .await?
-                .answer_push(&id, accept, always)?;
+            self.node().await?.answer_push(&id, accept, always)?;
         }
         self.emit("incoming:closed", json!({ "id": id }));
         Ok(())
@@ -967,10 +977,9 @@ impl Core {
 
     pub async fn web_share_start(&self, paths: Vec<String>) -> Result<WebShare> {
         let paths = check_paths(paths)?;
-        let ls = self
-            .v08
-            .ls()
-            .ok_or_else(|| anyhow!("Bật “Hiện với máy LocalSend” trong Cài đặt để chia sẻ qua trình duyệt"))?;
+        let ls = self.v08.ls().ok_or_else(|| {
+            anyhow!("Bật “Hiện với máy LocalSend” trong Cài đặt để chia sẻ qua trình duyệt")
+        })?;
         let urls = ls.web_share_start(paths).await?;
         let Some(first) = urls.first() else {
             ls.web_share_stop().await;
@@ -992,9 +1001,7 @@ impl Core {
             return Ok(false);
         }
         use tauri_plugin_autostart::ManagerExt as _;
-        let app = self
-            .app_opt()
-            .ok_or_else(|| anyhow!("app chưa sẵn sàng"))?;
+        let app = self.app_opt().ok_or_else(|| anyhow!("app chưa sẵn sàng"))?;
         app.autolaunch()
             .enable()
             .map_err(|e| anyhow!("không bật được tự khởi động: {e}"))?;
@@ -1072,11 +1079,46 @@ mod tests {
         ];
         let contacts = [contact("aa", "Đạt (studio)", true)];
         let ls = [
-            dev("f1", "Mac Đạt", Some("Toss"), "desktop", "192.168.1.5", true), // same machine
-            dev("f2", "PC kho", Some("Toss"), "desktop", "192.168.1.20", true), // mDNS blocked there
-            dev("f3", "iPhone của Minh", Some("iPhone"), "mobile", "192.168.1.30", false),
-            dev("f4", "Galaxy", Some("Samsung"), "mobile", "192.168.1.31", false),
-            dev("f3", "iPhone của Minh", Some("iPhone"), "mobile", "192.168.1.30", false),
+            dev(
+                "f1",
+                "Mac Đạt",
+                Some("Toss"),
+                "desktop",
+                "192.168.1.5",
+                true,
+            ), // same machine
+            dev(
+                "f2",
+                "PC kho",
+                Some("Toss"),
+                "desktop",
+                "192.168.1.20",
+                true,
+            ), // mDNS blocked there
+            dev(
+                "f3",
+                "iPhone của Minh",
+                Some("iPhone"),
+                "mobile",
+                "192.168.1.30",
+                false,
+            ),
+            dev(
+                "f4",
+                "Galaxy",
+                Some("Samsung"),
+                "mobile",
+                "192.168.1.31",
+                false,
+            ),
+            dev(
+                "f3",
+                "iPhone của Minh",
+                Some("iPhone"),
+                "mobile",
+                "192.168.1.30",
+                false,
+            ),
         ];
         let trusted = [LsTrusted {
             fingerprint: "f3".into(),
@@ -1101,7 +1143,15 @@ mod tests {
         assert!(n[2].trusted);
         assert_eq!(n[3].platform, "android");
         let v = serde_json::to_value(&n[0]).unwrap();
-        for k in ["key", "kind", "name", "model", "platform", "contact_id", "trusted"] {
+        for k in [
+            "key",
+            "kind",
+            "name",
+            "model",
+            "platform",
+            "contact_id",
+            "trusted",
+        ] {
             assert!(v.get(k).is_some(), "Nearby.{k}");
         }
     }
@@ -1132,7 +1182,10 @@ mod tests {
         assert_eq!(ls_job(&s(&["x/a.jpg", "y/b.jpg"]), 2), "2 file");
         assert_eq!(ls_job(&[], 3), "3 file");
         assert_eq!(job_of(&[PathBuf::from("/a/Lớp 12A3")]), "Lớp 12A3");
-        assert_eq!(job_of(&[PathBuf::from("/a"), PathBuf::from("/b")]), "2 file");
+        assert_eq!(
+            job_of(&[PathBuf::from("/a"), PathBuf::from("/b")]),
+            "2 file"
+        );
     }
 
     #[test]
@@ -1201,7 +1254,12 @@ mod tests {
             panic!("{fx:?}")
         };
         assert_eq!(
-            (v["id"].as_str(), v["source"].as_str(), v["from_key"].as_str(), v["job"].as_str()),
+            (
+                v["id"].as_str(),
+                v["source"].as_str(),
+                v["from_key"].as_str(),
+                v["job"].as_str()
+            ),
             (Some("q1"), Some("localsend"), Some("l:fp1"), Some("Album"))
         );
         assert_eq!(v["stranger"], true);
@@ -1213,15 +1271,36 @@ mod tests {
             }
         );
         assert_eq!(fx[2], Effect::Show);
-        assert!(matches!(&fx[3], Effect::CloseLater { secs: 60, toss: false, .. }));
+        assert!(matches!(
+            &fx[3],
+            Effect::CloseLater {
+                secs: 60,
+                toss: false,
+                ..
+            }
+        ));
         assert_eq!(st.pending().len(), 1);
         // the bridge gives up on the ask → closed, no transfer row
         assert_eq!(
-            st.on_ls(&s, LsEv::Error { id: "q1".into(), msg: "hết giờ".into() }),
+            st.on_ls(
+                &s,
+                LsEv::Error {
+                    id: "q1".into(),
+                    msg: "hết giờ".into()
+                }
+            ),
             vec![Effect::Emit("incoming:closed", json!({ "id": "q1" }))]
         );
         assert!(st.pending().is_empty() && st.transfer_values().is_empty());
-        assert!(st.on_ls(&s, LsEv::Error { id: "zz".into(), msg: "x".into() }).is_empty());
+        assert!(st
+            .on_ls(
+                &s,
+                LsEv::Error {
+                    id: "zz".into(),
+                    msg: "x".into()
+                }
+            )
+            .is_empty());
         // trusted → auto accept
         s.ls_trusted.push(LsTrusted {
             fingerprint: "fp1".into(),
@@ -1267,7 +1346,10 @@ mod tests {
         let Effect::Emit("transfer:event", v) = &fx[0] else {
             panic!()
         };
-        assert_eq!((v["type"].as_str(), v["side"].as_str(), v["op"].as_str()), (Some("started"), Some("host"), Some("put")));
+        assert_eq!(
+            (v["type"].as_str(), v["side"].as_str(), v["op"].as_str()),
+            (Some("started"), Some("host"), Some("put"))
+        );
         assert!(v["contact"].is_null());
         st.on_ls(
             &s,
@@ -1300,7 +1382,12 @@ mod tests {
             panic!("{fx:?}")
         };
         assert_eq!(
-            (r.from_name.as_str(), r.job.as_str(), r.dest.as_str(), r.files),
+            (
+                r.from_name.as_str(),
+                r.job.as_str(),
+                r.dest.as_str(),
+                r.files
+            ),
             ("iPhone", "Album", "/inbox/iPhone/Album", 2)
         );
         // outgoing: resend info, error notifies, cancel wins over the error that follows
@@ -1339,7 +1426,9 @@ mod tests {
                 msg: "thiếu 1 file".into(),
             },
         );
-        assert!(matches!(&fx[1], Effect::Notify { body, .. } if body == "Lỗi khi nhận “Album 2” từ iPhone: thiếu 1 file"));
+        assert!(
+            matches!(&fx[1], Effect::Notify { body, .. } if body == "Lỗi khi nhận “Album 2” từ iPhone: thiếu 1 file")
+        );
         assert_eq!(st.transfer_values()[0]["status"], "error");
         st.clear_finished();
         // text + port
@@ -1351,8 +1440,16 @@ mod tests {
                 text: "địa chỉ studio".into(),
             },
         );
-        assert!(matches!(&fx[0], Effect::Emit("text", v) if v["text"] == "địa chỉ studio" && v["from_name"] == "Galaxy"));
-        st.on_ls(&s, LsEv::Port { port: 53318, fallback: true });
+        assert!(
+            matches!(&fx[0], Effect::Emit("text", v) if v["text"] == "địa chỉ studio" && v["from_name"] == "Galaxy")
+        );
+        st.on_ls(
+            &s,
+            LsEv::Port {
+                port: 53318,
+                fallback: true,
+            },
+        );
         assert_eq!(st.ls_port(), Some(53318));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1370,7 +1467,10 @@ mod tests {
             stranger: false,
         };
         let i = toss_incoming(&p);
-        assert_eq!((i.source.as_str(), i.from_key.as_str(), i.stranger), ("toss", "aa", false));
+        assert_eq!(
+            (i.source.as_str(), i.from_key.as_str(), i.stranger),
+            ("toss", "aa", false)
+        );
         p.stranger = true;
         assert_eq!(toss_incoming(&p).from_key, "t:aa");
         // a 0.6 core event (no `stranger`) still reads

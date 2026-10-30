@@ -169,6 +169,11 @@ pub fn run() {
                 if let Err(e) = c.start_ls().await {
                     tracing::error!("LocalSend start failed: {e:#}");
                 }
+                // v0.8: the receive folder may sit on a drive that comes and goes.
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    c.refresh_inbox();
+                }
             });
 
             // Deep links: toss://t/<ticket>

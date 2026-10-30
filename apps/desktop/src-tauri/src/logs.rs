@@ -19,7 +19,10 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Used when `RUST_LOG` is not set.
-pub const DEFAULT_FILTER: &str = "info,iroh=warn,toss_core=info";
+// swarm_discovery (mDNS) and localsend::multicast warn on EVERY packet while macOS blocks the
+// local network (EHOSTUNREACH several times a second); lanprobe already reports that state.
+pub const DEFAULT_FILTER: &str =
+    "info,iroh=warn,toss_core=info,swarm_discovery=error,localsend::multicast=error";
 /// Rotate the current file once it would grow past this.
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// Files kept: `toss.log`, `toss.1.log`, `toss.2.log`.

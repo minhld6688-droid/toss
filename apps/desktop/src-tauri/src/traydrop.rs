@@ -11,8 +11,10 @@
 use std::sync::OnceLock;
 
 use objc2::{
-    define_class, msg_send, rc::Retained, runtime::{Bool, ProtocolObject}, MainThreadMarker,
-    MainThreadOnly,
+    define_class, msg_send,
+    rc::Retained,
+    runtime::{Bool, ProtocolObject},
+    MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSDragOperation, NSDraggingInfo, NSEvent, NSPasteboardTypeFileURL,
@@ -135,7 +137,9 @@ pub fn attach(item: &NSStatusItem, handler: Handler) -> Result<(), &'static str>
         .subviews()
         .iter()
         .find(|v| v.class().name().to_bytes() == b"TaoTrayTarget")
-        .unwrap_or_else(|| Retained::into_super(Retained::into_super(Retained::into_super(button))));
+        .unwrap_or_else(|| {
+            Retained::into_super(Retained::into_super(Retained::into_super(button)))
+        });
     let frame = host.bounds();
     let view: Retained<TrayDropView> =
         unsafe { msg_send![TrayDropView::alloc(mtm), initWithFrame: frame] };

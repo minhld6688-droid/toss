@@ -231,7 +231,10 @@ mod tests {
     #[test]
     fn auto_update_defaults_to_on() {
         let mut s = Settings::default();
-        assert!(s.auto_update(), "v0.6: every machine updates by itself unless turned off");
+        assert!(
+            s.auto_update(),
+            "v0.6: every machine updates by itself unless turned off"
+        );
         s.host = Some(HostConfig::default());
         assert!(s.auto_update());
         s.auto_update = Some(false);
@@ -259,8 +262,14 @@ mod tests {
         assert_eq!(s.receive_policy, ReceivePolicy::Contacts);
         assert!(s.ls_enabled && s.ls_trusted.is_empty());
         assert!(!s.migrated_v08, "0.6 files still need the 0.8 migration");
-        assert!(!s.autostart, "the file value is kept until the migration runs");
-        assert!(Settings::default().autostart, "new installs start with the OS");
+        assert!(
+            !s.autostart,
+            "the file value is kept until the migration runs"
+        );
+        assert!(
+            Settings::default().autostart,
+            "new installs start with the OS"
+        );
         let s = Settings {
             receive_policy: ReceivePolicy::Everyone,
             ls_enabled: false,

@@ -388,7 +388,11 @@ mod tests {
                 ls_ports()
             );
         }
-        assert!(nsh.matches(&format!("delete rule name=\"{LS_RULE_NAME}\"")).count() >= 2);
+        assert!(
+            nsh.matches(&format!("delete rule name=\"{LS_RULE_NAME}\""))
+                .count()
+                >= 2
+        );
     }
 
     #[test]
