@@ -114,4 +114,9 @@ The fragment never reaches the page host; the page redirects to the deep link an
 - Release (`.github/workflows/release.yml`) on tag `v*`: `tauri-action` builds macOS universal and Windows
   installers (+ signed updater artifacts) and creates the GitHub Release; copies are uploaded as
   `Toss.dmg` and `Toss-setup.exe`. macOS signing/notarization is optional (`APPLE_*` secrets).
+- macOS signing (v0.8.1+): the whole bundle is signed — ad-hoc (`signingIdentity: "-"`), or, when the
+  `TOSS_MAC_CERT_P12` / `TOSS_MAC_CERT_PASSWORD` secrets exist (v0.8.2), with Toss's own self-signed
+  certificate (CN "Toss Code Signing"). The certificate pins the designated requirement, so the Local
+  Network permission a user grants survives updates; an ad-hoc signature changes every build.
+  `mac-sign-check.yml` builds and verifies the signature without publishing.
 - `web/` is deployed separately on Vercel. The page host is `AppState.page_host`.

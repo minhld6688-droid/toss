@@ -1,0 +1,71 @@
+name: mac-sign-check
+
+# Builds Toss.app on macOS with the release signing steps, without publishing anything,
+# and checks the signature (designated requirement pins the Toss certificate).
+on:
+  workflow_dispatch:
+  push:
+    branches: [sign-cert]
+    paths: [".github/workflows/mac-sign-check.yml", ".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Import Toss signing certificate (macOS, if configured)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          P12_B64: ${{ secrets.TOSS_MAC_CERT_P12 }}
+          P12_PW: ${{ secrets.TOSS_MAC_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${P12_B64:-}" ]; then echo "No TOSS_MAC_CERT_P12 secret: ad-hoc signing"; exit 0; fi
+          kc="$RUNNER_TEMP/toss-sign.keychain-db"; kpw=$(openssl rand -hex 16)
+          printf '%s' "$P12_B64" | base64 --decode > "$RUNNER_TEMP/toss.p12"
+          security create-keychain -p "$kpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kpw" "$kc"
+          security import "$RUNNER_TEMP/toss.p12" -k "$kc" -P "$P12_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/toss.p12" -passin "pass:$P12_PW" -nokeys -clcerts -out "$RUNNER_TEMP/toss-cert.pem"
+          # Self-signed: codesign only uses a trusted identity.
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/toss-cert.pem"
+          rm -f "$RUNNER_TEMP/toss.p12"
+          security find-identity -v -p codesigning "$kc"
+          echo "APPLE_SIGNING_IDENTITY=Toss Code Signing" >> "$GITHUB_ENV"
+          echo "TOSS_SIGNED_WITH_CERT=1" >> "$GITHUB_ENV"
+
+      - name: Build Toss.app (no updater artifacts, nothing published)
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npx tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Verify signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=$(find . -type d -path '*/bundle/macos/Toss.app' | head -n 1)
+          codesign -dv "$app" 2>&1 | tee /tmp/cs.txt
+          codesign -d -r- "$app" 2>&1 | tee -a /tmp/cs.txt
+          codesign --verify --deep --strict "$app"
+          grep -q '^Identifier=com.minhfatz.toss$' /tmp/cs.txt
+          if [ "${TOSS_SIGNED_WITH_CERT:-}" = 1 ]; then
+            grep -q 'Authority=Toss Code Signing' /tmp/cs.txt
+            grep -q 'certificate root = H' /tmp/cs.txt
+            echo "Signed with the Toss certificate"
+          else
+            echo "No certificate secrets: ad-hoc"
+          fi

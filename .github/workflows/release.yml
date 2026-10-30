@@ -96,6 +96,36 @@ jobs:
             echo "No APPLE_CERTIFICATE secret: building unsigned"
           fi
 
+      # v0.8.2: sign Toss.app with Toss's own (self-signed) certificate when the secrets exist.
+      # macOS keys the Local Network permission to the designated requirement
+      # ("identifier com.minhfatz.toss and certificate root = H…"): it then survives updates,
+      # whereas an ad-hoc signature changes with every build and the user must re-allow.
+      # Secrets: TOSS_MAC_CERT_P12 (base64 .p12), TOSS_MAC_CERT_PASSWORD. Without them: ad-hoc.
+      - name: Import Toss signing certificate (macOS, if configured)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          P12_B64: ${{ secrets.TOSS_MAC_CERT_P12 }}
+          P12_PW: ${{ secrets.TOSS_MAC_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${P12_B64:-}" ]; then echo "No TOSS_MAC_CERT_P12 secret: ad-hoc signing"; exit 0; fi
+          kc="$RUNNER_TEMP/toss-sign.keychain-db"; kpw=$(openssl rand -hex 16)
+          printf '%s' "$P12_B64" | base64 --decode > "$RUNNER_TEMP/toss.p12"
+          security create-keychain -p "$kpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kpw" "$kc"
+          security import "$RUNNER_TEMP/toss.p12" -k "$kc" -P "$P12_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/toss.p12" -passin "pass:$P12_PW" -nokeys -clcerts -out "$RUNNER_TEMP/toss-cert.pem"
+          # Self-signed: codesign only uses a trusted identity.
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/toss-cert.pem"
+          rm -f "$RUNNER_TEMP/toss.p12"
+          security find-identity -v -p codesigning "$kc"
+          echo "APPLE_SIGNING_IDENTITY=Toss Code Signing" >> "$GITHUB_ENV"
+          echo "TOSS_SIGNED_WITH_CERT=1" >> "$GITHUB_ENV"
+
       - name: Build and publish release
         id: tauri
         uses: tauri-apps/tauri-action@v1
@@ -127,6 +157,11 @@ jobs:
           codesign -dv "$app" 2>&1 | tee /tmp/cs.txt
           grep -q '^Identifier=com.minhfatz.toss$' /tmp/cs.txt || { echo "::error::Toss.app bundle is not signed as com.minhfatz.toss"; exit 1; }
           if grep -q 'Info.plist=not bound' /tmp/cs.txt; then echo "::error::Info.plist not bound"; exit 1; fi
+          if [ "${TOSS_SIGNED_WITH_CERT:-}" = 1 ]; then
+            codesign -d -r- "$app" 2>&1 | tee -a /tmp/cs.txt
+            grep -q 'Authority=Toss Code Signing' /tmp/cs.txt || { echo "::error::not signed with the Toss certificate"; exit 1; }
+            grep -q 'certificate root = H' /tmp/cs.txt || { echo "::error::designated requirement does not pin the certificate"; exit 1; }
+          fi
 
       # tauri-action names files like Toss_0.1.0_universal.dmg / Toss_0.1.0_x64-setup.exe.
       # The link page needs fixed names, so upload copies under the stable names.
