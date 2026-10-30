@@ -513,3 +513,38 @@ async fn send_errors_are_vietnamese() {
         e => panic!("{e:?}"),
     }
 }
+
+/// LocalSend receivers hold one session at a time: a second send to a busy receiver
+/// waits for the slot (409 → retry) instead of failing with "Máy kia đang bận".
+#[tokio::test]
+async fn second_send_waits_for_busy_receiver() {
+    let mut a = node("Máy A").await;
+    let b = node("Máy B").await;
+    link(&a, &b).await;
+    let (_b, mut b_rx) = auto_answer(b, true);
+    let src = tempfile::tempdir().unwrap();
+    let big = src.path().join("lớn");
+    write(&big.join("a.bin"), &vec![1u8; 40_000_000]);
+    let small = src.path().join("nhỏ");
+    write(&small.join("b.txt"), b"b");
+    let fp = _b.b.fingerprint();
+    let id1 = a.b.send(&fp, vec![big]).await.unwrap();
+    let id2 = a.b.send(&fp, vec![small]).await.unwrap();
+    let mut done = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while done.len() < 2 {
+        let ev = tokio::time::timeout_at(deadline, a.rx.recv())
+            .await
+            .expect("both sends finish")
+            .unwrap();
+        match ev {
+            LsEvent::Done { id, .. } => {
+                done.insert(id);
+            }
+            LsEvent::Error { id, msg } => panic!("send {id} failed: {msg}"),
+            _ => {}
+        }
+    }
+    assert!(done.contains(&id1) && done.contains(&id2));
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(50), b_rx.recv()).await {}
+}

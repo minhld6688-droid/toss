@@ -25,6 +25,13 @@ pub(crate) const MAX_TEXT_BYTES: usize = 64_000;
 pub(crate) const MSG_PIN: &str = "Máy kia yêu cầu mã PIN — tắt PIN trong LocalSend của máy đó";
 pub(crate) const MSG_DECLINED: &str = "Máy kia đã từ chối";
 pub(crate) const MSG_BUSY: &str = "Máy kia đang bận";
+/// How long a send waits for a receiver busy with another session (HTTP 409).
+const BUSY_WAIT: Duration = Duration::from_secs(120);
+const BUSY_RETRY: Duration = Duration::from_secs(3);
+
+fn is_busy<T>(r: &Result<Result<T, ClientError>, tokio::time::error::Elapsed>) -> bool {
+    matches!(r, Ok(Err(ClientError::StatusCode(s))) if s.status == 409)
+}
 pub(crate) const MSG_UNREACHABLE: &str =
     "Không kết nối được tới máy kia — kiểm tra hai máy cùng mạng";
 pub(crate) const MSG_TIMEOUT: &str = "Máy kia không trả lời";
@@ -263,19 +270,31 @@ async fn run_send(
         info: inner.register_dto(),
         files: dtos,
     };
-    let prep = tokio::time::timeout(
-        DECISION_TIMEOUT,
-        client.prepare_upload(
-            t.protocol,
-            &t.host,
-            t.port,
-            None,
-            payload,
-            None,
-            cancel.clone(),
-        ),
-    )
-    .await;
+    // LocalSend receivers hold ONE session at a time (409 while another one runs):
+    // wait for the slot instead of failing, like a queue.
+    let busy_until = tokio::time::Instant::now() + BUSY_WAIT;
+    let prep = loop {
+        let r = tokio::time::timeout(
+            DECISION_TIMEOUT,
+            client.prepare_upload(
+                t.protocol,
+                &t.host,
+                t.port,
+                None,
+                payload.clone(),
+                None,
+                cancel.clone(),
+            ),
+        )
+        .await;
+        if is_busy(&r) && tokio::time::Instant::now() < busy_until {
+            tokio::select! {
+                _ = tokio::time::sleep(BUSY_RETRY) => continue,
+                _ = cancel.cancelled() => return Err(cancelled()),
+            }
+        }
+        break r;
+    };
     let prep = match prep {
         Err(_) => return Err(MSG_TIMEOUT.into()),
         Ok(Err(ClientError::Cancelled)) => return Err(cancelled()),
@@ -495,21 +514,30 @@ pub(crate) async fn send_text(inner: &Arc<Inner>, fingerprint: &str, text: &str)
         files: HashMap::from([(fid.clone(), file)]),
     };
     let cancel = inner.stopped.child_token();
-    let prep = tokio::time::timeout(
-        Duration::from_secs(120),
-        client.prepare_upload(
-            t.protocol,
-            &t.host,
-            t.port,
-            None,
-            payload,
-            None,
-            cancel.clone(),
-        ),
-    )
-    .await
-    .map_err(|_| anyhow!(MSG_TIMEOUT))?
-    .map_err(|e| anyhow!(vn_error(&e)))?;
+    let busy_until = tokio::time::Instant::now() + BUSY_WAIT;
+    let prep = loop {
+        let r = tokio::time::timeout(
+            Duration::from_secs(120),
+            client.prepare_upload(
+                t.protocol,
+                &t.host,
+                t.port,
+                None,
+                payload.clone(),
+                None,
+                cancel.clone(),
+            ),
+        )
+        .await;
+        if is_busy(&r) && tokio::time::Instant::now() < busy_until {
+            tokio::time::sleep(BUSY_RETRY).await;
+            continue;
+        }
+        break r;
+    };
+    let prep = prep
+        .map_err(|_| anyhow!(MSG_TIMEOUT))?
+        .map_err(|e| anyhow!(vn_error(&e)))?;
     // 204: the receiver read the preview, nothing left to upload (the normal case).
     let Some(resp) = prep.response else {
         return Ok(());

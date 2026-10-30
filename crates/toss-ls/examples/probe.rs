@@ -8,7 +8,10 @@ use toss_ls::{LsBridge, LsConfig, LsEvent};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let folder = std::env::args().nth(1).map(PathBuf::from);
-    let secs: u64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(120);
+    let secs: u64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
     let cwd = std::env::current_dir()?;
     let (br, mut rx) = LsBridge::start(LsConfig {
         alias: "Toss thử".into(),
