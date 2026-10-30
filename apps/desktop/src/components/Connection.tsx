@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useReducedMotion } from "motion/react";
-import type { ConnectReport, FirewallState, Likelihood, NatInfo, NetConfig, NetDiagUi, PortmapState } from "../lib/ipc-types";
+import type { ConnectReport, FirewallState, Likelihood, NatInfo, NetConfig, NetDiagUi, PortmapState } from "@contracts/ipc";
 import { api, errorMessage } from "../lib/ipc";
 import { baseName, midTruncate } from "../lib/format";
 import { useStore } from "../lib/store";
@@ -323,7 +323,7 @@ export function ConnectionSection() {
         <div className={`${diag ? "mt-4" : "mt-3"} space-y-3`}>
           <TestConnect onDone={() => void reload()} />
           <Disclosure
-            title="Nâng cao" open={adv} onToggle={() => setAdv((a) => !a)}
+            title="Chi tiết kỹ thuật" open={adv} onToggle={() => setAdv((a) => !a)}
             aside={<button className="btn" disabled={exporting} onClick={exportLogs}><Icon name="file" />{exporting ? "Đang xuất…" : "Xuất log"}</button>}
           ><Advanced /></Disclosure>
         </div>

@@ -1,11 +1,11 @@
 // Single entry point for UI <-> shell calls.
 //  - real mode: @tauri-apps/api invoke()/listen()
 //  - mock mode (VITE_MOCK=1, or no Tauri runtime present): in-memory simulation (./mock)
-import type { Commands, CommandsV05, CommandsV051, Events, EventsV05, EventsV051 } from "./ipc-types";
+import type { Commands, CommandsV05, CommandsV051, CommandsV08, Events, EventsV05, EventsV051, EventsV08 } from "@contracts/ipc";
 import type { ExtraCommands, ExtraEvents } from "./ipc-extra";
 
-export type AllCommands = Commands & CommandsV05 & CommandsV051 & ExtraCommands;
-export type AllEvents = Events & EventsV05 & EventsV051 & ExtraEvents;
+export type AllCommands = Commands & CommandsV05 & CommandsV051 & CommandsV08 & ExtraCommands;
+export type AllEvents = Events & EventsV05 & EventsV051 & EventsV08 & ExtraEvents;
 
 const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 export const isMock: boolean = import.meta.env.VITE_MOCK === "1" || !hasTauri;
@@ -19,8 +19,11 @@ const COMMAND_NAMES: (keyof AllCommands)[] = [
   "share_folder", "list_quick_shares", "remove_quick_share", "set_context_menu", "set_auto_receive",
   "get_diagnostics", "add_firewall_rule", "test_connect", "set_net", "export_logs",
   "list_contacts", "create_invite", "revoke_invites", "accept_invite", "rename_contact", "set_contact_auto_accept",
-  "remove_contact", "send_to_contact", "list_incoming_pushes", "answer_push", "open_local_network_settings", "parse_invite", "expand_link",
+  "remove_contact", "open_local_network_settings", "parse_invite", "expand_link",
   "check_update", "install_update", "set_auto_update", "remote_update",
+  // v0.8 nearby + LocalSend
+  "list_nearby", "rescan_nearby", "send_to", "send_text", "list_incoming", "answer_incoming", "set_receive_policy", "set_ls_enabled",
+  "forget_trusted", "list_received", "resend", "pick_files", "web_share_start", "web_share_stop", "request_local_network",
 ];
 
 function errText(e: unknown): string {

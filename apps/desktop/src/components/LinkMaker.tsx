@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { DirEntry, TicketInfo, TicketSpec } from "../lib/ipc-types";
+import type { DirEntry, TicketInfo, TicketSpec } from "@contracts/ipc";
 import { errorMessage } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { QrLink } from "./QrLink";

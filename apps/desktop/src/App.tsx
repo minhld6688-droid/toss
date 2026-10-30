@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { api, errorMessage, isMock, on } from "./lib/ipc";
-import { Screen, useStore } from "./lib/store";
+import { Screen, scheduleNearbyRefresh, useStore } from "./lib/store";
 import { Home } from "./screens/Home";
 import { Transfers } from "./screens/Transfers";
 import { Settings } from "./screens/Settings";
@@ -9,7 +9,9 @@ import { TicketSheet } from "./components/TicketSheet";
 import { ShareView } from "./components/ShareView";
 import { SendPicker } from "./components/SendPicker";
 import { Wizard } from "./components/Wizard";
-import { AddDeviceSheet, ContactSheet, PushSheet } from "./components/Contacts";
+import { AddDeviceSheet, ContactSheet } from "./components/Contacts";
+import { IncomingSheet, TextSheet } from "./components/Incoming";
+import { PeerSheet } from "./components/Nearby";
 import { AnimatePresence, EASE, Icon } from "./components/ui";
 import { CometLayer, centerOf } from "./components/Comet";
 import { TossMark } from "./components/TossMark";
@@ -33,18 +35,21 @@ export default function App() {
   const share = useStore((s) => s.share);
   const send = useStore((s) => s.send);
   const navPulse = useStore((s) => s.navPulse);
-  const contactCount = useStore((s) => s.contacts.length);
+  const deviceCount = useStore((s) => s.contacts.length + s.nearby.length);
   const addDevice = useStore((s) => s.addDevice);
   const contactSheet = useStore((s) => s.contactSheet);
-  const pushSheet = useStore((s) => s.pushSheet && s.pushes.length > 0);
+  const peerSheet = useStore((s) => s.peerSheet);
+  const incomingSheet = useStore((s) => s.incomingSheet && s.incoming.length > 0);
+  const textSheet = useStore((s) => s.texts.length > 0);
   const reduce = useReducedMotion();
   usePointerFx();
 
   // direction of the tab change drives the screen transition
   const order: Screen[] = ["home", "transfers", "settings"];
   const prev = useRef(screen);
+  const mainRef = useRef<HTMLElement>(null);
   const dir = order.indexOf(screen) >= order.indexOf(prev.current) ? 1 : -1;
-  useEffect(() => { prev.current = screen; }, [screen]);
+  useEffect(() => { prev.current = screen; mainRef.current?.scrollTo({ top: 0 }); }, [screen]);
 
   useEffect(() => {
     const st = useStore.getState();
@@ -55,14 +60,16 @@ export default function App() {
         st.setApp(await api.get_state());
         await st.refreshTransfers();
       } catch (e) { st.toast(errorMessage(e), "error"); }
-      // v0.5: contact book, pushes waiting for an answer, and whether macOS blocks the local network
+      // contact book, devices on this network, asks waiting for an answer, received history, and whether the OS blocks the network
       void st.refreshContacts();
-      void st.refreshPushes();
-      api.get_diagnostics().then((d) => useStore.getState().setLanBlocked(!!d.lan_blocked)).catch(() => undefined);
+      void st.refreshNearby();
+      void st.refreshIncoming();
+      void st.refreshReceived();
+      void api.rescan_nearby().then(() => scheduleNearbyRefresh()).catch(() => undefined);
+      api.get_diagnostics().then((d) => { const s = useStore.getState(); s.setLanBlocked(!!d.lan_blocked); s.setFirewall(d.firewall); }).catch(() => undefined);
 
       const reg = async (p: Promise<() => void>) => { const off = await p; if (dead) off(); else offs.push(off); };
       await reg(on("transfer:event", (ev) => useStore.getState().applyEvent(ev)));
-      await reg(on("host:status", (h) => useStore.getState().setHostStatus(h)));
       await reg(on("deep-link", ({ ticket }) => { void useStore.getState().receiveLink(ticket); }));
       // v0.6: right-click "Gửi bằng Toss", menu bar / Dock icon and tray "Gửi folder…" all ask "Gửi tới ai?"
       await reg(on("share", ({ path }) => useStore.getState().openSend([path])));
@@ -72,39 +79,49 @@ export default function App() {
         // the window popped up under the menu bar icon mid-drag: show the contact book to drop on
         const s = useStore.getState();
         if (s.send || s.share) return;
-        useStore.setState({ screen: "home", sheet: null, sheetNote: null, contactSheet: null, addDevice: null, shareAsk: null });
+        useStore.setState({ screen: "home", sheet: null, sheetNote: null, contactSheet: null, peerSheet: null, addDevice: null });
       }));
       await reg(on("update:check", () => { useStore.getState().setScreen("settings"); void useUpdate.getState().runCheck(); }));
       await reg(on("share:error", ({ msg }) => useStore.getState().toast(msg, "error")));
       await reg(on("navigate", ({ screen }) => useStore.getState().setScreen(screen)));
-      await reg(on("contacts:changed", () => { void useStore.getState().refreshContacts(); void useStore.getState().refreshPushes(); }));
+      await reg(on("contacts:changed", () => { void useStore.getState().refreshContacts(); scheduleNearbyRefresh(); }));
       await reg(on("contact:presence", ({ id, online, rtt_ms }) => useStore.getState().presence(id, online, rtt_ms)));
-      await reg(on("push:incoming", (p) => useStore.getState().addPush(p)));
+      // v0.8: devices around, asks (Toss + LocalSend), text messages, what arrived
+      await reg(on("nearby:changed", () => scheduleNearbyRefresh()));
+      await reg(on("incoming", (p) => useStore.getState().addIncoming(p)));
+      await reg(on("incoming:closed", ({ id }) => useStore.getState().removeIncoming(id)));
+      await reg(on("text", (m) => useStore.getState().pushText(m)));
+      await reg(on("received", (r) => {
+        const s = useStore.getState();
+        s.addReceived(r);
+        s.toast(`Đã nhận ${r.job} từ ${r.from_name}`);
+      }));
+      await reg(on("ls:port", ({ port }) => useStore.getState().patchApp({ ls_port: port })));
       await reg(on("net:lan_blocked", ({ blocked }) => useStore.getState().setLanBlocked(blocked)));
       await reg(on("invite", ({ invite }) => useStore.getState().receiveInvite(invite)));
       // v0.5.1 in-app updates (background check, remote request, install progress)
       for (const p of listenUpdates()) await reg(p);
-      // the contact row (data-contact-id) under a point in window coordinates, for drag & drop
-      const contactAt = (x?: number, y?: number): string | null => {
+      // the device row (data-send-key: Nearby.key or contact id) under a point in window coordinates, for drag & drop
+      const targetAt = (x?: number, y?: number): string | null => {
         if (x == null || y == null) return null;
-        const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-contact-id]");
-        return el?.dataset.contactId ?? null;
+        const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-send-key]");
+        return el?.dataset.sendKey ?? null;
       };
       await reg(on("drop:hover", ({ on: v, x, y }) => {
         const s = useStore.getState();
         s.setDropHover(v);
-        s.setHoverContact(v ? contactAt(x, y) : null);
+        s.setHoverKey(v ? targetAt(x, y) : null);
       }));
-      await reg(on("drop:over", ({ x, y }) => useStore.getState().setHoverContact(contactAt(x, y))));
+      await reg(on("drop:over", ({ x, y }) => useStore.getState().setHoverKey(targetAt(x, y))));
       await reg(on("drop", ({ paths, x, y }) => {
         const s = useStore.getState();
         s.setDropHover(false);
-        s.setHoverContact(null);
+        s.setHoverKey(null);
         const sheet = s.sheet;
-        const target = contactAt(x, y);
+        const target = targetAt(x, y);
         if (target && paths.length > 0 && !sheet && !s.share) {
-          const el = document.querySelector(`[data-contact-id="${target}"]`);
-          void s.sendToContact(target, paths, el ? centerOf(el) : undefined);
+          const el = [...document.querySelectorAll("[data-send-key]")].find((e) => (e as HTMLElement).dataset.sendKey === target);
+          void s.sendTo(target, paths, el ? centerOf(el) : undefined);
         } else if (sheet && sheet.put && !sheet.admin) {
           api.start_put({ ticket: sheet.ticket, paths })
             .then(async () => { await s.refreshTransfers(); s.fly(); s.closeSheet(); s.setScreen("transfers"); s.toast("Đang gửi lại file…"); })
@@ -121,8 +138,8 @@ export default function App() {
     return () => { dead = true; offs.forEach((f) => f()); };
   }, []);
 
-  // Home with a contact book: the drop overlay stays thin so the contact rows stay crisp and readable
-  const contactsDrop = dropHover && screen === "home" && contactCount > 0;
+  // Home with devices listed: the drop overlay stays thin so the rows stay crisp and readable
+  const contactsDrop = dropHover && screen === "home" && deviceCount > 0;
   const active = Object.values(transfers).filter((t) => t.status === "running" || t.status === "connecting" || t.status === "paused").length;
 
   if (!app) return (
@@ -139,7 +156,7 @@ export default function App() {
     <div className="relative h-full flex flex-col">
       <div className="aura" /><div className="grain" />
       {isMock && <div className="relative z-10 text-center text-[10px] leading-4 tracking-wide bg-warn/15 text-warn">MOCK — dữ liệu giả lập</div>}
-      <main className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden pb-20">
+      <main ref={mainRef} className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden pb-20">
         <AnimatePresence mode="popLayout" initial={false} custom={dir}>
           <motion.div
             key={screen} custom={dir}
@@ -213,9 +230,11 @@ export default function App() {
       <AnimatePresence>{sheet && <TicketSheet key="sheet" info={sheet} />}</AnimatePresence>
       <AnimatePresence>{contactSheet && <ContactSheet key={`c-${contactSheet}`} id={contactSheet} />}</AnimatePresence>
       <AnimatePresence>{addDevice && <AddDeviceSheet key="add-device" />}</AnimatePresence>
-      <AnimatePresence>{pushSheet && <PushSheet key="push" />}</AnimatePresence>
-      <AnimatePresence>{send && !share && <SendPicker key={`send-${send.nonce}`} paths={send.paths} />}</AnimatePresence>
+      <AnimatePresence>{peerSheet && <PeerSheet key={`p-${peerSheet}`} k={peerSheet} />}</AnimatePresence>
+      <AnimatePresence>{send && !share && <SendPicker key={`send-${send.nonce}`} paths={send.paths} text={send.text} />}</AnimatePresence>
       <AnimatePresence>{share && <ShareView key={share.nonce} path={share.path} />}</AnimatePresence>
+      <AnimatePresence>{incomingSheet && <IncomingSheet key="incoming" />}</AnimatePresence>
+      <AnimatePresence>{textSheet && <TextSheet key="text" />}</AnimatePresence>
       {app.first_run && <Wizard />}
 
       <AnimatePresence>
@@ -250,7 +269,7 @@ export default function App() {
             >
               <TossMark className="w-24" speed={1.8} />
               <div className="title text-xl">Thả để <em>gửi</em></div>
-              <div className="text-xs text-mute">Rồi chọn người nhận, hoặc tạo link</div>
+              <div className="text-xs text-mute">Rồi chọn người nhận</div>
             </motion.div>}
           </motion.div>
         )}

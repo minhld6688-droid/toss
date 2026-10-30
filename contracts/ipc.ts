@@ -24,6 +24,11 @@ export interface AppState {
   net: NetConfig;               // v0.4
   auto_receive: boolean;        // v0.3: a clicked link with `get` starts downloading immediately (default true)           // true until setup finished
   auto_update: boolean;         // v0.5.1: updates install by themselves (default: on for a host, off otherwise)
+  // v0.8 (contracts/nearby-v0.8.md §4)
+  receive_policy: ReceivePolicy;                           // who may send straight in without asking (default "contacts")
+  ls_enabled: boolean;                                     // visible to / reachable by LocalSend apps (default true)
+  ls_port: number | null;                                  // LocalSend port in use; null until the bridge is up
+  ls_trusted: { fingerprint: string; alias: string }[];    // LocalSend devices that always get accepted
 }
 
 export interface Root { alias: string; path: string }
@@ -224,4 +229,56 @@ export type EventsV051 = {
   "update:phase": { phase: UpdatePhase; active: number };           // active = transfers still running while "waiting"
   "update:progress": { downloaded: number; total: number | null };  // bytes
   "update:error": { msg: string };
+};
+
+// ===========================================================================
+// ---- v0.8 nearby + LocalSend (contracts/nearby-v0.8.md) -------------------
+export type ReceivePolicy = "off" | "contacts" | "everyone";
+export type NearbyKind = "toss" | "toss_lan" | "localsend";
+export interface Nearby {
+  key: string;                 // "t:<endpoint hex>" | "l:<fingerprint>"
+  kind: NearbyKind;
+  name: string;
+  model: string | null;        // "iPhone", "Windows", "Toss"…
+  platform: string;            // "macos"|"windows"|"linux"|"ios"|"android"|"web"|""
+  contact_id: string | null;   // set when this device is already a contact (kind toss)
+  trusted: boolean;            // contact with auto_accept, or LocalSend device in ls_trusted
+}
+export interface Incoming {    // unified ask (replaces IncomingPush in the UI)
+  id: string;                  // push_id or LocalSend req_id
+  source: "toss" | "localsend";
+  from_key: string;            // Nearby.key / contact id
+  from_name: string;
+  stranger: boolean;
+  job: string; files: number; bytes: number; names: string[]; at: number;
+}
+export interface Received { id: string; from_name: string; job: string; files: number; bytes: number; dest: string; at: number }
+export interface TextMsg { from_name: string; text: string; at: number }
+export interface WebShare { urls: string[]; qr_svg: string }
+// AppState gains: receive_policy: ReceivePolicy; ls_enabled: boolean; ls_port: number | null; ls_trusted: { fingerprint: string; alias: string }[]
+
+export interface CommandsV08 {
+  list_nearby(): Promise<Nearby[]>;
+  rescan_nearby(): Promise<void>;
+  send_to(args: { key: string; paths: string[] }): Promise<string>;     // key = Nearby.key or contact id; transfer id
+  send_text(args: { key: string; text: string }): Promise<void>;
+  list_incoming(): Promise<Incoming[]>;
+  answer_incoming(args: { id: string; accept: boolean; always: boolean }): Promise<void>;
+  set_receive_policy(args: { policy: ReceivePolicy }): Promise<void>;
+  set_ls_enabled(args: { on: boolean }): Promise<void>;
+  forget_trusted(args: { fingerprint: string }): Promise<void>;
+  list_received(): Promise<Received[]>;
+  resend(args: { id: string }): Promise<string>;
+  pick_files(args: { title: string }): Promise<string[]>;
+  web_share_start(args: { paths: string[] }): Promise<WebShare>;
+  web_share_stop(): Promise<void>;
+  request_local_network(): Promise<void>;   // macOS: triggers the OS prompt; else no-op
+}
+export type EventsV08 = {
+  "nearby:changed": Record<string, never>;
+  "incoming": Incoming;
+  "incoming:closed": { id: string };        // answered elsewhere / timed out
+  "received": Received;
+  "text": TextMsg;
+  "ls:port": { port: number; fallback: boolean };
 };

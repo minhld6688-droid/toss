@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { JobRecord } from "../lib/ipc-types";
+import type { JobRecord } from "@contracts/ipc";
 import { api, errorMessage } from "../lib/ipc";
 import { fmtBytes, fmtDate, fmtExpiry } from "../lib/format";
 import { useStore } from "../lib/store";
