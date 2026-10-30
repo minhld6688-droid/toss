@@ -235,3 +235,97 @@ control channel.
 Pairing, presence and push between contacts ("Danh bạ máy"). Invite string
 `tossinv1…`, `PeerReq`/`PeerResp`, push data phase = xfer/2 put semantics:
 see `contracts/contacts-v0.5.md` §2 and `contracts/CHANGES.md` (2026-10-23).
+
+## 7. v0.8 — nearby (mDNS), pushes and text to non-contacts (`contracts/nearby-v0.8.md` §1)
+
+### 7.1 mDNS user data
+Every node with `net.mdns` advertises, next to its addresses under
+`_toss._udp.local`, the TXT user data (iroh `UserData`, ≤ 245 bytes):
+
+```
+n=<device name>;p=<platform>;v=<app version>        e.g. "n=Đạt – Mac;p=macos;v=0.8.0"
+```
+`;` and `=` in a value are replaced by `,` and `-`; control characters are
+dropped; the name is cut (at a character boundary) so the whole string fits
+245 bytes. Unknown keys are ignored when parsing; a missing key is "". A Toss
+< 0.8 advertises no user data (shown with version "" — it cannot receive
+`PushFrom`/`Text`). The user data is set **only on the mDNS service** (a
+wrapper around `MdnsAddressLookup` adds it to what iroh publishes), not via
+`Endpoint::set_user_data_for_address_lookup`, which would also publish the
+device name to the n0 DNS/pkarr servers. It is re-published at once on
+`Node::set_device_name`.
+
+Nearby store (runtime only): `MdnsAddressLookup::subscribe()` `Discovered` →
+upsert (`id`, name/platform/version from the user data, direct addrs),
+`Expired` → remove. iroh only reports *changes* to subscribers, so every 30 s
+entries not announced for 60 s are looked up again (the mDNS cache answers
+while the peer has not expired) and entries not seen for **3 min** are dropped.
+A contact seen nearby is marked online at once.
+
+### 7.2 `toss/peer/1` additions (append-only)
+Postcard encodes enum variants by index; the v0.5 indices are unchanged, the
+new variants are appended (checked by `wire::tests::peer_variant_indices_are_stable`):
+
+```
+PeerReq  = Pair(0) | Hello(1) | Push(2)
+         | PushFrom(3) { push_id: [u8;16], job, files: u32, bytes: u64, name, platform, version }
+         | Text(4)     { name, text }                      // text ≤ 60 KiB UTF-8 (MAX_TEXT)
+PeerResp = Paired(0) | Pong(1) | PushAccepted(2) | PushDeclined(3) | PushQueued(4) | Denied(5)
+         | PushAcceptedPaired(6) { name, platform, version }
+         | TextOk(7)
+```
+- Sender: a **contact** always gets `Push` (so 0.6 contacts keep working);
+  `PushFrom` goes only to a non-contact taken from the nearby store, dialed at
+  the addresses mDNS saw (plus any contact hint). `Text` goes to contacts and
+  nearby devices. `PushAcceptedPaired` / `TextOk` are only sent in reply to
+  `PushFrom` / `Text`.
+- Receiver gate: `PushFrom` and `Text` from a non-contact are allowed only when
+  its endpoint id is in the receiver's nearby store; otherwise `Denied`. `Hello`
+  and `Push` from a non-contact are `Denied` as in v0.5. A `PushFrom` from a
+  contact is handled as a contact push.
+- Receive policy (`Node::set_receive_policy`): `off` → every push asks
+  (contacts too); `contacts` (default) → contact with `auto_accept` at once,
+  everyone else asks; `everyone` → like `contacts`, plus nearby strangers at
+  once (not added to contacts). A push id accepted once is not asked again when
+  it resumes. Ask = `PushQueued` + `PushIncoming{stranger}` event, answered by
+  `answer_push(push_id, accept, always)` within 10 min.
+- `always` on a contact sets its `auto_accept = true`. On a stranger it adds the
+  sender as a contact (name/platform from `PushFrom`, addresses from mDNS,
+  `auto_accept = true`) and the receiver answers **`PushAcceptedPaired`**
+  (sent whenever the request was `PushFrom` and the sender is a contact of the
+  receiver after the answer); the sender then adds the receiver as a contact
+  too. The data phase after `PushAccepted` / `PushAcceptedPaired` is the v0.5
+  push data phase (xfer/2 put semantics). Stranger pushes land in
+  `<inbox>/<sender name>/<job>/`.
+- `Text`: contacts and nearby strangers → `TextIncoming` event on the receiver
+  (any policy; control characters except `\n`/`\t` removed), answered `TextOk`.
+  Nothing is stored.
+
+### 7.3 Compatibility with 0.6 peers
+- 0.6 → 0.8 and 0.8 → 0.6 between contacts: unchanged messages (`Pair`,
+  `Hello`, `Push`, …), verified by decoding v0.8 encodings with the 0.6 enum
+  (`tests/nearby.rs::old_variants_decode_as_0_6`).
+- 0.8 → 0.6 non-contact: the 0.6 node cannot decode `PushFrom`/`Text` and
+  closes the connection with code 1 / reason `"bad request"`. The 0.8 sender
+  detects that close reason and reports (Vietnamese, final, no retry) "Máy kia
+  đang dùng Toss bản cũ — cập nhật Toss trên máy đó (bản 0.8 trở lên) rồi thử
+  lại" (`tests/nearby.rs::old_peer_gets_a_clear_error`).
+- 0.6 never sends the new variants. A 0.6 node advertises no mDNS user data;
+  a 0.8 node lists it in `nearby()` with version "".
+
+### 7.4 Single-file tickets
+A ticket's `root/path` may name a **file**: the manifest then has exactly one
+entry whose `rel` is the file name, and `get` saves `<dest>/<job>/<file name>`.
+Quick share of a file = the file's parent folder as root, the file name as
+`path`, job = the file name without extension (`toss_core::paths::share_target`).
+This is how a host has always built manifests (`host::build_manifest`), and the
+client get path (`client::plan_get`) is byte-for-byte the one shipped in 0.6.0,
+so **0.6 (and 0.4/0.5) clients download file links fine** — no version bump
+(`tests/nearby.rs::single_file_ticket_get` also runs the xfer/1 path).
+
+### 7.5 Error texts
+Every error that reaches the UI (transfer `Error.msg`, `Node`/`CtlClient` API
+errors, `DenyReason`'s `Display`, `TicketError`'s `Display`) is Vietnamese since
+0.8. Messages *on the wire* that old peers parse (`Done.msg` with "hash
+mismatch" / "skipped") stay English; they are logged and replaced by
+Vietnamese text before they reach the UI.

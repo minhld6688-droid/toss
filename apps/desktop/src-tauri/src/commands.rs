@@ -16,10 +16,10 @@ use crate::{
     core::{self, Core},
     firewall,
     ipc::{
-        AppState, Contact, HostConfig, IncomingPush, InviteInfo, JobRecord, NetDiagUi, TicketInfo,
-        TicketSpec,
+        AppState, Contact, HostConfig, Incoming, IncomingPush, InviteInfo, JobRecord, Nearby,
+        NetDiagUi, Received, TicketInfo, TicketSpec, WebShare,
     },
-    settings::QuickShare,
+    settings::{QuickShare, ReceivePolicy},
     shell::Shell,
     updater,
 };
@@ -138,6 +138,25 @@ pub async fn pick_folder(
             Ok(Some(path.to_string_lossy().into_owned()))
         }
     }
+}
+
+/// v0.8: native multi-file dialog. Empty = cancelled.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pick_files(app: AppHandle, window: WebviewWindow, title: String) -> Res<Vec<String>> {
+    let picked = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title(title)
+            .set_parent(&window)
+            .blocking_pick_files()
+    })
+    .await?;
+    Ok(picked
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect())
 }
 
 /// Reveal / open a folder in Finder / Explorer.
@@ -361,6 +380,84 @@ pub async fn list_incoming_pushes(core: C<'_>) -> Res<Vec<IncomingPush>> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn answer_push(core: C<'_>, push_id: String, accept: bool) -> Res<()> {
     Ok(core.answer_push(push_id, accept).await?)
+}
+
+// ---- v0.8 nearby + LocalSend (contracts/nearby-v0.8.md §4) ------------------------------------
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_nearby(core: C<'_>) -> Res<Vec<Nearby>> {
+    Ok(core.list_nearby().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn rescan_nearby(core: C<'_>) -> Res<()> {
+    Ok(core.rescan_nearby().await?)
+}
+
+/// `key` = `Nearby.key` or a contact id; returns the transfer id.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_to(core: C<'_>, key: String, paths: Vec<String>) -> Res<String> {
+    Ok(core.send_to(key, paths).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_text(core: C<'_>, key: String, text: String) -> Res<()> {
+    Ok(core.send_text(key, text).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_incoming(core: C<'_>) -> Res<Vec<Incoming>> {
+    Ok(core.list_incoming().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn answer_incoming(core: C<'_>, id: String, accept: bool, always: bool) -> Res<()> {
+    Ok(core.answer_incoming(id, accept, always).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_receive_policy(core: C<'_>, policy: ReceivePolicy) -> Res<()> {
+    Ok(core.set_receive_policy(policy).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_ls_enabled(core: C<'_>, on: bool) -> Res<()> {
+    Ok(core.set_ls_enabled(on).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn forget_trusted(core: C<'_>, fingerprint: String) -> Res<()> {
+    Ok(core.forget_trusted(fingerprint)?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_received(core: C<'_>) -> Res<Vec<Received>> {
+    Ok(core.list_received())
+}
+
+/// Same items to the same target as finished transfer `id`; returns the new transfer id.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn resend(core: C<'_>, id: String) -> Res<String> {
+    Ok(core.resend(id).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn web_share_start(core: C<'_>, paths: Vec<String>) -> Res<WebShare> {
+    Ok(core.web_share_start(paths).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn web_share_stop(core: C<'_>) -> Res<()> {
+    core.web_share_stop().await;
+    Ok(())
+}
+
+/// macOS: sends one multicast packet so the Local Network prompt appears now. Elsewhere: no-op.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn request_local_network() -> Res<()> {
+    if cfg!(target_os = "macos") {
+        tokio::task::spawn_blocking(crate::nearby::poke_local_network).await??;
+    }
+    Ok(())
 }
 
 /// macOS: opens System Settings → Privacy & Security → Local Network. Elsewhere: no-op.

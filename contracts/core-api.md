@@ -148,3 +148,77 @@ toss-cli ctl <admin-ticket> status | ls ROOT [PATH] | ticket ... | jobs
 ```
 `host` runs until Ctrl-C and prints each job event as one line. Global flags:
 `--data-dir`, `--name`.
+
+## v0.8 additions (`contracts/nearby-v0.8.md` §1; wire: `wire.md` §7)
+
+```rust
+pub use toss_core::{NearbyPeer, ReceivePolicy};          // module toss_core::nearby
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NearbyPeer {
+    pub id: String,            // endpoint id hex (same format as Contact.id)
+    pub name: String,          // advertised name; Toss < 0.8: contact name or "Máy xxxxxx"
+    pub platform: String,      // "" = unknown (Toss < 0.8)
+    pub version: String,       // "" = Toss < 0.8 (cannot receive pushes/text from non-contacts)
+    pub addrs: Vec<String>,    // direct socket addrs seen via mDNS ("192.168.1.5:51234")
+    pub last_seen: u64,        // unix s of the last announcement / lookup answer
+    pub contact: bool,         // already in contacts
+}
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceivePolicy { Off, #[default] Contacts, Everyone }
+impl ReceivePolicy { pub fn auto_accepts(self, contact_auto: Option<bool>) -> bool; }
+
+impl Node {
+    pub fn nearby(&self) -> Vec<NearbyPeer>;                       // sorted by name, self excluded; [] when net.mdns is off
+    pub fn set_device_name(&self, name: &str);                     // Hello/Pair/PushFrom/Text + mDNS user data; "" ignored
+    pub fn device_name(&self) -> &str;                             // now the current name (after set_device_name)
+    pub async fn send_to_peer(&self, id: &str, paths: Vec<PathBuf>) -> Result<Transfer>; // contact OR nearby stranger
+    pub async fn send_text(&self, id: &str, text: &str) -> Result<()>;                  // contact or nearby; ≤ 60 KiB
+    pub fn set_receive_policy(&self, p: ReceivePolicy);            // default Contacts; not persisted by core
+    pub fn receive_policy(&self) -> ReceivePolicy;
+    pub fn answer_push(&self, push_id: &str, accept: bool, always: bool) -> Result<()>; // REPLACES the 2-arg form
+    pub async fn resend(&self, transfer_id: &TransferId) -> Result<Transfer>;          // same paths, same target
+    // unchanged: send_to_contact (contacts only), incoming_pushes (now also strangers' pushes)
+}
+
+// toss_core::paths — quick share of a folder OR a file (shell `share_folder`):
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ShareTarget { pub root: PathBuf /* canonical folder, or the file's parent */,
+                         pub path: String /* "" or the file name */, pub job: String /* folder name / file stem */,
+                         pub is_file: bool }
+pub fn share_target(p: &Path) -> anyhow::Result<ShareTarget>;   // Vietnamese errors
+// → HostConfig root { alias, path: root } + TicketSpec { job, root: alias, path, get: true, .. };
+//   `get` of that ticket saves <dest>/<job>/<file name>.
+
+// TransferEvent additions (serde tag "type"):
+//   NearbyChanged {}                                   -> {"type":"nearby_changed"}
+//   TextIncoming { from_id, from_name, text, at }      -> {"type":"text_incoming",...}
+// IncomingPush gains `stranger: bool` (serde default false).
+// TransferState.contact / Started.contact: the receiver's endpoint id for every push, also to a stranger.
+// Receiver-side Done of a push carries dest = the job folder (<inbox>/<sender>/<job>).
+// resume::TransferRecord gains `stranger: bool` (serde default false).
+```
+
+Semantics:
+- `send_to_peer`: a contact → exactly `send_to_contact`; else the id must be in
+  `nearby()` (error "Không thấy máy này trong mạng LAN nữa …" otherwise). The
+  push waits ("Chờ <name> mở Toss trong cùng mạng LAN") while the stranger is not
+  nearby, like pushes to offline contacts. After the receiver answered "always",
+  both sides are contacts (`ContactsChanged` on both).
+- `answer_push(always)`: contact → `auto_accept = true`; stranger → added as
+  contact (`auto_accept = true`) before the call returns.
+- `resend`: client transfers only (push, ticket put; a ticket get downloads
+  again into the same folder). Errors in Vietnamese: unknown id, receive-side
+  transfer, expired link, missing source files.
+- `set_device_name` changes what `device_name()` returns (an interned
+  `&'static str`, so the `&str` signature stays).
+- Error strings: every `Node`/`CtlClient` error and every `TransferEvent::Error.msg`
+  is one Vietnamese sentence (details go to the log at info/warn).
+
+Test hooks (`#[doc(hidden)] toss_core::testing`, not part of the contract):
+`add_nearby(&Node, NearbyPeer)`, `expire_nearby(&Node, id)`,
+`age_nearby(&Node, id, secs)` (then sweeps), `advertised_user_data(&Node)`.
+
+CLI: `toss-cli nearby [--wait 6]`, `toss-cli send-text <id|prefix|name> <text>`,
+and `toss-cli send` also accepts a nearby device that is not a contact.

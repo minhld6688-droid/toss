@@ -16,7 +16,8 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde_json::Value;
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_notification::NotificationExt as _;
@@ -27,12 +28,21 @@ use toss_core::{
 };
 
 use crate::{
-    config, core_v05, firewall,
-    ipc::{AppState, HostConfig, JobLast, JobRecord, NetDiagUi, Root, TicketInfo, TicketSpec},
+    config, firewall,
+    ipc::{
+        AppState, HostConfig, IncomingPush, JobLast, JobRecord, NetDiagUi, Received, Root, TextMsg,
+        TicketInfo, TicketSpec,
+    },
     logs,
+    nearby::{self, Effect, V08},
     settings::{data_dir, QuickShare, Settings},
     shortlink::{self, ShortLinks},
 };
+
+/// Core struct -> shell mirror with the same serde shape (and shell value -> core argument).
+pub fn via_serde<T: Serialize, U: DeserializeOwned>(t: &T) -> Result<U> {
+    Ok(serde_json::from_value(serde_json::to_value(t)?)?)
+}
 
 /// Alias prefix reserved for quick-share roots.
 pub const QS_PREFIX: &str = "qs-";
@@ -70,6 +80,8 @@ pub struct Core {
     port_fallback: StdMutex<Option<u16>>,
     /// v0.5.2 short links this device made (`shortlinks.json`).
     short: Arc<ShortLinks>,
+    /// v0.8: LocalSend bridge, its asks and transfers, received history.
+    pub(crate) v08: V08,
 }
 
 impl Core {
@@ -80,6 +92,7 @@ impl Core {
     pub fn with_dir(dir: PathBuf) -> Core {
         let settings = Settings::load(&dir);
         let short = Arc::new(ShortLinks::load(&dir));
+        let v08 = V08::new(&dir);
         Core {
             data_dir: dir,
             app: OnceLock::new(),
@@ -91,6 +104,7 @@ impl Core {
             host_lock: Mutex::new(()),
             port_fallback: StdMutex::new(None),
             short,
+            v08,
         }
     }
 
@@ -100,6 +114,15 @@ impl Core {
 
     fn app(&self) -> Result<&AppHandle> {
         self.app.get().ok_or_else(|| anyhow!("app chưa sẵn sàng"))
+    }
+
+    /// The app handle once `attach`ed (None in unit tests).
+    pub(crate) fn app_opt(&self) -> Option<&AppHandle> {
+        self.app.get()
+    }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     // ---- settings helpers ------------------------------------------------
@@ -113,7 +136,7 @@ impl Core {
     /// Mutates and saves under one lock: concurrent updates (e.g. two commands
     /// from the UI) must neither write an older snapshot over a newer one nor
     /// race on the temp file. A failed save rolls the in-memory change back.
-    fn update_settings<R>(&self, f: impl FnOnce(&mut Settings) -> R) -> Result<R> {
+    pub(crate) fn update_settings<R>(&self, f: impl FnOnce(&mut Settings) -> R) -> Result<R> {
         let mut s = self.settings.lock().unwrap_or_else(|p| p.into_inner());
         let before = s.clone();
         let r = f(&mut s);
@@ -189,7 +212,10 @@ impl Core {
             Err(e) => return Err(e),
         };
         let node = Arc::new(node);
-        core_v05::set_inbox_dir(&node, PathBuf::from(self.settings().dest_dir));
+        // v0.5: pushes land under the receive folder; v0.8: who may send without asking.
+        let s = self.settings();
+        node.set_inbox_dir(PathBuf::from(&s.dest_dir));
+        node.set_receive_policy(s.receive_policy);
         // Forward events before host mode starts emitting them.
         self.spawn_forwarder(&node);
         if let Some(h) = host {
@@ -250,12 +276,6 @@ impl Core {
                 }
             }
         });
-    }
-
-    /// Restart the node so a new device name takes effect. Skipped while transfers are active
-    /// (the name is then applied at next launch).
-    async fn restart_for_rename(&self) -> Result<()> {
-        self.restart_node().await.map(|_| ())
     }
 
     /// Restarts the node with the current settings (device name, host port, `net`). Deferred
@@ -376,6 +396,7 @@ impl Core {
             .ok()
             .and_then(|a| a.autolaunch().is_enabled().ok())
             .unwrap_or(s.autostart);
+        let receive_policy = s.receive_policy;
         Ok(AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             endpoint_id,
@@ -389,6 +410,10 @@ impl Core {
             auto_receive: s.auto_receive,
             net: s.net.clone(),
             auto_update: s.auto_update(),
+            receive_policy,
+            ls_enabled: s.ls_enabled,
+            ls_port: self.v08.ls_port(),
+            ls_trusted: s.ls_trusted.clone(),
         })
     }
 
@@ -416,6 +441,7 @@ impl Core {
             .iter()
             .filter(|t| t.status == toss_core::transfer::Status::Running)
             .count()
+            + self.v08.running()
     }
 
     pub async fn finish_setup(&self, device_name: String, dest_dir: String) -> Result<AppState> {
@@ -423,29 +449,51 @@ impl Core {
         std::fs::create_dir_all(&dest_dir)
             .with_context(|| format!("không tạo được thư mục {dest_dir}"))?;
         self.update_settings(|s| {
-            s.device_name = name;
+            s.device_name = name.clone();
             s.dest_dir = dest_dir;
             s.first_run = false;
         })?;
-        self.restart_for_rename().await?;
+        self.apply_device_name(&name).await;
+        self.set_dest_dir_live();
         self.state().await
     }
 
     pub async fn set_device_name(&self, name: String) -> Result<()> {
         let name = clean_name(&name)?;
-        self.update_settings(|s| s.device_name = name)?;
-        self.restart_for_rename().await
+        self.update_settings(|s| s.device_name = name.clone())?;
+        self.apply_device_name(&name).await;
+        Ok(())
+    }
+
+    /// v0.8: the running node (Hello/Pair name + mDNS) and the LocalSend alias take a new name
+    /// live, no restart.
+    async fn apply_device_name(&self, name: &str) {
+        if let Some(n) = self.node.read().await.clone() {
+            n.set_device_name(name);
+        }
+        if let Some(ls) = self.v08.ls() {
+            ls.set_alias(name).await;
+        }
+    }
+
+    /// Pushes (Toss and LocalSend) land under the current receive folder.
+    fn set_dest_dir_live(&self) {
+        let dest = PathBuf::from(self.settings().dest_dir);
+        if let Ok(guard) = self.node.try_read() {
+            if let Some(n) = guard.as_ref() {
+                n.set_inbox_dir(dest.clone());
+            }
+        }
+        if let Some(ls) = self.v08.ls() {
+            ls.set_dest(dest);
+        }
     }
 
     pub fn set_dest_dir(&self, path: String) -> Result<()> {
         std::fs::create_dir_all(&path).with_context(|| format!("không tạo được thư mục {path}"))?;
         self.update_settings(|s| s.dest_dir = path.clone())?;
-        // v0.5: files pushed by contacts land under the same folder.
-        if let Ok(guard) = self.node.try_read() {
-            if let Some(n) = guard.as_ref() {
-                core_v05::set_inbox_dir(n, PathBuf::from(path));
-            }
-        }
+        // v0.5: files pushed by contacts land under the same folder (v0.8: LocalSend too).
+        self.set_dest_dir_live();
         Ok(())
     }
 
@@ -509,26 +557,29 @@ impl Core {
             && *self.port_fallback.lock().unwrap_or_else(|p| p.into_inner()) == want_port;
         if want_port.is_some() && want_port != node.bind_port() && !fell_back {
             drop(node);
-            self.restart_for_rename().await?;
+            self.restart_node().await?;
         }
         Ok(())
     }
 
     // ---- quick share (v0.3) ------------------------------------------------------------
     /// Right-click → "Tạo link Toss": serve `path` as a quick-share root (host mode is
-    /// turned on if needed) and create a get ticket for the whole folder. Clipboard and
-    /// notification are done by the command (needs the app handle).
+    /// turned on if needed) and create a get ticket for the whole folder. v0.8: a single FILE
+    /// is shared with its parent folder as the root and the file as the ticket path.
+    /// Clipboard and notification are done by the command (needs the app handle).
     pub async fn share_folder(&self, path: String, days: u32, put: bool) -> Result<TicketInfo> {
         let _g = self.host_lock.lock().await;
         let raw = path.trim();
-        let canon = toss_core::paths::canonicalize(Path::new(raw))
-            .map_err(|_| anyhow!("Không tìm thấy thư mục {raw}"))?;
-        if !canon.is_dir() {
-            bail!("“{raw}” không phải là thư mục");
-        }
+        // root = the folder itself or the file's parent; path = "" or the file name.
+        let t = toss_core::paths::share_target(Path::new(raw))?;
+        let (canon, file) = (t.root.clone(), t.path.clone());
         let canon_s = canon.to_string_lossy().into_owned();
         let alias = quick_share_alias(&canon_s);
-        let job = share_job_name(&canon);
+        let job = if t.is_file {
+            toss_core::paths::sanitize_component(&t.job, "Toss")
+        } else {
+            share_job_name(&canon)
+        };
 
         // 1. settings: add/keep the root; turn host mode on if it is off.
         let (added, auto_on, ret) = self.update_settings(|s| {
@@ -578,7 +629,7 @@ impl Core {
             .create_ticket(TicketSpec {
                 job,
                 root: alias.clone(),
-                path: String::new(),
+                path: file,
                 ret: String::new(),
                 get: true,
                 put,
@@ -764,30 +815,49 @@ impl Core {
         Ok(tr.id.clone())
     }
 
+    /// Core transfers ∪ v0.8 LocalSend transfers (same `TransferState` shape).
     pub async fn list_transfers(&self) -> Result<Vec<Value>> {
         let node = self.node().await?;
-        Ok(node
+        let mut v: Vec<Value> = node
             .transfers()
             .iter()
             .filter_map(|t| serde_json::to_value(t).ok())
-            .collect())
+            .collect();
+        v.extend(self.v08.transfer_values());
+        Ok(v)
     }
 
     pub async fn pause(&self, id: String) -> Result<()> {
+        if self.v08.is_transfer(&id) {
+            bail!("Không tạm dừng được khi gửi qua LocalSend — huỷ rồi gửi lại");
+        }
         self.node().await?.pause(&id).await
     }
 
     pub async fn resume(&self, id: String) -> Result<()> {
+        if self.v08.is_transfer(&id) {
+            bail!("Không tiếp tục được khi gửi qua LocalSend — bấm Gửi lại");
+        }
         self.node().await?.resume(&id).await
     }
 
     pub async fn cancel(&self, id: String) -> Result<()> {
+        if let Some(ev) = self.v08.mark_cancelled(&id) {
+            if let Some(ls) = self.v08.ls() {
+                ls.cancel(&id);
+            }
+            if let Some(app) = self.app_opt() {
+                let _ = app.emit("transfer:event", ev);
+            }
+            return Ok(());
+        }
         self.node().await?.cancel(&id).await
     }
 
     /// Not in core-api.md, but provided by toss-core (see CHANGES.md).
     pub async fn clear_finished(&self) -> Result<()> {
         self.node().await?.clear_finished();
+        self.v08.clear_finished();
         Ok(())
     }
 
@@ -1340,40 +1410,76 @@ fn is_active(v: &Value) -> bool {
 /// What the forwarder knows about each transfer id.
 #[derive(Default)]
 struct Seen {
-    /// Started and not yet finished: (job, is_client_side), to word notifications.
-    open: HashMap<String, (String, bool)>,
+    /// Started and not yet finished, to word notifications and history entries.
+    open: HashMap<String, Open>,
     /// A final event (done / final error) was forwarded.
     finished: HashSet<String>,
 }
 
+struct Open {
+    job: String,
+    client: bool,
+    put: bool,
+    peer: String,
+}
+
+/// What a final event means for the user.
+#[derive(Debug, PartialEq)]
+enum Track {
+    /// Plain notification (sent, failed).
+    Notify(String),
+    /// v0.8: files arrived (client get, or a push / link put received here).
+    Received(Received),
+}
+
 impl Seen {
-    /// Book-keeping for one event. Returns the notification to show, if any.
-    fn track(&mut self, v: &Value) -> Option<String> {
+    /// Book-keeping for one event. Returns what to tell the user, if anything.
+    fn track(&mut self, v: &Value) -> Option<Track> {
         let id = v["id"].as_str().unwrap_or("").to_string();
         match v["type"].as_str().unwrap_or("") {
             "started" => {
-                let job = v["job"].as_str().unwrap_or("").to_string();
-                self.open.insert(id, (job, v["side"] == "client"));
+                self.open.insert(
+                    id,
+                    Open {
+                        job: v["job"].as_str().unwrap_or("").to_string(),
+                        client: v["side"] == "client",
+                        put: v["op"] == "put",
+                        peer: v["peer"].as_str().unwrap_or("").to_string(),
+                    },
+                );
                 None
             }
             "done" => {
                 self.finished.insert(id.clone());
-                let (job, client) = self.open.remove(&id)?;
-                let verb = if v["dest"].is_null() {
-                    "Đã gửi xong"
-                } else {
-                    "Đã nhận xong"
-                };
-                client.then(|| format!("{verb}: {job}"))
+                let o = self.open.remove(&id)?;
+                let receive = o.client != o.put; // client get, or host side of a put / push
+                match v["dest"].as_str() {
+                    Some(dest) if receive => Some(Track::Received(Received {
+                        id,
+                        from_name: if o.peer.is_empty() {
+                            "máy khác".into()
+                        } else {
+                            o.peer
+                        },
+                        job: o.job,
+                        files: v["files"].as_u64().unwrap_or(0) as u32,
+                        bytes: v["bytes"].as_u64().unwrap_or(0),
+                        dest: dest.to_string(),
+                        at: toss_core::util::now_unix(),
+                    })),
+                    _ if o.client => Some(Track::Notify(format!("Đã gửi xong: {}", o.job))),
+                    _ => None,
+                }
             }
             "error" if v["retry_in_s"].is_null() => {
                 self.finished.insert(id.clone());
-                let (job, client) = self.open.remove(&id)?;
-                (client && v["code"] != "cancelled").then(|| {
-                    format!(
-                        "Lỗi khi chuyển “{job}”: {}",
+                let o = self.open.remove(&id)?;
+                (o.client && v["code"] != "cancelled").then(|| {
+                    Track::Notify(format!(
+                        "Lỗi khi chuyển “{}”: {}",
+                        o.job,
                         v["msg"].as_str().unwrap_or("")
-                    )
+                    ))
                 })
             }
             _ => None,
@@ -1420,40 +1526,85 @@ fn resync_events(snaps: &[Value], seen: &Seen) -> Vec<Value> {
     out
 }
 
-/// Emit one core event to the UI (+ derived `host:status`, + native notifications).
+/// Emit one core event to the UI (+ derived events, notifications, history).
 fn forward(app: &AppHandle, seen: &mut Seen, v: Value) {
     // v0.5.1: an admin device asked this host to update the app (not a UI event).
     if v["type"] == "update_requested" {
         crate::updater::on_remote_request(app, v["device"].as_str().unwrap_or("máy admin"));
         return;
     }
-    let _ = app.emit("transfer:event", &v);
+    nearby::apply(app, core_effects(seen, v));
+}
+
+/// What one core event means for the app: always `transfer:event`, plus the event's own UI name
+/// (v0.5 / v0.8), the unified `incoming` ask, notifications and received history.
+fn core_effects(seen: &mut Seen, v: Value) -> Vec<Effect> {
+    let mut fx = vec![Effect::Emit("transfer:event", v.clone())];
+    match v["type"].as_str().unwrap_or("") {
+        "nearby_changed" => {
+            fx.push(Effect::Emit("nearby:changed", json!({})));
+            return fx;
+        }
+        "text_incoming" => {
+            let msg = TextMsg {
+                from_name: v["from_name"].as_str().unwrap_or("Máy khác").to_string(),
+                text: v["text"].as_str().unwrap_or("").to_string(),
+                at: v["at"]
+                    .as_u64()
+                    .unwrap_or_else(toss_core::util::now_unix),
+            };
+            fx.push(Effect::Emit(
+                "text",
+                serde_json::to_value(&msg).unwrap_or_default(),
+            ));
+            fx.push(Effect::Notify {
+                body: nearby::text_note(&msg.from_name, &msg.text),
+                open: None,
+            });
+            return fx;
+        }
+        "host_status" => {
+            let mut p = v.clone();
+            if let Some(o) = p.as_object_mut() {
+                o.remove("type");
+            }
+            fx.push(Effect::Emit("host:status", p));
+            return fx;
+        }
+        _ => {}
+    }
     // v0.5: contacts / presence / pushes / Local Network events also get their own UI event name.
     if let Some((name, payload)) = v05_event(&v) {
-        if name == "push:incoming" {
-            notify(
-                app,
-                &format!(
-                    "{} muốn gửi {}",
-                    payload["from_name"].as_str().unwrap_or("Một máy"),
-                    payload["job"].as_str().unwrap_or("file")
-                ),
-            );
+        let push = (name == "push:incoming")
+            .then(|| serde_json::from_value::<IncomingPush>(payload.clone()).ok())
+            .flatten();
+        fx.push(Effect::Emit(name, payload));
+        // v0.8: the same ask in the unified shape; window comes forward.
+        if let Some(push) = push {
+            let inc = nearby::toss_incoming(&push);
+            fx.push(Effect::Emit(
+                "incoming",
+                serde_json::to_value(&inc).unwrap_or_default(),
+            ));
+            fx.push(Effect::Notify {
+                body: nearby::ask_text(&inc.from_name, &inc.job),
+                open: None,
+            });
+            fx.push(Effect::Show);
+            fx.push(Effect::CloseLater {
+                id: inc.id,
+                secs: nearby::TOSS_ASK_SECS,
+                toss: true,
+            });
         }
-        let _ = app.emit(name, payload);
-        return;
+        return fx;
     }
-    if v["type"] == "host_status" {
-        let mut p = v.clone();
-        if let Some(o) = p.as_object_mut() {
-            o.remove("type");
-        }
-        let _ = app.emit("host:status", p);
-        return;
+    match seen.track(&v) {
+        Some(Track::Notify(body)) => fx.push(Effect::Notify { body, open: None }),
+        Some(Track::Received(r)) => fx.push(Effect::Received(r)),
+        None => {}
     }
-    if let Some(body) = seen.track(&v) {
-        notify(app, &body);
-    }
+    fx
 }
 
 /// Maps a v0.5 core event (serde tag `type`) to the UI event of contracts/contacts-v0.5.md §4.
@@ -1480,15 +1631,53 @@ fn v05_event(v: &Value) -> Option<(&'static str, Value)> {
 }
 
 pub(crate) fn notify(app: &AppHandle, body: &str) {
+    notify_open(app, body, None)
+}
+
+/// Folders to open when a notification is clicked, by notification id (newest last).
+static CLICKS: StdMutex<Vec<(i32, String)>> = StdMutex::new(Vec::new());
+const MAX_CLICKS: usize = 50;
+
+/// A notification; clicking it opens `open` (a received folder) when set (v0.8).
+pub(crate) fn notify_open(app: &AppHandle, body: &str, open: Option<String>) {
     // Skip when the user is looking at the window anyway.
     if let Some(w) = app.get_webview_window(config::MAIN_WINDOW) {
         if w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) {
             return;
         }
     }
-    if let Err(e) = app.notification().builder().title("Toss").body(body).show() {
+    let mut b = app.notification().builder().title("Toss").body(body);
+    if let Some(path) = open {
+        static NEXT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        remember_click(id, &path);
+        b = b.id(id).extra("open", path);
+    }
+    if let Err(e) = b.show() {
         tracing::debug!("notification failed: {e}");
     }
+}
+
+fn remember_click(id: i32, path: &str) {
+    let mut c = CLICKS.lock().unwrap_or_else(|p| p.into_inner());
+    c.push((id, path.to_string()));
+    let excess = c.len().saturating_sub(MAX_CLICKS);
+    c.drain(..excess);
+}
+
+/// Folder behind a clicked notification (`tap`): by notification id, else its `open` extra.
+pub(crate) fn clicked_folder(a: &tauri_plugin_notification::ActionPerformed) -> Option<String> {
+    if a.action_id() != "tap" {
+        return None;
+    }
+    let n = a.notification()?;
+    let by_id = CLICKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|(id, _)| *id == n.id())
+        .map(|(_, p)| p.clone());
+    by_id.or_else(|| n.extra().get("open")?.as_str().map(str::to_string))
 }
 
 /// QR code as SVG markup with a white quiet zone; scales to its container (no fixed width/height).
@@ -1659,7 +1848,7 @@ mod tests {
         assert!(st.first_run);
         assert!(!st.endpoint_id.is_empty());
 
-        // wizard: rename restarts the node but keeps the identity
+        // wizard: v0.8 renames live (no node restart), identity kept
         let st2 = core
             .finish_setup("May test".into(), dest.to_string_lossy().into_owned())
             .await
@@ -1667,7 +1856,13 @@ mod tests {
         assert!(!st2.first_run);
         assert_eq!(st2.device_name, "May test");
         assert_eq!(st2.endpoint_id, st.endpoint_id);
-        assert!(core.node().await.unwrap().device_name() == "May test");
+        assert_eq!(core.settings().device_name, "May test");
+        // v0.8 state fields
+        assert_eq!(st2.receive_policy, crate::settings::ReceivePolicy::Contacts);
+        assert!(st2.ls_enabled && st2.ls_trusted.is_empty());
+        let v = serde_json::to_value(&st2).unwrap();
+        assert_eq!(v["receive_policy"], "contacts");
+        assert!(v.get("ls_port").is_some());
 
         // host mode
         let cfg = HostConfig {
@@ -2013,15 +2208,19 @@ mod tests {
         );
         assert_eq!(roots(&core).await, vec![alias.clone()]);
 
-        // not a folder
-        assert!(core
+        // v0.8: a single file → its parent is the root, the file is the ticket path
+        let f = core
             .share_folder(
                 dir.join("file.txt").to_string_lossy().into_owned(),
                 7,
-                false
+                false,
             )
             .await
-            .is_err());
+            .unwrap();
+        assert_eq!((f.job.as_str(), f.path.as_str()), ("file", "file.txt"));
+        let parent_alias = quick_share_alias(&toss_core::paths::canonicalize(&dir).unwrap().to_string_lossy());
+        assert_eq!(f.root, parent_alias);
+        core.remove_quick_share(parent_alias).await.unwrap();
         assert!(core
             .share_folder(dir.join("nope").to_string_lossy().into_owned(), 7, false)
             .await

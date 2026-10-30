@@ -1,7 +1,8 @@
 //! OS firewall check and "Cho phép qua firewall" (contracts/speed-v0.4.md §3).
 //!
-//! Windows: PowerShell `Get-NetFirewall*` to look for an enabled inbound UDP allow rule for this
-//! exe; an elevated `New-NetFirewallRule` (one UAC prompt) to add it. macOS: `socketfilterfw`
+//! Windows: PowerShell `Get-NetFirewall*` to look for enabled inbound UDP and (v0.8, LocalSend)
+//! TCP allow rules for this exe; an elevated `New-NetFirewallRule` (one UAC prompt) adds both:
+//! "Toss" (UDP, any port: iroh) and "Toss LocalSend" (TCP + UDP 53317–53327). macOS: `socketfilterfw`
 //! (`--getglobalstate`, `--getappblocked`; `--add` + `--unblockapp` through an
 //! `osascript … with administrator privileges` prompt). Linux: nothing to do.
 //!
@@ -34,6 +35,15 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Display name of the rule we add (and replace).
 #[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 pub const RULE_NAME: &str = "Toss";
+/// v0.8: rule(s) for the LocalSend server (TCP) + discovery (UDP), ports 53317–53327.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
+pub const LS_RULE_NAME: &str = "Toss LocalSend";
+
+/// `53317-53327`.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
+pub fn ls_ports() -> String {
+    format!("{}-{}", crate::ls::LS_PORT, crate::ls::LS_PORT_LAST)
+}
 
 static CACHE: Mutex<Option<(Instant, FirewallState)>> = Mutex::new(None);
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -97,27 +107,35 @@ $on=@(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'True' }); \
 if ($on.Count -eq 0) { 'ok'; exit 0 }; \
 $f=@(Get-NetFirewallApplicationFilter | Where-Object { $_.Program -ieq $exe }); \
 if ($f.Count -eq 0) { 'missing'; exit 0 }; \
-$r=@($f | Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and $_.Enabled -eq 'True' } | Where-Object { @('UDP','Any') -contains (($_ | Get-NetFirewallPortFilter).Protocol) }); \
-if (@($r | Where-Object { $_.Action -eq 'Block' }).Count -gt 0) { 'missing'; exit 0 }; \
-if (@($r | Where-Object { $_.Action -eq 'Allow' }).Count -gt 0) { 'ok'; exit 0 }; \
-'missing'";
+$in=@($f | Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and $_.Enabled -eq 'True' }); \
+$u=@($in | Where-Object { @('UDP','Any') -contains (($_ | Get-NetFirewallPortFilter).Protocol) }); \
+$t=@($in | Where-Object { @('TCP','Any') -contains (($_ | Get-NetFirewallPortFilter).Protocol) }); \
+if (@($u | Where-Object { $_.Action -eq 'Block' }).Count -gt 0) { 'missing'; exit 0 }; \
+if (@($u | Where-Object { $_.Action -eq 'Allow' }).Count -eq 0) { 'missing'; exit 0 }; \
+if (@($t | Where-Object { $_.Action -eq 'Allow' }).Count -eq 0) { 'missing'; exit 0 }; \
+'ok'";
 
 #[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
-fn ps_quote(s: &str) -> String {
+pub(crate) fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// The elevated script: replaces every rule called "Toss", adds a UDP inbound allow for `exe`
-/// on all profiles, and leaves the error text in `log` when it fails (the elevated process has
-/// no console we can read).
+/// The elevated script: replaces every rule called "Toss" / "Toss LocalSend", adds a UDP inbound
+/// allow for `exe` (any port) and TCP + UDP 53317–53327 for LocalSend, all profiles, and leaves
+/// the error text in `log` when it fails (the elevated process has no console we can read).
 #[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
 fn win_add_script(exe: &str, log: &str) -> String {
     format!(
         "$ErrorActionPreference='Stop'; try {{ \
 Remove-NetFirewallRule -DisplayName {name} -ErrorAction SilentlyContinue; \
-New-NetFirewallRule -DisplayName {name} -Direction Inbound -Action Allow -Protocol UDP -Program {exe} -Profile Any | Out-Null \
+Remove-NetFirewallRule -DisplayName {ls} -ErrorAction SilentlyContinue; \
+New-NetFirewallRule -DisplayName {name} -Direction Inbound -Action Allow -Protocol UDP -Program {exe} -Profile Any | Out-Null; \
+New-NetFirewallRule -DisplayName {ls} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {ports} -Program {exe} -Profile Any | Out-Null; \
+New-NetFirewallRule -DisplayName {ls} -Direction Inbound -Action Allow -Protocol UDP -LocalPort {ports} -Program {exe} -Profile Any | Out-Null \
 }} catch {{ [IO.File]::WriteAllText({log}, $_.Exception.Message); exit 1 }}",
         name = ps_quote(RULE_NAME),
+        ls = ps_quote(LS_RULE_NAME),
+        ports = ls_ports(),
         exe = ps_quote(exe),
         log = ps_quote(log),
     )
@@ -125,7 +143,7 @@ New-NetFirewallRule -DisplayName {name} -Direction Inbound -Action Allow -Protoc
 
 /// UTF-16LE + base64, the form `powershell -EncodedCommand` takes.
 #[cfg_attr(target_os = "macos", allow(dead_code))] // Windows helpers; unit-tested on every OS
-fn encoded_command(script: &str) -> String {
+pub(crate) fn encoded_command(script: &str) -> String {
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     data_encoding::BASE64.encode(&bytes)
 }
@@ -337,6 +355,13 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("Remove-NetFirewallRule -DisplayName 'Toss'"));
+        assert!(s.contains("Remove-NetFirewallRule -DisplayName 'Toss LocalSend'"));
+        assert!(
+            s.contains("-DisplayName 'Toss LocalSend' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 53317-53327"),
+            "{s}"
+        );
+        assert!(s.contains("-Protocol UDP -LocalPort 53317-53327"));
+        assert!(WIN_CHECK_PS.contains("'TCP','Any'") && WIN_CHECK_PS.contains("'UDP','Any'"));
         // base64 of UTF-16LE: "A" -> "QQA="
         assert_eq!(encoded_command("A"), "QQA=");
         let l = win_launcher_script("QQA=");
@@ -348,6 +373,22 @@ mod tests {
         assert_eq!(parse_win_check("ok\r\n"), FirewallState::Ok);
         assert_eq!(parse_win_check("warning\nmissing"), FirewallState::Missing);
         assert_eq!(parse_win_check(""), FirewallState::Unknown);
+    }
+
+    #[test]
+    fn hooks_nsh_opens_the_localsend_ports() {
+        let nsh = include_str!("../bundle/hooks.nsh");
+        for proto in ["TCP", "UDP"] {
+            assert!(
+                nsh.contains(&format!(
+                    "add rule name=\"{LS_RULE_NAME}\" dir=in action=allow program=\"$INSTDIR\\${{MAINBINARYNAME}}.exe\" protocol={proto} localport={}",
+                    ls_ports()
+                )),
+                "hooks.nsh must open {proto} {}",
+                ls_ports()
+            );
+        }
+        assert!(nsh.matches(&format!("delete rule name=\"{LS_RULE_NAME}\"")).count() >= 2);
     }
 
     #[test]

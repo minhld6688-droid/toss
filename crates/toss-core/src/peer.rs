@@ -6,6 +6,10 @@
 //! authenticated by `conn.remote_id()` (QUIC/TLS) against `contacts.json`;
 //! anything but `Pair` from a stranger is denied. After `PushAccepted` the
 //! same stream and connection carry xfer/2 put semantics.
+//!
+//! v0.8 (nearby-v0.8.md §1.2): a stranger that this node sees on its LAN
+//! (nearby store) may also send `PushFrom` and `Text`; the receive policy
+//! decides which pushes are accepted without asking.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -28,12 +32,14 @@ use tokio::{
 use crate::{
     contacts::{addr_from_hint, platform, Contact, IncomingPush, Invite, MAX_NAME},
     host,
+    nearby::{NearbyPeer, ReceivePolicy},
     node::{EntryKind, Inner},
     paths::{canonicalize, sanitize_component},
     ticket::{HostAddr, MAX_JOB_LEN},
     transfer::{conn_path, conn_rtt_ms, ErrorCode, Side, Status, Tracker, TransferEvent},
-    util::{clean_text, now_unix, random_suffix},
-    wire::{read_msg_max, write_msg, Op, PeerReq, PeerResp, MAX_HELLO},
+    util::{clean_message, clean_text, now_unix, random_suffix},
+    vi::ui,
+    wire::{read_msg_max, write_msg, Op, PeerReq, PeerResp, MAX_HELLO, MAX_TEXT},
     xfer::{self, SessErr},
     ALPN_PEER,
 };
@@ -63,12 +69,15 @@ pub(crate) fn parse_endpoint_id(s: &str) -> Result<EndpointId> {
     PublicKey::from_bytes(&bytes).map_err(|_| anyhow!("mã máy không hợp lệ: {s}"))
 }
 
-/// A push from a contact waiting for the user.
+/// A push waiting for the user.
 #[derive(Debug)]
 struct Pending {
     info: IncomingPush,
+    /// Sender platform (a stranger answered with "always" becomes a contact).
+    platform: String,
     token: u64,
-    answer: oneshot::Sender<bool>,
+    /// (accept, always)
+    answer: oneshot::Sender<(bool, bool)>,
 }
 
 /// Runtime state of `toss/peer/1` on a node.
@@ -84,11 +93,13 @@ pub(crate) struct PeerState {
     /// Bumped whenever a contact comes online or is removed (outbox wake-up).
     online_gen: watch::Sender<u64>,
     /// Asks the presence loop for an immediate round.
-    kick: Arc<Notify>,
+    pub kick: Arc<Notify>,
     /// Live peer connections per contact (a contact with one is online).
     live: Mutex<HashMap<EndpointId, usize>>,
     /// Runtime for work started from sync API calls.
     rt: tokio::runtime::Handle,
+    /// v0.8: who is accepted without asking.
+    pub policy: RwLock<ReceivePolicy>,
 }
 
 impl PeerState {
@@ -105,6 +116,7 @@ impl PeerState {
             kick: Arc::new(Notify::new()),
             live: Mutex::new(HashMap::new()),
             rt: tokio::runtime::Handle::current(),
+            policy: RwLock::new(ReceivePolicy::default()),
         }
     }
 
@@ -118,19 +130,6 @@ impl PeerState {
             .collect();
         v.sort_by(|a, b| (a.at, &a.push_id).cmp(&(b.at, &b.push_id)));
         v
-    }
-
-    /// `Node::answer_push`.
-    pub fn answer(&self, push_id: &str, accept: bool) -> Result<()> {
-        let p = self
-            .pending
-            .lock()
-            .remove(&push_id.trim().to_ascii_lowercase())
-            .ok_or_else(|| {
-                anyhow!("không còn yêu cầu gửi file này (đã hết hạn hoặc đã trả lời)")
-            })?;
-        let _ = p.answer.send(accept);
-        Ok(())
     }
 
     fn bump(&self) {
@@ -171,8 +170,123 @@ impl Drop for LiveGuard {
     }
 }
 
+/// `Node::answer_push`: `always` on a contact turns its `auto_accept` on; on
+/// a stranger it adds it as a contact (auto-accept) and the push is answered
+/// `PushAcceptedPaired` so that the sender adds this device too.
+pub(crate) fn answer_push(
+    inner: &Arc<Inner>,
+    push_id: &str,
+    accept: bool,
+    always: bool,
+) -> Result<()> {
+    let p = inner
+        .peer
+        .pending
+        .lock()
+        .remove(&push_id.trim().to_ascii_lowercase())
+        .ok_or_else(|| ui("Không còn yêu cầu gửi file này (đã hết hạn hoặc đã trả lời)"))?;
+    if accept && always {
+        let id = p.info.from_id.clone();
+        if inner.contacts.contains(&id) {
+            let _ = inner.contacts.update(&id, |c| c.auto_accept = true);
+        } else {
+            let hint = nearby_hint(inner, &id);
+            inner
+                .contacts
+                .upsert(&id, &p.info.from_name, &p.platform, hint);
+            let _ = inner.contacts.update(&id, |c| c.auto_accept = true);
+            tracing::info!(contact = %id, name = %p.info.from_name, "nearby device added to contacts (always accept)");
+            set_presence(inner, &id, true, None);
+        }
+        inner.emit(TransferEvent::ContactsChanged {});
+    }
+    let _ = p.answer.send((accept, always));
+    Ok(())
+}
+
+/// Direct addresses of a nearby device as a dialing hint.
+fn nearby_hint(inner: &Inner, id: &str) -> HostAddr {
+    HostAddr {
+        relay: String::new(),
+        addrs: inner.nearby.get(id).map(|p| p.addrs).unwrap_or_default(),
+    }
+}
+
+/// Display name of a nearby device: its advertised name, the contact name,
+/// or "Máy xxxxxx".
+pub(crate) fn nearby_name(p: &NearbyPeer) -> String {
+    if !p.name.trim().is_empty() {
+        return p.name.clone();
+    }
+    format!("Máy {}", &p.id[..p.id.len().min(6)])
+}
+
+/// The nearby store changed: event + wake pushes waiting for a peer.
+pub(crate) fn nearby_changed(inner: &Inner) {
+    inner.emit(TransferEvent::NearbyChanged {});
+    inner.peer.bump();
+}
+
+/// mDNS saw `peer` (announcement or lookup answer). A contact seen nearby is
+/// online at once.
+pub(crate) fn nearby_seen(inner: &Inner, peer: NearbyPeer) {
+    if peer.id == id_hex(inner.endpoint.id()) {
+        return;
+    }
+    let id = peer.id.clone();
+    let changed = inner.nearby.upsert(peer);
+    if inner.contacts.contains(&id) {
+        set_presence(inner, &id, true, None);
+    }
+    if changed {
+        nearby_changed(inner);
+    }
+}
+
+/// mDNS expired these ids (or they went stale and were swept already).
+pub(crate) fn nearby_gone(inner: &Inner, ids: &[String]) {
+    let mut any = false;
+    for id in ids {
+        any |= inner.nearby.remove(id);
+    }
+    if any {
+        nearby_changed(inner);
+    }
+    // A contact that left the LAN: let presence decide (it may be on the relay).
+    if ids.iter().any(|id| inner.contacts.contains(id)) {
+        inner.peer.kick.notify_one();
+    }
+}
+
+/// `Node::nearby`: the store with `contact` filled in (self excluded).
+pub(crate) fn nearby_list(inner: &Inner) -> Vec<NearbyPeer> {
+    let me = id_hex(inner.endpoint.id());
+    inner
+        .nearby
+        .list()
+        .into_iter()
+        .filter(|p| p.id != me)
+        .map(|mut p| {
+            if let Some(c) = inner.contacts.get(&p.id) {
+                p.contact = true;
+                if p.name.is_empty() {
+                    p.name = c.c.name;
+                }
+                if p.platform.is_empty() {
+                    p.platform = c.c.platform;
+                }
+            } else if p.name.is_empty() {
+                p.name = nearby_name(&p);
+            }
+            p
+        })
+        .collect()
+}
+
 /// Records a presence result and emits `ContactPresence` when it changed.
-/// "Offline" is ignored while a connection with the contact is alive.
+/// "Offline" is ignored while a connection with the contact is alive. (A
+/// contact seen by mDNS is set online at once, but a failed ping still wins:
+/// the mDNS cache keeps a device for a while after it quit.)
 pub(crate) fn set_presence(inner: &Inner, id: &str, online: bool, rtt_ms: Option<u32>) {
     if !online {
         if let Ok(eid) = parse_endpoint_id(id) {
@@ -198,35 +312,44 @@ pub(crate) fn note_unreachable(inner: &Inner, id: EndpointId) {
     set_presence(inner, &id_hex(id), false, None);
 }
 
-/// Waits until contact `id` is online (shows "Chờ <name> online" meanwhile).
-/// Err when the contact was removed.
-pub(crate) async fn wait_online(
+/// Waits until push target `id` can be dialed: a contact that is online
+/// ("Chờ <name> online" meanwhile; mDNS sets a contact online as soon as it
+/// sees it) or a non-contact in the nearby store. Err when
+/// a contact push lost its contact (removed) and the device is not nearby;
+/// a push to a stranger (`stranger`) waits for it to show up on the LAN.
+pub(crate) async fn wait_reachable(
     inner: &Arc<Inner>,
     id: EndpointId,
     tracker: &Tracker,
+    stranger: bool,
 ) -> Result<(), String> {
     let hex = id_hex(id);
     let mut gen = inner.peer.online_gen.subscribe();
-    let mut announced = false;
+    let mut announced: Option<String> = None;
     loop {
-        let Some(c) = inner.contacts.get(&hex) else {
-            return Err("máy nhận đã bị xoá khỏi danh bạ".into());
+        let nearby = inner.nearby.contains(&hex);
+        let msg = match inner.contacts.get(&hex) {
+            Some(c) if c.c.online => return Ok(()),
+            Some(c) => format!("Chờ {} online", c.c.name),
+            None if nearby => return Ok(()),
+            None if !stranger => return Err("Máy nhận đã bị xoá khỏi danh bạ".into()),
+            None => format!(
+                "Chờ {} mở Toss trong cùng mạng LAN",
+                tracker.snapshot().peer
+            ),
         };
-        if c.c.online {
-            return Ok(());
-        }
-        if !announced {
-            announced = true;
+        if announced.as_ref() != Some(&msg) {
             // Maybe it just came up: check now instead of at the next round.
             inner.peer.kick.notify_one();
             tracker.error(
                 ErrorCode::HostOffline,
-                format!("Chờ {} online", c.c.name),
+                msg.clone(),
                 Some(PRESENCE_INTERVAL.as_secs()),
             );
+            announced = Some(msg);
         }
         if gen.changed().await.is_err() {
-            return Err("node stopped".into());
+            return Err("Toss đang tắt".into());
         }
     }
 }
@@ -244,14 +367,136 @@ async fn remote_hint(inner: &Inner, id: EndpointId) -> HostAddr {
 
 /// Dials a contact (its last known addresses; n0/mDNS lookup as fallback).
 pub(crate) async fn dial_contact(inner: &Inner, id: EndpointId) -> Result<Connection> {
-    let hint = inner
-        .contacts
-        .get(&id_hex(id))
-        .map(|s| s.addr)
-        .unwrap_or_default();
+    dial_peer(inner, id).await
+}
+
+/// Dials a contact or nearby device on `toss/peer/1`: the addresses mDNS saw
+/// on the LAN first, then the contact's last known relay/addresses.
+pub(crate) async fn dial_peer(inner: &Inner, id: EndpointId) -> Result<Connection> {
+    let hex = id_hex(id);
+    let mut hint = inner.contacts.get(&hex).map(|s| s.addr).unwrap_or_default();
+    if let Some(n) = inner.nearby.get(&hex) {
+        let mut addrs = n.addrs;
+        for a in hint.addrs {
+            if !addrs.contains(&a) {
+                addrs.push(a);
+            }
+        }
+        hint.addrs = addrs;
+    }
     inner
         .connect_alpns(addr_from_hint(id, &hint), ALPN_PEER, Vec::new())
         .await
+}
+
+/// After a v0.8 request (`PushFrom`, `Text`) got no answer: true when the
+/// peer closed the connection because it could not decode it (Toss < 0.8).
+pub(crate) async fn refused_as_old(conn: &Connection) -> bool {
+    let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+    matches!(
+        conn.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref c))
+            if &c.reason[..] == b"bad request"
+    )
+}
+
+/// The receiver of our `PushFrom` answered `PushAcceptedPaired`: add it as a
+/// contact too (both sides now trust each other).
+pub(crate) async fn pair_back(inner: &Arc<Inner>, conn: &Connection, name: &str, plat: &str) {
+    let remote = conn.remote_id();
+    let rid = id_hex(remote);
+    let mut hint = remote_hint(inner, remote).await;
+    if hint.addrs.is_empty() {
+        hint = nearby_hint(inner, &rid);
+    }
+    let name = if name.trim().is_empty() {
+        inner
+            .nearby
+            .get(&rid)
+            .map(|p| nearby_name(&p))
+            .unwrap_or_default()
+    } else {
+        name.to_string()
+    };
+    inner.contacts.upsert(&rid, &name, plat, hint);
+    tracing::info!(contact = %remote.fmt_short(), %name, "paired back (receiver chose always accept)");
+    inner.emit(TransferEvent::ContactsChanged {});
+    set_presence(inner, &rid, true, conn_rtt_ms(conn));
+}
+
+/// `Node::send_text`: a short message to a contact or a nearby device.
+pub(crate) async fn send_text(inner: &Arc<Inner>, id: &str, text: &str) -> Result<()> {
+    let hex = id.trim().to_ascii_lowercase();
+    let eid = parse_endpoint_id(&hex)?;
+    if eid == inner.endpoint.id() {
+        return Err(ui("Không thể gửi cho chính máy này"));
+    }
+    if text.trim().is_empty() {
+        return Err(ui("Tin nhắn trống"));
+    }
+    if text.len() > MAX_TEXT {
+        return Err(ui(format!(
+            "Tin nhắn quá dài (tối đa {} KB)",
+            MAX_TEXT / 1024
+        )));
+    }
+    let contact = inner.contacts.contains(&hex);
+    if !contact && !inner.nearby.contains(&hex) {
+        return Err(ui(
+            "Không thấy máy này trong mạng LAN nữa — kiểm tra máy kia còn mở Toss và cùng mạng",
+        ));
+    }
+    let conn = tokio::time::timeout(PING_DIAL_TIMEOUT + PING_DIAL_TIMEOUT, dial_peer(inner, eid))
+        .await
+        .map_err(|_| anyhow!("timeout"))
+        .and_then(|r| r)
+        .map_err(|e| {
+            tracing::info!(to = %eid.fmt_short(), "text: dial failed: {e:#}");
+            ui("Không kết nối được tới máy kia")
+        })?;
+    let res = async {
+        let (mut send, mut recv) = conn.open_bi().await?;
+        let req = PeerReq::Text {
+            name: inner.device_name().to_string(),
+            text: text.to_string(),
+        };
+        write_msg(&mut send, &req).await?;
+        let resp: PeerResp =
+            tokio::time::timeout(ANSWER_TIMEOUT, read_msg_max(&mut recv, MAX_HELLO))
+                .await
+                .map_err(|_| anyhow!("no answer"))??;
+        anyhow::Ok(resp)
+    }
+    .await;
+    let resp = match res {
+        Ok(r) => r,
+        Err(e) => {
+            let old = refused_as_old(&conn).await;
+            conn.close(0u32.into(), b"text");
+            tracing::info!(to = %eid.fmt_short(), "text: no answer: {e:#}");
+            return Err(ui(if old {
+                crate::vi::OLD_PEER
+            } else {
+                "Máy kia không trả lời"
+            }));
+        }
+    };
+    let rtt = conn_rtt_ms(&conn);
+    conn.close(0u32.into(), b"text");
+    match resp {
+        PeerResp::TextOk => {
+            if contact {
+                set_presence(inner, &hex, true, rtt);
+            }
+            tracing::info!(to = %eid.fmt_short(), bytes = text.len(), "text message delivered");
+            Ok(())
+        }
+        PeerResp::Denied { reason } => Err(ui(clean_text(&reason, 300))),
+        other => {
+            tracing::info!("text: unexpected answer {other:?}");
+            Err(ui(crate::vi::PROTOCOL))
+        }
+    }
 }
 
 /// `Node::accept_invite`.
@@ -271,12 +516,18 @@ pub(crate) async fn pair(inner: &Arc<Inner>, text: &str) -> Result<Contact> {
     let conn = inner
         .connect_alpns(inv.endpoint_addr()?, ALPN_PEER, Vec::new())
         .await
-        .with_context(|| format!("không nối được tới {}", inv.body.name))?;
+        .map_err(|e| {
+            tracing::info!("pairing: dial failed: {e:#}");
+            ui(format!(
+                "Không nối được tới {} — kiểm tra máy đó đang mở Toss và có mạng",
+                inv.body.name
+            ))
+        })?;
     let res = async {
         let (mut send, mut recv) = conn.open_bi().await?;
         let req = PeerReq::Pair {
             secret: inv.body.secret,
-            name: inner.cfg.device_name.clone(),
+            name: inner.device_name().to_string(),
             platform: platform(),
             version: inner.cfg.app_version.clone(),
         };
@@ -284,12 +535,20 @@ pub(crate) async fn pair(inner: &Arc<Inner>, text: &str) -> Result<Contact> {
         let resp: PeerResp =
             tokio::time::timeout(ANSWER_TIMEOUT, read_msg_max(&mut recv, MAX_HELLO))
                 .await
-                .map_err(|_| anyhow!("máy kia không trả lời"))??;
+                .map_err(|_| ui("Máy kia không trả lời"))??;
         anyhow::Ok(resp)
     }
     .await;
     let rtt = conn_rtt_ms(&conn);
     conn.close(0u32.into(), b"paired");
+    let res = res.map_err(|e| {
+        if crate::vi::ui_text(&e).is_some() {
+            e
+        } else {
+            tracing::info!("pairing: {e:#}");
+            ui("Mất kết nối khi đang kết nối hai máy — thử lại")
+        }
+    });
     match res? {
         PeerResp::Paired { name, platform, .. } => {
             let rid = id_hex(inviter);
@@ -308,10 +567,17 @@ pub(crate) async fn pair(inner: &Arc<Inner>, text: &str) -> Result<Contact> {
                 .contacts
                 .get(&rid)
                 .map(|s| s.c)
-                .ok_or_else(|| anyhow!("contact vanished"))
+                .ok_or_else(|| ui("Máy vừa kết nối đã bị xoá khỏi danh bạ"))
         }
-        PeerResp::Denied { reason } => bail!("{} từ chối kết nối: {reason}", inv.body.name),
-        other => bail!("unexpected answer to Pair: {other:?}"),
+        PeerResp::Denied { reason } => Err(ui(format!(
+            "{} từ chối kết nối: {}",
+            inv.body.name,
+            clean_text(&reason, 300)
+        ))),
+        other => {
+            tracing::info!("pairing: unexpected answer {other:?}");
+            Err(ui(crate::vi::PROTOCOL))
+        }
     }
 }
 
@@ -323,7 +589,7 @@ async fn ping(inner: &Inner, id: EndpointId) -> Result<(Option<u32>, String)> {
     let res = async {
         let (mut send, mut recv) = conn.open_bi().await?;
         let hello = PeerReq::Hello {
-            name: inner.cfg.device_name.clone(),
+            name: inner.device_name().to_string(),
             version: inner.cfg.app_version.clone(),
         };
         write_msg(&mut send, &hello).await?;
@@ -498,13 +764,75 @@ pub(crate) async fn handle_peer(inner: Arc<Inner>, conn: Connection) {
             inner.emit(TransferEvent::ContactsChanged {});
             let _live = LiveGuard::new(&inner, remote);
             let resp = PeerResp::Paired {
-                name: inner.cfg.device_name.clone(),
+                name: inner.device_name().to_string(),
                 platform: platform(),
                 version: inner.cfg.app_version.clone(),
             };
             let _ = write_msg(&mut send, &resp).await;
             let _ = send.finish();
             let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+        }
+        PeerReq::PushFrom {
+            push_id,
+            job,
+            files,
+            bytes,
+            name,
+            platform: plat,
+            version,
+        } if inner.contacts.contains(&rid) || inner.nearby.contains(&rid) => {
+            let push = PushReq {
+                push_id,
+                job: clean_text(&job, MAX_JOB_LEN),
+                files,
+                bytes,
+                from: Some(PushOrigin {
+                    name: clean_text(&name, MAX_NAME),
+                    platform: clean_text(&plat, 16),
+                    version: clean_text(&version, 32),
+                }),
+            };
+            handle_push(inner, conn, send, recv, push).await;
+        }
+        PeerReq::Text { name, text }
+            if inner.contacts.contains(&rid) || inner.nearby.contains(&rid) =>
+        {
+            let from_name = match inner.contacts.get(&rid) {
+                Some(c) => c.c.name,
+                None => {
+                    let n = clean_text(&name, MAX_NAME);
+                    if n.trim().is_empty() {
+                        inner
+                            .nearby
+                            .get(&rid)
+                            .map(|p| nearby_name(&p))
+                            .unwrap_or_default()
+                    } else {
+                        n
+                    }
+                }
+            };
+            let text = clean_message(&text, MAX_TEXT);
+            tracing::info!(from = %from_name, bytes = text.len(), "text message received");
+            inner.emit(TransferEvent::TextIncoming {
+                from_id: rid.clone(),
+                from_name,
+                text,
+                at: now_unix(),
+            });
+            let _ = write_msg(&mut send, &PeerResp::TextOk).await;
+            let _ = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+        }
+        PeerReq::PushFrom { .. } | PeerReq::Text { .. } => {
+            tracing::info!(remote = %short, "peer: denied: not a contact and not on this LAN");
+            deny(
+                &conn,
+                &mut send,
+                "máy này chưa có trong danh bạ và không ở cùng mạng LAN — hãy kết nối bằng lời mời"
+                    .into(),
+            )
+            .await;
         }
         _ if !inner.contacts.contains(&rid) => {
             tracing::info!(remote = %short, "peer: denied: not a contact");
@@ -534,7 +862,7 @@ pub(crate) async fn handle_peer(inner: Arc<Inner>, conn: Connection) {
                 .values()
                 .any(|e| e.tracker.status() == Status::Running);
             let pong = PeerResp::Pong {
-                name: inner.cfg.device_name.clone(),
+                name: inner.device_name().to_string(),
                 version: inner.cfg.app_version.clone(),
                 busy,
             };
@@ -553,10 +881,19 @@ pub(crate) async fn handle_peer(inner: Arc<Inner>, conn: Connection) {
                 job: clean_text(&job, MAX_JOB_LEN),
                 files,
                 bytes,
+                from: None,
             };
             handle_push(inner, conn, send, recv, push).await;
         }
     }
+}
+
+/// Who sent a `PushFrom` (cleaned).
+struct PushOrigin {
+    name: String,
+    platform: String,
+    #[allow(dead_code)]
+    version: String,
 }
 
 struct PushReq {
@@ -564,12 +901,23 @@ struct PushReq {
     job: String,
     files: u32,
     bytes: u64,
+    /// `PushFrom` (v0.8); None = `Push` from a contact.
+    from: Option<PushOrigin>,
 }
 
 enum Answer {
+    /// Accepted ("always" is applied by `answer_push`).
     Accept,
     Decline(String),
     Gone,
+}
+
+/// The sender of a push as the receiver shows it.
+struct PushSender {
+    id: String,
+    name: String,
+    platform: String,
+    stranger: bool,
 }
 
 /// Queues the push for the user (`PushQueued` + `PushIncoming`) and waits
@@ -578,7 +926,7 @@ async fn ask_user(
     inner: &Arc<Inner>,
     conn: &Connection,
     send: &mut iroh::endpoint::SendStream,
-    contact: &Contact,
+    sender: &PushSender,
     push: &PushReq,
 ) -> Answer {
     let key = hex::encode(push.push_id);
@@ -586,30 +934,32 @@ async fn ask_user(
     let (tx, rx) = oneshot::channel();
     let info = IncomingPush {
         push_id: key.clone(),
-        from_id: contact.id.clone(),
-        from_name: contact.name.clone(),
+        from_id: sender.id.clone(),
+        from_name: sender.name.clone(),
         job: push.job.clone(),
         files: push.files,
         bytes: push.bytes,
         at: now_unix(),
+        stranger: sender.stranger,
     };
     inner.peer.pending.lock().insert(
         key.clone(),
         Pending {
             info: info.clone(),
+            platform: sender.platform.clone(),
             token,
             answer: tx,
         },
     );
-    tracing::info!(from = %contact.name, job = %push.job, "push queued for the user");
+    tracing::info!(from = %sender.name, job = %push.job, stranger = sender.stranger, "push queued for the user");
     inner.emit(TransferEvent::PushIncoming(info));
     let answer = if write_msg(send, &PeerResp::PushQueued).await.is_err() {
         Answer::Gone
     } else {
         tokio::select! {
             r = tokio::time::timeout(PUSH_ANSWER_TIMEOUT, rx) => match r {
-                Ok(Ok(true)) => Answer::Accept,
-                Ok(Ok(false)) => Answer::Decline("người nhận đã từ chối".into()),
+                Ok(Ok((true, _))) => Answer::Accept,
+                Ok(Ok((false, _))) => Answer::Decline("người nhận đã từ chối".into()),
                 // Sender dropped: the contact was removed.
                 Ok(Err(_)) => Answer::Decline("người nhận đã từ chối".into()),
                 Err(_) => Answer::Decline("không ai trả lời trong 10 phút".into()),
@@ -631,7 +981,8 @@ async fn decline(conn: &Connection, send: &mut iroh::endpoint::SendStream, reaso
     conn.close(0u32.into(), b"declined");
 }
 
-/// Receiving side of a push from a contact.
+/// Receiving side of a push from a contact (`Push` / `PushFrom`) or from a
+/// nearby stranger (`PushFrom`; the caller checked the nearby store).
 async fn handle_push(
     inner: Arc<Inner>,
     conn: Connection,
@@ -641,28 +992,60 @@ async fn handle_push(
 ) {
     let remote = conn.remote_id();
     let rid = id_hex(remote);
-    let Some(contact) = inner.contacts.get(&rid).map(|s| s.c) else {
-        return;
+    let contact: Option<Contact> = inner.contacts.get(&rid).map(|s| s.c);
+    let sender = match (&contact, &push.from) {
+        (Some(c), _) => PushSender {
+            id: rid.clone(),
+            name: c.name.clone(),
+            platform: c.platform.clone(),
+            stranger: false,
+        },
+        (None, Some(f)) => {
+            let name = if f.name.trim().is_empty() {
+                inner
+                    .nearby
+                    .get(&rid)
+                    .map(|p| nearby_name(&p))
+                    .unwrap_or_else(|| format!("Máy {}", &rid[..6]))
+            } else {
+                f.name.clone()
+            };
+            PushSender {
+                id: rid.clone(),
+                name,
+                platform: f.platform.clone(),
+                stranger: true,
+            }
+        }
+        (None, None) => return,
     };
     let _live = LiveGuard::new(&inner, remote);
     let pid = hex::encode(push.push_id);
-    let auto = contact.auto_accept || inner.peer.accepted.lock().contains(&push.push_id);
+    let policy = *inner.peer.policy.read();
+    let auto = policy.auto_accepts(contact.as_ref().map(|c| c.auto_accept))
+        || inner.peer.accepted.lock().contains(&push.push_id);
     if !auto {
-        match ask_user(&inner, &conn, &mut send, &contact, &push).await {
+        match ask_user(&inner, &conn, &mut send, &sender, &push).await {
             Answer::Accept => {
                 inner.peer.accepted.lock().insert(push.push_id);
             }
             Answer::Decline(reason) => {
-                tracing::info!(from = %contact.name, job = %push.job, "push declined: {reason}");
+                tracing::info!(from = %sender.name, job = %push.job, "push declined: {reason}");
                 decline(&conn, &mut send, reason).await;
                 return;
             }
             Answer::Gone => return,
         }
     }
-    // <inbox>/<contact name>/<job>/
+    // <inbox>/<sender name>/<job>/ (a stranger answered "always" is a
+    // contact by now: use its contact name).
+    let shown = inner
+        .contacts
+        .get(&rid)
+        .map(|s| s.c.name)
+        .unwrap_or_else(|| sender.name.clone());
     let inbox = inner.peer.inbox_dir.read().clone();
-    let contact_dir = sanitize_component(&contact.name, &format!("may-{}", &rid[..8]));
+    let contact_dir = sanitize_component(&shown, &format!("may-{}", &rid[..8]));
     let job_dir = sanitize_component(&push.job, &format!("push-{}", &pid[..8]));
     let prepared = tokio::task::spawn_blocking(move || -> Result<(PathBuf, PathBuf)> {
         std::fs::create_dir_all(&inbox).with_context(|| format!("create {}", inbox.display()))?;
@@ -686,11 +1069,21 @@ async fn handle_push(
             return;
         }
     };
-    if write_msg(&mut send, &PeerResp::PushAccepted).await.is_err() {
+    // v0.8: a `PushFrom` sender that is (now) our contact pairs back.
+    let accepted = if push.from.is_some() && inner.contacts.contains(&rid) {
+        PeerResp::PushAcceptedPaired {
+            name: inner.device_name().to_string(),
+            platform: platform(),
+            version: inner.cfg.app_version.clone(),
+        }
+    } else {
+        PeerResp::PushAccepted
+    };
+    if write_msg(&mut send, &accepted).await.is_err() {
         return;
     }
     tracing::info!(
-        from = %contact.name,
+        from = %shown,
         job = %push.job,
         files = push.files,
         bytes = push.bytes,
@@ -702,7 +1095,7 @@ async fn handle_push(
         push.job.clone(),
         Op::Put,
         Side::Host,
-        contact.name.clone(),
+        shown.clone(),
         Some(ret_dir.display().to_string()),
         inner.events.clone(),
     );
@@ -720,7 +1113,8 @@ async fn handle_push(
         Ok(done) if done.ok => tracker.finish_done(path),
         Ok(done) => {
             tracker.tick(path);
-            tracker.error(ErrorCode::HashMismatch, done.msg, None);
+            tracing::warn!(id = %tracker.id, "push incomplete: {}", done.msg);
+            tracker.error(ErrorCode::HashMismatch, crate::vi::DONE_FAILED.into(), None);
         }
         Err(e) => {
             let code = match e {
@@ -729,7 +1123,8 @@ async fn handle_push(
                 SessErr::Denied(_) => ErrorCode::Denied,
                 SessErr::Other(_) => ErrorCode::Other,
             };
-            tracker.error(code, e.to_string(), None);
+            tracing::info!(id = %tracker.id, "push receive failed: {e}");
+            tracker.error(code, crate::vi::sess_msg(&e), None);
         }
     }
 }

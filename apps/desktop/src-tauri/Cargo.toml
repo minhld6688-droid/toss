@@ -14,12 +14,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 toss-core = { path = "../../../crates/toss-core" }
+# v0.8 LocalSend bridge (contracts/nearby-v0.8.md §2); only `ls.rs` talks to it.
+toss-ls = { path = "../../../crates/toss-ls" }
 
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
-tauri-plugin-notification = "2"
+# 2.7: `on_action` reports a click on a notification ("Đã nhận …" opens the folder).
+tauri-plugin-notification = "2.7"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"

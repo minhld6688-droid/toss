@@ -4,11 +4,12 @@ mod commands;
 pub mod config;
 mod contacts;
 mod core;
-mod core_v05;
 mod ctxmenu;
 mod firewall;
 mod ipc;
 mod logs;
+mod ls;
+mod nearby;
 mod services;
 mod settings;
 mod shell;
@@ -119,16 +120,54 @@ pub fn run() {
             commands::install_update,
             commands::set_auto_update,
             commands::remote_update,
+            commands::pick_files,
+            commands::list_nearby,
+            commands::rescan_nearby,
+            commands::send_to,
+            commands::send_text,
+            commands::list_incoming,
+            commands::answer_incoming,
+            commands::set_receive_policy,
+            commands::set_ls_enabled,
+            commands::forget_trusted,
+            commands::list_received,
+            commands::resend,
+            commands::web_share_start,
+            commands::web_share_stop,
+            commands::request_local_network,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             setup_core.attach(handle.clone());
 
-            // Start the P2P node in the background; commands also start it lazily.
+            // v0.8 migration (once): autostart on, with `--hidden`.
+            if let Err(e) = setup_core.migrate_v08() {
+                tracing::warn!("0.8 migration: {e:#}");
+            }
+
+            // Notification "Đã nhận …" clicked → open that folder.
+            {
+                use tauri_plugin_notification::NotificationExt as _;
+                use tauri_plugin_opener::OpenerExt as _;
+                let h = handle.clone();
+                let _ = app.notification().on_action(move |a| {
+                    if let Some(dir) = core::clicked_folder(a) {
+                        if let Err(e) = h.opener().open_path(dir, None::<&str>) {
+                            tracing::warn!("open received folder: {e}");
+                        }
+                    }
+                });
+            }
+
+            // Start the P2P node and the LocalSend bridge in the background; commands also
+            // start the node lazily.
             let c = setup_core.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = c.node().await {
                     tracing::error!("node start failed: {e:#}");
+                }
+                if let Err(e) = c.start_ls().await {
+                    tracing::error!("LocalSend start failed: {e:#}");
                 }
             });
 

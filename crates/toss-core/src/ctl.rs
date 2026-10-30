@@ -32,11 +32,11 @@ pub struct CtlClient {
 impl CtlClient {
     pub(crate) async fn connect(inner: Arc<Inner>, ticket: Ticket) -> Result<CtlClient> {
         if !ticket.body.admin {
-            bail!("not an admin ticket");
+            return Err(crate::vi::ui("Đây không phải link điều khiển"));
         }
         ticket.verify_signature().map_err(|e| anyhow!(e))?;
         if ticket.is_expired() {
-            bail!("admin ticket expired");
+            return Err(crate::vi::ui("Link điều khiển đã hết hạn — xin link mới"));
         }
         let c = CtlClient {
             inner,
@@ -55,20 +55,29 @@ impl CtlClient {
             .inner
             .dial_host(&self.ticket, ALPN_CTL)
             .await
-            .context("host offline")?;
-        let (mut send, mut recv) = conn.open_bi().await.context("open control stream")?;
+            .map_err(|e| {
+                tracing::info!("control: dial failed: {e:#}");
+                crate::vi::ui("Không kết nối được tới máy chủ")
+            })?;
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|_| crate::vi::ui("Mất kết nối với máy chủ"))?;
         let auth = CtlRequest::Auth {
             ticket: self.ticket.clone(),
-            device: self.inner.cfg.device_name.clone(),
+            device: self.inner.device_name().to_string(),
         };
-        write_msg(&mut send, &auth).await?;
-        match read_msg::<_, CtlResponse>(&mut recv).await? {
+        let lost = |_| crate::vi::ui("Mất kết nối với máy chủ");
+        write_msg(&mut send, &auth).await.map_err(lost)?;
+        match read_msg::<_, CtlResponse>(&mut recv).await.map_err(lost)? {
             CtlResponse::Ok => Ok((conn, send, recv)),
             CtlResponse::Denied { reason } => {
                 conn.close(0u32.into(), b"denied");
-                bail!("host refused admin ticket: {reason}")
+                Err(crate::vi::ui(format!(
+                    "Máy chủ từ chối link điều khiển: {reason}"
+                )))
             }
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -87,23 +96,28 @@ impl CtlClient {
             }
             .await;
             match res {
-                Ok(CtlResponse::Denied { reason }) => bail!("host refused: {reason}"),
+                Ok(CtlResponse::Denied { reason }) => {
+                    return Err(crate::vi::ui(format!("Máy chủ từ chối: {reason}")))
+                }
                 Ok(r) => return Ok(r),
                 Err(e) if attempt == 0 => {
                     tracing::debug!("control connection lost ({e:#}); reconnecting");
                     *g = None;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    tracing::info!("control request failed: {e:#}");
+                    return Err(crate::vi::ui("Mất kết nối với máy chủ"));
+                }
             }
         }
-        bail!("control request failed")
+        Err(crate::vi::ui("Mất kết nối với máy chủ"))
     }
 
     /// Host status.
     pub async fn status(&self) -> Result<HostStatus> {
         match self.request(CtlRequest::Status).await? {
             CtlResponse::Status(s) => Ok(s),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -115,7 +129,7 @@ impl CtlClient {
         };
         match self.request(req).await? {
             CtlResponse::Dir { entries } => Ok(entries),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -123,7 +137,7 @@ impl CtlClient {
     pub async fn create_ticket(&self, spec: TicketSpec) -> Result<Ticket> {
         match self.request(CtlRequest::CreateTicket(spec)).await? {
             CtlResponse::Ticket(t) => Ok(t),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -131,7 +145,7 @@ impl CtlClient {
     pub async fn list_jobs(&self) -> Result<Vec<JobRecord>> {
         match self.request(CtlRequest::ListJobs).await? {
             CtlResponse::Jobs(j) => Ok(j),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -139,7 +153,7 @@ impl CtlClient {
     pub async fn revoke(&self, id: [u8; 16]) -> Result<()> {
         match self.request(CtlRequest::Revoke { id }).await? {
             CtlResponse::Ok => Ok(()),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -150,7 +164,7 @@ impl CtlClient {
     pub async fn job_ticket(&self, id: [u8; 16]) -> Result<Ticket> {
         match self.request(CtlRequest::JobTicket { id }).await? {
             CtlResponse::Ticket(t) => Ok(t),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -160,7 +174,7 @@ impl CtlClient {
     pub async fn request_update(&self) -> Result<()> {
         match self.request(CtlRequest::RequestUpdate).await? {
             CtlResponse::Ok => Ok(()),
-            other => bail!("unexpected response {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -303,7 +317,7 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest, device: &str) -> CtlRespons
                         reason: DenyReason::NotAllowed,
                     },
                     None => CtlResponse::Denied {
-                        reason: DenyReason::Other("unknown job".into()),
+                        reason: DenyReason::Other("Không có việc này trên máy chủ".into()),
                     },
                 }
             }
@@ -315,4 +329,10 @@ async fn answer(inner: &Arc<Inner>, req: CtlRequest, device: &str) -> CtlRespons
         Ok(Err(e)) => other(e),
         Err(e) => other(e.into()),
     }
+}
+
+/// A response that does not fit the request (old or broken host).
+fn unexpected(r: CtlResponse) -> anyhow::Error {
+    tracing::info!("control: unexpected response {r:?}");
+    crate::vi::ui(crate::vi::PROTOCOL)
 }

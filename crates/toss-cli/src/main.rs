@@ -160,14 +160,34 @@ enum Cmd {
     },
     /// List paired devices (contacts.json of this data dir).
     Contacts,
-    /// Send files/folders to a contact (id, unique id prefix or name). Waits
-    /// until the contact is online; it may have to accept the files.
+    /// Send files/folders to a contact (id, unique id prefix or name) or, v0.8,
+    /// to a Toss device on this LAN (`toss-cli nearby`). Waits until the
+    /// contact is online; the receiver may have to accept the files.
     Send {
-        /// Contact id, id prefix or name.
+        /// Contact or nearby device: id, id prefix or name.
         contact: String,
         /// Files or folders.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// Seconds to look for a nearby device that is not a contact.
+        #[arg(long, default_value_t = 6)]
+        wait: u64,
+    },
+    /// v0.8: list Toss devices seen on this LAN via mDNS.
+    Nearby {
+        /// Seconds to listen before printing.
+        #[arg(long, default_value_t = 6)]
+        wait: u64,
+    },
+    /// v0.8: send a text message to a contact or a Toss device on this LAN.
+    SendText {
+        /// Contact or nearby device: id, id prefix or name.
+        to: String,
+        /// The message.
+        text: String,
+        /// Seconds to look for a nearby device that is not a contact.
+        #[arg(long, default_value_t = 6)]
+        wait: u64,
     },
 }
 
@@ -453,18 +473,90 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Send { contact, paths } => {
-            let c = resolve_in(&read_contacts(&data_dir), contact).ok_or_else(|| {
-                anyhow!("no contact matches {contact:?} (see `toss-cli contacts`)")
-            })?;
+        Cmd::Send {
+            contact,
+            paths,
+            wait,
+        } => {
             let node = Node::start(cfg).await?;
             node.wait_online(Duration::from_secs(5)).await;
-            eprintln!("sending to {} ({})", c.name, c.id);
-            let t = node.send_to_contact(&c.id, paths.clone()).await?;
+            let (id, name) = match resolve_peer(&node, contact, *wait).await {
+                Ok(v) => v,
+                Err(e) => {
+                    node.shutdown().await;
+                    return Err(e);
+                }
+            };
+            eprintln!("sending to {name} ({id})");
+            let t = node.send_to_peer(&id, paths.clone()).await?;
             finish_transfer(node, t, cli.max_wait).await?;
+        }
+        Cmd::Nearby { wait } => {
+            let node = Node::start(cfg).await?;
+            tokio::time::sleep(Duration::from_secs(*wait)).await;
+            let list = node.nearby();
+            if list.is_empty() {
+                println!("no Toss devices seen on this LAN (mDNS)");
+            }
+            for p in list {
+                println!(
+                    "{}  {:<24} {:<8} v={:<8} contact={} addrs={}",
+                    p.id,
+                    p.name,
+                    p.platform,
+                    if p.version.is_empty() {
+                        "<0.8"
+                    } else {
+                        &p.version
+                    },
+                    p.contact,
+                    p.addrs.join(",")
+                );
+            }
+            node.shutdown().await;
+        }
+        Cmd::SendText { to, text, wait } => {
+            let node = Node::start(cfg).await?;
+            let res = async {
+                let (id, name) = resolve_peer(&node, to, *wait).await?;
+                node.send_text(&id, text).await?;
+                anyhow::Ok(name)
+            }
+            .await;
+            node.shutdown().await;
+            println!("delivered to {}", res?);
         }
     }
     Ok(())
+}
+
+/// A contact (id, unique prefix or name) or, failing that, a nearby device
+/// matching `needle`, looked for up to `wait` seconds. Returns (id, name).
+async fn resolve_peer(node: &Node, needle: &str, wait: u64) -> Result<(String, String)> {
+    if let Some(c) = resolve_in(&node.contacts(), needle) {
+        return Ok((c.id, c.name));
+    }
+    let n = needle.trim().to_lowercase();
+    let deadline = Instant::now() + Duration::from_secs(wait);
+    loop {
+        let hits: Vec<_> = node
+            .nearby()
+            .into_iter()
+            .filter(|p| {
+                p.id == n || p.name.to_lowercase() == n || (n.len() >= 6 && p.id.starts_with(&n))
+            })
+            .collect();
+        if let [p] = hits.as_slice() {
+            return Ok((p.id.clone(), p.name.clone()));
+        }
+        if hits.len() > 1 {
+            bail!("{needle:?} matches several nearby devices; use the id (see `toss-cli nearby`)");
+        }
+        if Instant::now() >= deadline {
+            bail!("no contact or nearby device matches {needle:?} (see `toss-cli contacts` / `toss-cli nearby`)");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// `~/Toss` (inbox for pushes when not hosting).
@@ -502,7 +594,7 @@ async fn serve_events(node: &Node, auto_accept: bool) {
                 Ok(ev) => {
                     if let TransferEvent::PushIncoming(p) = &ev {
                         if auto_accept {
-                            if let Err(e) = node.answer_push(&p.push_id, true) {
+                            if let Err(e) = node.answer_push(&p.push_id, true, false) {
                                 eprintln!("could not accept push {}: {e:#}", p.push_id);
                             }
                         }
@@ -772,6 +864,13 @@ fn event_line(ev: &TransferEvent) -> Option<String> {
         TransferEvent::UpdateRequested { device } => {
             format!("update requested by {device} (only the desktop app updates itself)")
         }
+        TransferEvent::NearbyChanged {} => "nearby devices changed".to_string(),
+        TransferEvent::TextIncoming {
+            from_name,
+            from_id,
+            text,
+            ..
+        } => format!("text from {from_name} ({from_id}): {text}"),
     })
 }
 

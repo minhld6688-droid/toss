@@ -14,7 +14,11 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
-use crate::{config, core::Core, ctxmenu::SHARE_FLAG};
+use crate::{
+    config,
+    core::Core,
+    ctxmenu::{SEND_FLAG, SHARE_FLAG},
+};
 
 /// Max size of a `.toss` file we are willing to read (a ticket is ~330 chars).
 const MAX_TOSS_FILE: u64 = 64 * 1024;
@@ -29,7 +33,13 @@ pub struct Shell {
     /// lost nor sent twice.
     queue: Mutex<Queue>,
     last: Mutex<Option<(String, Instant)>>,
+    /// v0.8: items forwarded by several launches in a row (Explorer starts one process per
+    /// selected file) are collected for a moment and sent to the UI as one `send`.
+    batch: Mutex<Option<Vec<String>>>,
 }
+
+/// How long launches are collected into one "Gửi tới ai?".
+const SEND_BATCH: Duration = Duration::from_millis(400);
 
 #[derive(Default)]
 struct Queue {
@@ -140,7 +150,7 @@ pub fn share_arg(args: &[String]) -> Option<String> {
     None
 }
 
-/// Validates a `--share` argument: must be an existing directory (relative paths are
+/// Validates a `--share` argument: an existing folder or (v0.8) file (relative paths are
 /// taken from `cwd`). Returns the canonical path, or a Vietnamese message for the UI.
 pub fn share_target(raw: &str, cwd: &Path) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
@@ -154,11 +164,6 @@ pub fn share_target(raw: &str, cwd: &Path) -> Result<PathBuf, String> {
     };
     if !p.exists() {
         return Err(format!("Không tìm thấy “{raw}”"));
-    }
-    if !p.is_dir() {
-        return Err(format!(
-            "“{raw}” là file, không phải thư mục. Chuột phải vào một thư mục để tạo link Toss."
-        ));
     }
     toss_core::paths::canonicalize(&p).map_err(|e| format!("Không đọc được “{raw}”: {e:#}"))
 }
@@ -256,29 +261,115 @@ pub fn ticket_from_file(path: &str) -> Option<String> {
     Some(ticket_from_url(t).unwrap_or_else(|| t.to_string()))
 }
 
-/// Looks through process arguments for `--share <folder>`, `toss://` links and `.toss`
-/// files. `cwd` is the launching process' working directory. True if one was handled.
+/// What a launch's arguments ask for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Args {
+    /// `--share <path>`.
+    pub share: Option<String>,
+    /// `--send <items…>` (right-click on files, Send to, macOS Quick Action) and bare existing
+    /// files / folders (dropped on the exe, "Open with"), absolute.
+    pub send: Vec<String>,
+    /// `toss://` links, invites and `.toss` files, in order.
+    pub links: Vec<String>,
+}
+
+/// Parses argv (argv[0] is the exe). Relative paths are taken from `cwd`.
+pub fn parse_args(args: &[String], cwd: &Path) -> Args {
+    let mut out = Args {
+        share: share_arg(args),
+        ..Args::default()
+    };
+    if out.share.is_some() {
+        return out;
+    }
+    let mut sending = false;
+    for a in args.iter().skip(1) {
+        if a == SEND_FLAG {
+            sending = true;
+            continue;
+        }
+        if invite_from_url(a).is_some() || ticket_from_url(a).is_some() {
+            out.links.push(a.clone());
+            continue;
+        }
+        if let Some(t) = ticket_from_file(a) {
+            out.links.push(t);
+            continue;
+        }
+        if a.starts_with("--") || a.starts_with("-psn_") {
+            continue; // other flags (--hidden, autostart, macOS process serial)
+        }
+        let p = Path::new(a.trim());
+        let p = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        };
+        if p.exists() || sending {
+            out.send.push(p.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
+/// Looks through process arguments for `--share <path>`, `--send <items…>`, bare files /
+/// folders, `toss://` links and `.toss` files. `cwd` is the launching process' working
+/// directory. True if one was handled.
 pub fn handle_args(app: &AppHandle, args: &[String], cwd: &Path) -> bool {
-    let mut handled = false;
-    if let Some(dir) = share_arg(args) {
+    let a = parse_args(args, cwd);
+    if let Some(dir) = a.share {
         deliver_share(app, &dir, cwd);
         return true;
     }
-    for a in args.iter().skip(1) {
-        if let Some(i) = invite_from_url(a) {
-            deliver_invite(app, i);
-            handled = true;
-        } else if let Some(t) = ticket_from_url(a).or_else(|| ticket_from_file(a)) {
-            deliver_link(app, t);
-            handled = true;
+    for l in &a.links {
+        match invite_from_url(l) {
+            Some(i) => deliver_invite(app, i),
+            None => match ticket_from_url(l) {
+                Some(t) => deliver_link(app, t),
+                None => deliver_link(app, l.clone()),
+            },
         }
+    }
+    let handled = !a.links.is_empty() || !a.send.is_empty();
+    if !a.send.is_empty() {
+        deliver_send_batched(app, a.send);
     }
     handled
 }
 
+/// Items from consecutive launches within `SEND_BATCH` go to the UI as one `send`.
+fn deliver_send_batched(app: &AppHandle, paths: Vec<String>) {
+    let shell = app.state::<Shell>();
+    let mut b = shell.batch.lock().unwrap_or_else(|p| p.into_inner());
+    match b.as_mut() {
+        Some(list) => {
+            for p in paths {
+                if !list.contains(&p) {
+                    list.push(p);
+                }
+            }
+        }
+        None => {
+            *b = Some(paths);
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(SEND_BATCH);
+                let paths = app
+                    .state::<Shell>()
+                    .batch
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .unwrap_or_default();
+                deliver_send(&app, paths);
+            });
+        }
+    }
+}
+
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Mở Toss", true, None::<&str>)?;
-    let send = MenuItem::with_id(app, "send", "Gửi folder…", true, None::<&str>)?;
+    let send = MenuItem::with_id(app, "send", "Gửi file hoặc folder…", true, None::<&str>)?;
     let transfers = MenuItem::with_id(app, "transfers", "Đang chuyển", true, None::<&str>)?;
     let update = MenuItem::with_id(app, "update", "Kiểm tra cập nhật", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
@@ -352,9 +443,8 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 /// Id of the one tray / menu bar icon.
 pub const TRAY_ID: &str = "toss";
 
-/// Files to send (dropped on the menu bar / Dock icon, or the tray "Gửi folder…"): the UI asks
-/// "Gửi tới ai?" (a contact, or a link).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Files to send (dropped on the menu bar / Dock icon, right-click, Send to): the UI asks
+/// "Gửi tới ai?" (a contact, a nearby device, or a link).
 pub fn deliver_send(app: &AppHandle, paths: Vec<String>) {
     if paths.is_empty() {
         return;
@@ -529,7 +619,31 @@ mod tests {
     }
 
     #[test]
-    fn share_target_must_be_a_folder() {
+    fn send_arguments() {
+        let dir = std::env::temp_dir().join(format!("toss-send-arg-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Lớp 12A3")).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        let abs = |n: &str| dir.join(n).to_string_lossy().into_owned();
+        // Send to / Quick Action: --send then every item
+        let a = parse_args(&argv(&["--send", &abs("a.jpg"), &abs("Lớp 12A3")]), &dir);
+        assert_eq!(a.send, vec![abs("a.jpg"), abs("Lớp 12A3")]);
+        assert!(a.share.is_none() && a.links.is_empty());
+        // bare paths (relative to cwd), flags and missing paths skipped without --send
+        let a = parse_args(&argv(&["--hidden", "a.jpg", "nope.jpg"]), &dir);
+        assert_eq!(a.send, vec![abs("a.jpg")]);
+        // links still win their own slot
+        let a = parse_args(&argv(&["toss://t/toss1abc"]), &dir);
+        assert_eq!(a.links, vec!["toss://t/toss1abc".to_string()]);
+        assert!(a.send.is_empty());
+        // --share keeps its old meaning
+        let a = parse_args(&argv(&["--share", &abs("a.jpg")]), &dir);
+        assert_eq!(a.share, Some(abs("a.jpg")));
+        assert!(parse_args(&argv(&["--hidden"]), &dir) == Args::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn share_target_accepts_files_and_folders() {
         let dir = std::env::temp_dir().join(format!("toss-share-arg-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("Lớp 12A3")).unwrap();
         std::fs::write(dir.join("a.jpg"), b"x").unwrap();
@@ -537,8 +651,8 @@ mod tests {
         assert!(ok.is_absolute() && ok.ends_with("Lớp 12A3"));
         // relative to the launching process' cwd
         assert_eq!(share_target("Lớp 12A3", &dir).unwrap(), ok);
-        let file = share_target(dir.join("a.jpg").to_str().unwrap(), Path::new("/"));
-        assert!(file.unwrap_err().contains("không phải thư mục"));
+        let file = share_target(dir.join("a.jpg").to_str().unwrap(), Path::new("/")).unwrap();
+        assert!(file.ends_with("a.jpg"), "v0.8: a single file can be shared");
         assert!(
             share_target(dir.join("nope").to_str().unwrap(), Path::new("/"))
                 .unwrap_err()

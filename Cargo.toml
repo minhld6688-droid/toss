@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/toss-core", "crates/toss-cli", "crates/toss-ls"]
+members = ["crates/toss-core", "crates/toss-cli", "crates/toss-ls", "apps/desktop/src-tauri"]
 exclude = ["third_party"]
 
 [workspace.package]

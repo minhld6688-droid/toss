@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use iroh::{endpoint::Connection, SecretKey};
 
 use crate::{
@@ -80,21 +80,27 @@ pub(crate) fn issue_ticket(
 ) -> Result<Ticket> {
     spec.job = spec.job.trim().chars().take(MAX_JOB_LEN).collect();
     if spec.job.is_empty() {
-        bail!("job name is empty");
+        return Err(crate::vi::ui("Tên việc không được để trống"));
     }
     if !spec.get && !spec.put {
-        bail!("ticket must allow get and/or put");
+        return Err(crate::vi::ui("Link phải cho phép tải về hoặc gửi lên"));
     }
     let root = rt
         .root(&spec.root)
-        .ok_or_else(|| anyhow!("unknown root {:?}", spec.root))?;
-    let path = sanitize_rel(&spec.path).context("path")?;
-    let src = resolve_rel(root, &path).context("path")?;
+        .ok_or_else(|| crate::vi::ui(format!("Không có thư mục gốc “{}”", spec.root)))?;
+    let bad_path = |e: anyhow::Error| {
+        tracing::info!("ticket path rejected: {e:#}");
+        crate::vi::ui(format!("Đường dẫn không hợp lệ: {}", spec.path))
+    };
+    let path = sanitize_rel(&spec.path).map_err(bad_path)?;
+    let src = resolve_rel(root, &path).map_err(bad_path)?;
     if spec.get && std::fs::symlink_metadata(&src).is_err() {
-        bail!("{} does not exist", src.display());
+        return Err(crate::vi::ui(format!("Không tìm thấy {}", src.display())));
     }
     spec.path = path.as_str();
-    spec.ret = sanitize_rel(&spec.ret).context("ret")?.as_str();
+    spec.ret = sanitize_rel(&spec.ret)
+        .map_err(|_| crate::vi::ui(format!("Thư mục nhận không hợp lệ: {}", spec.ret)))?
+        .as_str();
     let mut body = ticket::body_from_spec(&secret.public(), &spec, random_id());
     body.set_host_addr(addr);
     let t = Ticket::sign(body, secret);
@@ -145,7 +151,7 @@ pub(crate) fn verify_common(inner: &Inner, t: &Ticket) -> Result<(), DenyReason>
         Err(e) => {
             tracing::error!("{e:#}");
             Err(DenyReason::Other(
-                "host revocation list is unreadable".into(),
+                "Máy chia sẻ không đọc được danh sách link đã thu hồi".into(),
             ))
         }
     }
@@ -366,7 +372,8 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
                 tracker.finish_done(path);
             } else {
                 tracker.tick(path);
-                tracker.error(ErrorCode::HashMismatch, done.msg.clone(), None);
+                tracing::warn!(id = %tracker.id, "put incomplete: {}", done.msg);
+                tracker.error(ErrorCode::HashMismatch, crate::vi::DONE_FAILED.into(), None);
             }
             JobEvent {
                 at: now_unix(),
@@ -385,7 +392,8 @@ pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
                 SessErr::Denied(_) => ErrorCode::Denied,
                 SessErr::Other(_) => ErrorCode::Other,
             };
-            tracker.error(code, e.to_string(), None);
+            tracing::info!(id = %tracker.id, "host-side transfer failed: {e}");
+            tracker.error(code, crate::vi::sess_msg(e), None);
             JobEvent {
                 at: now_unix(),
                 device: device.clone(),

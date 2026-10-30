@@ -2,13 +2,15 @@
 
 Blip-style peer-to-peer file transfer. Every machine is the same (v0.6): drop a folder on a name in
 the contact book (or on the Toss menu bar icon on macOS) to send it, or make a link anyone can open to
-receive it — and send back into, if allowed. No server in the middle: a signed link carries the grant and
+receive it — and send back into, if allowed. v0.8: machines on the same network show up by themselves
+("Gần đây"), including phones and PCs running [LocalSend](https://localsend.org), and a folder can be shared
+to any browser on the LAN. No server in the middle: a signed link carries the grant and
 [iroh](https://iroh.computer) handles connection, NAT traversal and relay fallback.
 
 - Tauri 2 desktop app (Mac + Windows), Rust core, React UI
 - Short link `https://toss-link.vercel.app/<code>` (or the long `https://<page>/#<ticket>`) opens the app via `toss://t/<ticket>`
 - Resumable, hash-verified transfers; host never overwrites finished files
-- Unattended machines: start hidden at logon, survive Windows Update restarts, can be driven remotely (control link)
+- Unattended machines: start hidden at logon (autostart on by default), can be driven remotely (control link)
 
 ## Layout
 
@@ -17,7 +19,8 @@ receive it — and send back into, if allowed. No server in the middle: a signed
 | `crates/toss-core`, `crates/toss-cli` | Core library and CLI |
 | `apps/desktop` | Desktop app (Tauri 2 + React) |
 | `web/` | Link page for Vercel (static) |
-| `installer/` | NSIS hooks, macOS entitlements, studio host setup script |
+| `crates/toss-ls` | LocalSend bridge (LAN discovery + interop with LocalSend apps, browser share) |
+| `installer/` | Installer notes (NSIS hooks live in `apps/desktop/src-tauri/bundle/`) |
 | `.github/workflows/` | CI and release |
 | `contracts/` | Wire format, core API, IPC (source of truth) |
 | `docs/` | Install guide and architecture |
@@ -26,7 +29,6 @@ receive it — and send back into, if allowed. No server in the middle: a signed
 
 - [Hướng dẫn cài đặt (Vietnamese)](docs/INSTALL.md): editors, studio host, troubleshooting
 - [Architecture](docs/ARCHITECTURE.md)
-- [Host setup (Vietnamese)](installer/host-setup/README.md)
 - [Installer wiring and signing](installer/README.md)
 - Specs: [wire](contracts/wire.md), [core API](contracts/core-api.md), [IPC](contracts/ipc.ts)
 
