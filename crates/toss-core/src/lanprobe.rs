@@ -35,15 +35,19 @@ pub(crate) fn is_denial(e: &io::Error) -> bool {
     )
 }
 
-/// Blocked = a private IPv4 address exists and the multicast send and (when a
-/// gateway is known) the gateway send both failed with a denial error.
+/// Blocked = a private IPv4 address exists and the multicast send failed with a
+/// denial error. v0.8: the gateway send is no longer required to fail too — on a real
+/// Mac (fresh unsigned build, permission not granted yet) every multicast send failed
+/// with `EHOSTUNREACH` while a unicast datagram to the router still went out, and
+/// nearby discovery (mDNS + LocalSend multicast) was dead. The gateway result is kept
+/// for the log only.
 pub(crate) fn decide(
     has_private_v4: bool,
     multicast: &io::Result<()>,
-    gateway: Option<&io::Result<()>>,
+    _gateway: Option<&io::Result<()>>,
 ) -> bool {
     let denied = |r: &io::Result<()>| matches!(r, Err(e) if is_denial(e));
-    has_private_v4 && denied(multicast) && gateway.is_none_or(denied)
+    has_private_v4 && denied(multicast)
 }
 
 /// One UDP datagram from a fresh socket.
@@ -109,7 +113,7 @@ pub(crate) fn spawn(inner: &Arc<Inner>) {
                     .unwrap_or(false);
                 if inner.lan_blocked.swap(blocked, Ordering::SeqCst) != blocked {
                     if blocked {
-                        tracing::warn!("macOS blocks local network access: same-LAN transfers go through the relay");
+                        tracing::warn!("macOS blocks local network access: nearby devices are hidden and same-LAN transfers go through the relay");
                     } else {
                         tracing::info!("local network access OK");
                     }
@@ -152,7 +156,8 @@ mod tests {
             assert!(decide(true, &denied, None));
             assert!(!decide(false, &denied, Some(&err(ehostunreach))));
             assert!(!decide(true, &ok, Some(&err(ehostunreach))));
-            assert!(!decide(true, &denied, Some(&ok)));
+            // v0.8: multicast denied is enough, even when the router still answers.
+            assert!(decide(true, &denied, Some(&ok)));
             assert!(!decide(true, &err(enobufs), None));
         }
     }

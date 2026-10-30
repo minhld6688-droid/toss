@@ -40,7 +40,7 @@ export function LanBlockedCard({ className = "" }: { className?: string }) {
         </span>
         <div className="min-w-0">
           <div className="title text-[19px] leading-[1.15] [&_em]:text-warn">macOS đang chặn Toss trong <em>mạng nội bộ</em></div>
-          <div className="text-sm mt-1">Chuyển file sẽ rất chậm: khoảng 1 MB/s thay vì 60 MB/s.</div>
+          <div className="text-sm mt-1">Không thấy máy gần, và chuyển file trong mạng chậm: khoảng 1 MB/s thay vì 60 MB/s.</div>
         </div>
       </div>
       <button className="btn btn-primary w-full mt-3 magnet" disabled={busy} onClick={open}>
