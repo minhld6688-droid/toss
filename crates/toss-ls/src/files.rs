@@ -78,10 +78,38 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<OutFile>, depth: u32) {
     }
 }
 
-const RULES: Rules = Rules::Universal;
+/// The rules of the filesystem files are written to (this machine). `Universal` would also
+/// apply Windows' reserved device names on macOS/Linux, turning very common Vietnamese
+/// folder names ("con", "aux"…) into "_".
+const RULES: Rules = Rules::current();
 
-/// Sanitizes one path component with LocalSend's filename rules.
+/// Windows device names (`CON`, `NUL`, `COM1`…), with or without an extension.
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0')
+}
+
+/// Sanitizes one path component with LocalSend's filename rules. On Windows a reserved
+/// device name keeps its letters ("con" → "con_", "aux.txt" → "aux_.txt") instead of
+/// LocalSend's bare "_", like Toss's own `paths::sanitize_component`.
 pub(crate) fn sanitize_component(s: &str, placeholder: &str) -> String {
+    let fixed;
+    let s = if RULES == Rules::Windows && is_reserved_device_name(s) {
+        let cut = s.find('.').unwrap_or(s.len());
+        fixed = format!("{}_{}", &s[..cut], &s[cut..]);
+        fixed.as_str()
+    } else {
+        s
+    };
     filename::sanitize_with(
         s,
         RULES,
@@ -203,8 +231,16 @@ mod tests {
         assert_eq!(safe_rel("a/b c/d.txt").unwrap(), vec!["a", "b c", "d.txt"]);
         assert_eq!(safe_rel("a\\b").unwrap(), vec!["a", "b"]);
         assert_eq!(safe_rel("./a//b").unwrap(), vec!["a", "b"]);
-        assert_eq!(safe_rel("x/con.txt").unwrap(), vec!["x", "_.txt"]);
-        assert_eq!(safe_rel("q?.txt").unwrap(), vec!["q_.txt"]);
+        if cfg!(windows) {
+            assert_eq!(safe_rel("x/con.txt").unwrap(), vec!["x", "con_.txt"]);
+            assert_eq!(safe_rel("q?.txt").unwrap(), vec!["q_.txt"]);
+        } else {
+            // macOS/Linux keep names their filesystem accepts.
+            assert_eq!(safe_rel("x/con.txt").unwrap(), vec!["x", "con.txt"]);
+        }
+        if cfg!(target_os = "macos") {
+            assert_eq!(safe_rel("a:b.txt").unwrap(), vec!["a_b.txt"]);
+        }
         assert_eq!(
             safe_rel("Ảnh lớp 12/ổ.jpg").unwrap(),
             vec!["Ảnh lớp 12", "ổ.jpg"]
@@ -234,5 +270,33 @@ mod tests {
             unique(d.path().join(".rc"), &r, false),
             d.path().join(".rc")
         );
+    }
+}
+
+#[cfg(test)]
+mod reserved_tests {
+    use super::*;
+
+    #[test]
+    fn vietnamese_words_that_are_windows_device_names_survive() {
+        for n in ["con", "Con gái", "aux", "nul.txt", "com1", "LPT9.log"] {
+            let out = sanitize_component(n, "x");
+            assert!(!out.starts_with('_'), "{n} -> {out}");
+            assert!(
+                out.to_lowercase().starts_with(&n[..3].to_lowercase()),
+                "{n} -> {out}"
+            );
+        }
+        assert!(is_reserved_device_name("con"));
+        assert!(is_reserved_device_name("Aux.tar.gz"));
+        assert!(!is_reserved_device_name("Con gái"));
+        assert!(!is_reserved_device_name("com0"));
+        assert!(!is_reserved_device_name("console"));
+        if cfg!(windows) {
+            assert_eq!(sanitize_component("con", "x"), "con_");
+            assert_eq!(sanitize_component("aux.txt", "x"), "aux_.txt");
+        } else {
+            assert_eq!(sanitize_component("con", "x"), "con");
+        }
     }
 }

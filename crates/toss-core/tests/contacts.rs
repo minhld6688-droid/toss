@@ -573,8 +573,14 @@ async fn restart_mid_get_resumes_from_transfers_json() {
     .await;
     assert!(std::fs::read(&fin).unwrap() == std::fs::read(&src).unwrap());
     assert!(!part.exists());
-    let saved = std::fs::read_to_string(t.join("client-data/transfers.json")).unwrap();
-    assert!(saved.contains("\"done\""), "{saved}");
+    // transfers.json is written right after the final event, not before it: wait for it.
+    let tj = t.join("client-data/transfers.json");
+    wait_until(
+        "transfers.json records done",
+        Duration::from_secs(10),
+        || std::fs::read_to_string(&tj).is_ok_and(|s| s.contains("\"done\"")),
+    )
+    .await;
     assert_eq!(client.transfer(&paused.id).unwrap().status, Status::Paused);
     client.resume(&paused.id).await.unwrap();
     wait_done(

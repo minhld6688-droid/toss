@@ -61,7 +61,7 @@ jobs:
 
   # Deploy kit and installer scripts: syntax + lint. Cheap, no Rust build.
   scripts:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04   # python3 >= 3.11 for tomllib
     steps:
       - uses: actions/checkout@v4
 

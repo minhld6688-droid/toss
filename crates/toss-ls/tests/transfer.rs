@@ -469,17 +469,28 @@ async fn evil_names_stay_inside_the_inbox() {
         tops[0].file_name().unwrap().to_string_lossy(),
         ".._.._Evil[31m"
     );
-    assert_eq!(
-        tree(&tops[0]),
+    // Names follow this machine's filesystem rules: Windows maps illegal characters and keeps
+    // reserved device names readable ("con" → "con_"); macOS/Linux keep what they accept.
+    let expected: Vec<&str> = if cfg!(windows) {
         vec![
             "a/",
             "a/b.txt",
             "fine.txt",
             "good/",
-            "good/_.txt",
-            "q____.txt"
+            "good/con_.txt",
+            "q____.txt",
         ]
-    );
+    } else {
+        vec![
+            "a/",
+            "a/b.txt",
+            "fine.txt",
+            "good/",
+            "good/con.txt",
+            "q?<>|.txt",
+        ]
+    };
+    assert_eq!(tree(&tops[0]), expected);
     let parent = b.inbox().parent().unwrap().to_path_buf();
     for n in ["escape.txt", "abs.txt", "x.txt", "y.txt"] {
         assert!(!parent.join(n).exists());
