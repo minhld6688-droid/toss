@@ -6916,7 +6916,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "toss-cli"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6933,7 +6933,7 @@ dependencies = [
 
 [[package]]
 name = "toss-core"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6962,7 +6962,7 @@ dependencies = [
 
 [[package]]
 name = "toss-desktop"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -7003,7 +7003,7 @@ dependencies = [
 
 [[package]]
 name = "toss-ls"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bytes",
