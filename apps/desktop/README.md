@@ -6,12 +6,17 @@ UI language: Vietnamese. Code and docs: English. Contracts: `../../contracts/` (
 ```
 apps/desktop
 ├─ src/                 React UI
-│  ├─ lib/ipc-types.ts  verbatim copy of contracts/ipc.ts
+│  ├─ (types)           `@contracts/ipc` = ../../contracts/ipc.ts (tsconfig path; no copy)
 │  ├─ lib/ipc.ts        invoke()/listen() wrapper (real) or in-memory mock
 │  ├─ lib/mock.ts       mock shell: fake tickets, host mode, remote admin, transfers with progress
 │  ├─ screens/          Home · Transfers · Settings   (+ components/: TicketSheet, LinkMaker, JobList, QrLink, Wizard)
 ├─ src-tauri/src/
-│  ├─ core.rs           the ONLY file using toss-core (adapter)
+│  ├─ core.rs           toss-core adapter: node lifecycle, links, transfers, event forwarding
+│  ├─ contacts.rs       v0.5 contacts commands
+│  ├─ nearby.rs         v0.8 nearby list, unified asks, LocalSend policy/transfers, received history, web share
+│  ├─ ls.rs             v0.8 the ONLY file naming toss-ls (LocalSend bridge adapter)
+│  ├─ ctxmenu.rs        right-click "Gửi bằng Toss" (folders + files) and Windows Send to → Toss
+│  ├─ services.rs       macOS Quick Action bundle
 │  ├─ commands.rs       every command of ipc.ts, snake_case names/args
 │  ├─ shell.rs          tray, deep links, `.toss` files, hide-to-tray helpers
 │  ├─ settings.rs       settings.json

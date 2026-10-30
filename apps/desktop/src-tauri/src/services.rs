@@ -1,6 +1,7 @@
 //! macOS Finder Quick Action "Gửi bằng Toss": an Automator "Run Shell Script"
 //! service bundle at `~/Library/Services/Gửi bằng Toss.workflow` that runs
-//! `open -n -a Toss --args --share "<folder>"` for every selected folder.
+//! `open -n -a Toss --args --send <items…>` for the selected files and folders (v0.8:
+//! `public.item`; 0.6 offered folders only, with `--share`).
 //!
 //! `-n` starts a short-lived second process even when Toss is already running
 //! (plain `open -a` would only activate the running app and drop `--args`); that
@@ -19,11 +20,12 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::ctxmenu::{LABEL, LEGACY_LABELS, SHARE_FLAG};
+use crate::ctxmenu::{LABEL, LEGACY_LABELS, SEND_FLAG};
 
-/// Shell script run by the Quick Action (input passed "as arguments").
+/// Shell script run by the Quick Action (input passed "as arguments"): one launch carries every
+/// selected item, so the app opens one "Gửi tới ai?".
 pub fn shell_command() -> String {
-    format!(r#"for f in "$@"; do open -n -a Toss --args {SHARE_FLAG} "$f"; done"#)
+    format!(r#"[ "$#" -gt 0 ] && open -n -a Toss --args {SEND_FLAG} "$@""#)
 }
 
 /// `<LABEL>.workflow`.
@@ -84,7 +86,7 @@ pub fn info_plist() -> String {
 			</array>
 			<key>NSSendFileTypes</key>
 			<array>
-				<string>public.folder</string>
+				<string>public.item</string>
 			</array>
 		</dict>
 	</array>
@@ -296,7 +298,7 @@ pub fn document_wflow() -> String {
 			<string>/System/Library/CoreServices/Finder.app</string>
 		</array>
 		<key>inputTypeIdentifier</key>
-		<string>com.apple.Automator.fileSystemObject.folder</string>
+		<string>com.apple.Automator.fileSystemObject</string>
 		<key>outputTypeIdentifier</key>
 		<string>com.apple.Automator.nothing</string>
 		<key>presentationMode</key>
@@ -308,7 +310,7 @@ pub fn document_wflow() -> String {
 		<key>serviceApplicationPath</key>
 		<string>/System/Library/CoreServices/Finder.app</string>
 		<key>serviceInputTypeIdentifier</key>
-		<string>com.apple.Automator.fileSystemObject.folder</string>
+		<string>com.apple.Automator.fileSystemObject</string>
 		<key>serviceOutputTypeIdentifier</key>
 		<string>com.apple.Automator.nothing</string>
 		<key>serviceProcessesInput</key>
@@ -412,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn info_plist_declares_a_finder_folder_service() {
+    fn info_plist_declares_a_finder_item_service() {
         let v = parse(&info_plist());
         let svc = &v.as_dictionary().unwrap()["NSServices"].as_array().unwrap()[0];
         let svc = svc.as_dictionary().unwrap();
@@ -428,7 +430,7 @@ mod tests {
         );
         assert_eq!(
             svc["NSSendFileTypes"].as_array().unwrap()[0].as_string(),
-            Some("public.folder")
+            Some("public.item")
         );
         assert!(svc.contains_key("NSSendTypes"));
     }
@@ -445,7 +447,7 @@ mod tests {
         assert_eq!(cmd, shell_command());
         assert_eq!(
             cmd,
-            r#"for f in "$@"; do open -n -a Toss --args --share "$f"; done"#
+            r#"[ "$#" -gt 0 ] && open -n -a Toss --args --send "$@""#
         );
         assert_eq!(params["inputMethod"].as_signed_integer(), Some(1));
         assert_eq!(params["shell"].as_string(), Some("/bin/bash"));
@@ -456,7 +458,7 @@ mod tests {
         );
         assert_eq!(
             meta["serviceInputTypeIdentifier"].as_string(),
-            Some("com.apple.Automator.fileSystemObject.folder")
+            Some("com.apple.Automator.fileSystemObject")
         );
         assert_eq!(
             meta["serviceApplicationBundleID"].as_string(),

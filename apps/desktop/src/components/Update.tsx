@@ -1,7 +1,7 @@
 // v0.5.1 in-app updates: Settings → Cập nhật, the Home banner, and "Cập nhật máy đó" for the remote host.
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import type { HostStatus } from "../lib/ipc-types";
+import type { HostStatus } from "@contracts/ipc";
 import { api, errorMessage } from "../lib/ipc";
 import { fmtBytes } from "../lib/format";
 import { useStore } from "../lib/store";

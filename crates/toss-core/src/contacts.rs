@@ -76,7 +76,8 @@ pub struct InviteInfo {
     pub name: String,
 }
 
-/// A push from a contact waiting for the user ([`crate::Node::answer_push`]).
+/// A push waiting for the user ([`crate::Node::answer_push`]): from a contact,
+/// or (v0.8, `stranger`) from a nearby device.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct IncomingPush {
     /// hex(push id), 32 chars.
@@ -93,6 +94,9 @@ pub struct IncomingPush {
     pub bytes: u64,
     /// Unix seconds.
     pub at: u64,
+    /// v0.8: the sender is not a contact (a device on this LAN, `PushFrom`).
+    #[serde(default)]
+    pub stranger: bool,
 }
 
 /// This platform as reported in invites and pairing ("macos" | "windows" | "linux" | …).

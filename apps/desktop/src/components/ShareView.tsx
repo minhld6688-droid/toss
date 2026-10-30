@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { TicketInfo } from "../lib/ipc-types";
+import type { TicketInfo } from "@contracts/ipc";
 import { api, errorMessage } from "../lib/ipc";
 import { baseName, midTruncate } from "../lib/format";
 import { useStore } from "../lib/store";

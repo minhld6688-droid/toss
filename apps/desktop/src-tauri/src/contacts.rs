@@ -1,14 +1,12 @@
 //! v0.5 "Danh bạ máy": the `Core` methods behind the contact commands (contracts/contacts-v0.5.md §3/§4).
-//! Validation and Vietnamese messages live here; every call into `toss-core` goes through
-//! `core_v05.rs` (stubs until WS-E's API is merged).
-
-use std::path::PathBuf;
+//! Validation and Vietnamese messages live here. Core structs reach the UI through
+//! `core::via_serde` (the `ipc` mirrors have the same serde shape).
 
 use anyhow::{bail, Result};
+use toss_core::Node;
 
 use crate::{
-    core::Core,
-    core_v05,
+    core::{via_serde, Core},
     ipc::{Contact, IncomingPush, InviteInfo},
 };
 
@@ -47,10 +45,10 @@ impl Core {
     /// next `contacts:changed` / `contact:presence` events carry fresh state.
     pub async fn list_contacts(&self) -> Result<Vec<Contact>> {
         let node = self.node().await?;
-        let list = core_v05::contacts(&node)?;
+        let list: Vec<Contact> = via_serde(&node.contacts())?;
         if !list.is_empty() {
             let n = node.clone();
-            tauri::async_runtime::spawn(async move { core_v05::refresh_presence(&n).await });
+            tauri::async_runtime::spawn(async move { n.refresh_presence().await });
         }
         Ok(list)
     }
@@ -58,7 +56,7 @@ impl Core {
     pub async fn create_invite(&self, days: u32) -> Result<InviteInfo> {
         let node = self.node().await?;
         let page_host = self.settings().page_host();
-        let mut info = core_v05::create_invite(&node, days.clamp(1, 30), &page_host)?;
+        let mut info: InviteInfo = via_serde(&node.create_invite(days.clamp(1, 30), &page_host)?)?;
         if let Some(u) = self.short_links().shorten(&page_host, &info.invite).await {
             info.web_url = u;
         }
@@ -67,58 +65,57 @@ impl Core {
 
     pub async fn revoke_invites(&self) -> Result<()> {
         let node = self.node().await?;
-        core_v05::revoke_invites(&node)
+        node.revoke_invites()
     }
 
     /// Decodes an invite (`tossinv1…`, `toss://i/…` or a web link) without pairing: the UI asks
     /// "Kết nối với <name>?" first. Additive command, not in the frozen contract.
     pub async fn parse_invite(&self, text: &str) -> Result<InviteInfo> {
         let text = crate::shortlink::expand(text.trim()).await?;
-        core_v05::parse_invite(&text)
+        via_serde(&Node::parse_invite(&text)?)
     }
 
     pub async fn accept_invite(&self, text: String) -> Result<Contact> {
         let text = crate::shortlink::expand(text.trim()).await?;
         let node = self.node().await?;
-        core_v05::accept_invite(&node, &text).await
+        via_serde(&node.accept_invite(&text).await?)
     }
 
     pub async fn rename_contact(&self, id: String, name: String) -> Result<()> {
         let name = clean_contact_name(&name)?;
         let node = self.node().await?;
-        core_v05::rename_contact(&node, clean_id(&id)?, &name)
+        node.rename_contact(clean_id(&id)?, &name)
     }
 
     pub async fn set_contact_auto_accept(&self, id: String, on: bool) -> Result<()> {
         let node = self.node().await?;
-        core_v05::set_contact_auto_accept(&node, clean_id(&id)?, on)
+        node.set_contact_auto_accept(clean_id(&id)?, on)
     }
 
     pub async fn remove_contact(&self, id: String) -> Result<()> {
         let node = self.node().await?;
-        core_v05::remove_contact(&node, clean_id(&id)?)
+        node.remove_contact(clean_id(&id)?)
     }
 
+    /// Legacy (0.5) command; v0.8 `send_to` covers contacts too.
     pub async fn send_to_contact(&self, id: String, paths: Vec<String>) -> Result<String> {
-        if paths.is_empty() {
-            bail!("Chưa chọn file hoặc folder nào");
-        }
-        let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-        if let Some(p) = paths.iter().find(|p| !p.exists()) {
-            bail!("Không tìm thấy {}", p.display());
-        }
+        let paths = crate::nearby::check_paths(paths)?;
         let node = self.node().await?;
-        core_v05::send_to_contact(&node, clean_id(&id)?, paths).await
+        Ok(node
+            .send_to_contact(clean_id(&id)?, paths)
+            .await?
+            .id
+            .clone())
     }
 
     pub async fn list_incoming_pushes(&self) -> Result<Vec<IncomingPush>> {
         let node = self.node().await?;
-        core_v05::incoming_pushes(&node)
+        via_serde(&node.incoming_pushes())
     }
 
+    /// Legacy 2-argument answer = `answer_incoming(accept, always = false)`.
     pub async fn answer_push(&self, push_id: String, accept: bool) -> Result<()> {
-        let node = self.node().await?;
-        core_v05::answer_push(&node, push_id.trim(), accept)
+        self.answer_incoming(push_id, accept, false).await
     }
 }
 

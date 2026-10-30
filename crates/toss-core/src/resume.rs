@@ -79,6 +79,10 @@ pub struct TransferRecord {
     /// Last error message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// v0.8 push: the receiver was not a contact when the push started (a
+    /// nearby device, `contact` holds its endpoint id).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stranger: bool,
 }
 
 /// File-backed list of client transfers.
@@ -222,6 +226,7 @@ mod tests {
             files_total: 0,
             files_done: 0,
             error: None,
+            stranger: false,
         }
     }
 

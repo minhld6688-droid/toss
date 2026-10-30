@@ -89,13 +89,18 @@ pub enum DenyReason {
 impl std::fmt::Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DenyReason::BadSignature => f.write_str("bad signature"),
-            DenyReason::Expired => f.write_str("ticket expired"),
-            DenyReason::Revoked => f.write_str("ticket revoked"),
-            DenyReason::UnknownRoot => f.write_str("unknown root"),
-            DenyReason::BadPath => f.write_str("bad path"),
-            DenyReason::NotAllowed => f.write_str("not allowed"),
-            DenyReason::Busy => f.write_str("host busy"),
+            // v0.8: Vietnamese — these texts reach the UI as transfer errors.
+            DenyReason::BadSignature => f.write_str("Link không hợp lệ (sai chữ ký hoặc sai máy)"),
+            DenyReason::Expired => f.write_str("Link đã hết hạn — xin link mới"),
+            DenyReason::Revoked => f.write_str("Link đã bị thu hồi"),
+            DenyReason::UnknownRoot => {
+                f.write_str("Máy chia sẻ không còn thư mục này (đã bỏ chia sẻ?)")
+            }
+            DenyReason::BadPath => {
+                f.write_str("File hoặc thư mục trong link không còn trên máy chia sẻ")
+            }
+            DenyReason::NotAllowed => f.write_str("Link này không cho phép việc này"),
+            DenyReason::Busy => f.write_str("Máy chia sẻ đang bận"),
             DenyReason::Other(s) => write!(f, "{s}"),
         }
     }
@@ -374,7 +379,37 @@ pub enum PeerReq {
         /// Bytes in the job.
         bytes: u64,
     },
+    /// v0.8 (nearby-v0.8.md §1.2): a push from a device that is *not* a
+    /// contact of the receiver, allowed only when the receiver sees the sender
+    /// on its LAN (mDNS nearby store). Same data phase as [`PeerReq::Push`].
+    /// Appended: the indices above stay stable (0.6 peers decode them).
+    PushFrom {
+        /// Random id; the same id is reused when the push resumes.
+        push_id: [u8; 16],
+        /// Job (folder) name.
+        job: String,
+        /// Files in the job.
+        files: u32,
+        /// Bytes in the job.
+        bytes: u64,
+        /// Sender device name.
+        name: String,
+        /// Sender platform.
+        platform: String,
+        /// Sender app version.
+        version: String,
+    },
+    /// v0.8: a short text message (≤ [`MAX_TEXT`] bytes), answered `TextOk`.
+    Text {
+        /// Sender device name.
+        name: String,
+        /// The message.
+        text: String,
+    },
 }
+
+/// Longest text message (`PeerReq::Text`), bytes of UTF-8.
+pub const MAX_TEXT: usize = 60 * 1024;
 
 /// Answer to a [`PeerReq`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -411,6 +446,19 @@ pub enum PeerResp {
         /// Why (Vietnamese).
         reason: String,
     },
+    /// v0.8: answer to `PushFrom` — accepted, and the receiver now has the
+    /// sender as a contact ("Luôn nhận từ máy này"); the sender adds the
+    /// receiver as a contact too. Then the data phase follows like `PushAccepted`.
+    PushAcceptedPaired {
+        /// Receiver device name.
+        name: String,
+        /// Receiver platform.
+        platform: String,
+        /// Receiver app version.
+        version: String,
+    },
+    /// v0.8: answer to `Text` — shown to the user.
+    TextOk,
 }
 
 #[cfg(test)]
@@ -483,6 +531,62 @@ mod tests {
         assert_eq!(enc(&CtlRequest::ListJobs), 4);
         assert_eq!(enc(&CtlRequest::Revoke { id: [0; 16] }), 5);
         assert_eq!(enc(&CtlRequest::JobTicket { id: [0; 16] }), 6);
+    }
+
+    #[test]
+    fn peer_variant_indices_are_stable() {
+        // 0.6 peers decode indices 0..=2 (req) / 0..=5 (resp); v0.8 appends.
+        let req = |r: &PeerReq| postcard::to_allocvec(r).unwrap()[0];
+        let resp = |r: &PeerResp| postcard::to_allocvec(r).unwrap()[0];
+        assert_eq!(
+            req(&PeerReq::Push {
+                push_id: [0; 16],
+                job: String::new(),
+                files: 0,
+                bytes: 0
+            }),
+            2
+        );
+        assert_eq!(
+            req(&PeerReq::PushFrom {
+                push_id: [0; 16],
+                job: String::new(),
+                files: 0,
+                bytes: 0,
+                name: String::new(),
+                platform: String::new(),
+                version: String::new(),
+            }),
+            3
+        );
+        assert_eq!(
+            req(&PeerReq::Text {
+                name: String::new(),
+                text: String::new()
+            }),
+            4
+        );
+        assert_eq!(
+            resp(&PeerResp::Denied {
+                reason: String::new()
+            }),
+            5
+        );
+        assert_eq!(
+            resp(&PeerResp::PushAcceptedPaired {
+                name: String::new(),
+                platform: String::new(),
+                version: String::new()
+            }),
+            6
+        );
+        assert_eq!(resp(&PeerResp::TextOk), 7);
+        // A maximal text message fits the 64 KiB first-message cap.
+        let big = PeerReq::Text {
+            name: "x".repeat(64 * 4),
+            text: "x".repeat(MAX_TEXT),
+        };
+        assert!(postcard::to_allocvec(&big).unwrap().len() + 4 <= MAX_HELLO);
     }
 
     #[tokio::test]

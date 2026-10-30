@@ -37,7 +37,6 @@ export function tailPath(P0: Pt, P1: Pt, P2: Pt, t0: number, t1: number, w: numb
 }
 
 export const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-export const easeOutBack = (t: number) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
 /** slow out of the hand, hang at the apex, fall faster: a thrown object */
 export const easeToss = (t: number) => {
   const a = t * t * (3 - 2 * t); // smoothstep

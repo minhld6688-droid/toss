@@ -37,6 +37,14 @@ pub struct AppState {
     pub net: toss_core::NetConfig,
     /// v0.5.1: updates install by themselves (default: on for a host).
     pub auto_update: bool,
+    /// v0.8: who may send without asking.
+    pub receive_policy: crate::settings::ReceivePolicy,
+    /// v0.8: LocalSend bridge on ("Hiện với máy LocalSend").
+    pub ls_enabled: bool,
+    /// v0.8: port the LocalSend server listens on (None = not running).
+    pub ls_port: Option<u16>,
+    /// v0.8: LocalSend devices accepted without asking.
+    pub ls_trusted: Vec<crate::settings::LsTrusted>,
 }
 
 /// v0.4 `get_diagnostics`: the core snapshot plus what only the shell can see.
@@ -143,4 +151,83 @@ pub struct IncomingPush {
     pub files: u32,
     pub bytes: u64,
     pub at: u64,
+    /// v0.8: sent by a nearby device that is not a contact (core `IncomingPush.stranger`).
+    #[serde(default)]
+    pub stranger: bool,
+}
+
+// ---- v0.8 nearby + LocalSend (contracts/nearby-v0.8.md §4) ---------------------------------------
+
+/// Core `NearbyPeer` (§1.1), read through serde.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CoreNearby {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    #[serde(default)]
+    pub last_seen: u64,
+    #[serde(default)]
+    pub contact: bool,
+}
+
+/// ipc.ts `Nearby`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Nearby {
+    /// `t:<endpoint hex>` | `l:<fingerprint>`.
+    pub key: String,
+    /// "toss" | "toss_lan" | "localsend".
+    pub kind: &'static str,
+    pub name: String,
+    pub model: Option<String>,
+    pub platform: String,
+    pub contact_id: Option<String>,
+    pub trusted: bool,
+}
+
+/// ipc.ts `Incoming`: one ask, from a Toss push or a LocalSend prepare-upload.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Incoming {
+    pub id: String,
+    /// "toss" | "localsend".
+    pub source: String,
+    pub from_key: String,
+    pub from_name: String,
+    pub stranger: bool,
+    pub job: String,
+    pub files: u32,
+    pub bytes: u64,
+    pub names: Vec<String>,
+    pub at: u64,
+}
+
+/// ipc.ts `Received` (history entry, `<data_dir>/received.json`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Received {
+    pub id: String,
+    pub from_name: String,
+    pub job: String,
+    pub files: u32,
+    pub bytes: u64,
+    pub dest: String,
+    pub at: u64,
+}
+
+/// ipc.ts `TextMsg`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TextMsg {
+    pub from_name: String,
+    pub text: String,
+    pub at: u64,
+}
+
+/// ipc.ts `WebShare`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct WebShare {
+    pub urls: Vec<String>,
+    pub qr_svg: String,
 }

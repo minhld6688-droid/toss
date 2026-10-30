@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { TicketInfo } from "../lib/ipc-types";
+import type { TicketInfo } from "@contracts/ipc";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { fmtExpiry, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
@@ -41,25 +41,6 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
   async function pick() {
     const p = await api.pick_folder({ title: "Chọn folder để gửi lại" });
     if (p) await doPut([p]);
-  }
-
-  if (info.admin) {
-    return (
-      <Sheet onClose={close} title="Link điều khiển">
-        <div className="flex items-center gap-2.5 mb-1"><span className="grid place-items-center w-9 h-9 rounded-full bg-accent/15 text-accent"><Icon name="shield" className="w-5 h-5" /></span><div className="title text-[22px]">Link <em>điều khiển</em></div></div>
-        <p className="text-sm text-mute mb-3">
-          Link này cho máy bạn đang dùng điều khiển máy <span className="mono">{shortId(info.host, 8)}</span> từ xa: xem folder cố định, tạo link, cập nhật máy đó. Chỉ dùng trên máy bạn tin.
-        </p>
-        <button
-          className="btn btn-primary btn-lg w-full" disabled={busy || exp.expired}
-          onClick={async () => {
-            try { await api.set_admin_ticket({ ticket: info.ticket }); close(); setScreen("settings"); toast("Đã kết nối — xem trong Cài đặt → Nâng cao"); }
-            catch (e) { toast(errorMessage(e), "error"); }
-          }}
-        >Điều khiển máy đó từ đây<Nest /></button>
-        <button className="btn btn-ghost w-full mt-2" onClick={close}>Đóng</button>
-      </Sheet>
-    );
   }
 
   return (

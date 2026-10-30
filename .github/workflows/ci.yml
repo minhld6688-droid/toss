@@ -34,8 +34,8 @@ jobs:
           sudo apt-get install -y build-essential curl wget file patchelf xdg-utils \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - name: Test toss-core and toss-cli
-        run: cargo test -p toss-core -p toss-cli
+      - name: Test toss-core, toss-cli and toss-ls
+        run: cargo test -p toss-core -p toss-cli -p toss-ls
 
       # The Tauri crate's build script needs the frontend dist folder to exist,
       # so build the UI before checking the whole workspace.
@@ -61,7 +61,7 @@ jobs:
 
   # Deploy kit and installer scripts: syntax + lint. Cheap, no Rust build.
   scripts:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04   # python3 >= 3.11 for tomllib
     steps:
       - uses: actions/checkout@v4
 
@@ -87,30 +87,13 @@ jobs:
           hub/relay/update-allowed.sh --no-restart
           python3 -c "import tomllib,sys; c=tomllib.load(open(sys.argv[1],'rb')); assert len(c['access']['allowlist'])==1; print('allow-list ok')" "$d/relay.toml"
 
-  # PowerShell and NSIS cannot be run here, but the PowerShell parser can reject syntax errors.
+  # NSIS cannot be run here: check the hook text (installer/host-setup/*.ps1 was removed in 0.8).
   windows-scripts:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Parse PowerShell scripts
-        shell: pwsh
-        run: |
-          $bad = 0
-          Get-ChildItem -Recurse -Filter *.ps1 -Path installer | ForEach-Object {
-            $errors = $null; $tokens = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count -gt 0) { $bad++; $errors | ForEach-Object { Write-Host "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" } }
-            else { Write-Host "ok: $($_.FullName)" }
-          }
-          # The script must stay ASCII only (it is run from Windows PowerShell 5.1 without a BOM).
-          Get-ChildItem -Recurse -Filter *.ps1 -Path installer | ForEach-Object {
-            $nonAscii = [IO.File]::ReadAllBytes($_.FullName) | Where-Object { $_ -gt 127 } | Select-Object -First 1
-            if ($nonAscii) { $bad++; Write-Host "non-ASCII byte in $($_.FullName)" }
-          }
-          if ($bad -gt 0) { exit 1 }
-
-      - name: NSIS hook sanity (rule is UDP and removed on uninstall)
+      - name: NSIS hook sanity (rules UDP + LocalSend TCP/UDP 53317-53327, removed on uninstall)
         shell: bash
         run: |
           set -euo pipefail
@@ -118,5 +101,9 @@ jobs:
           grep -q 'add rule name="Toss".*protocol=UDP' "$f"
           grep -q 'delete rule name="Toss"' "$f"
           test "$(grep -c 'delete rule name="Toss"' "$f")" -ge 2
+          grep -q 'add rule name="Toss LocalSend".*protocol=TCP localport=53317-53327' "$f"
+          grep -q 'add rule name="Toss LocalSend".*protocol=UDP localport=53317-53327' "$f"
+          test "$(grep -c 'delete rule name="Toss LocalSend"' "$f")" -ge 2
+          grep -q 'SendTo\\Toss.lnk' "$f"
           grep -q '"installMode": "both"' apps/desktop/src-tauri/tauri.conf.json
           echo OK

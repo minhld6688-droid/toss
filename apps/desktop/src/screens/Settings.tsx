@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { HostConfig, HostStatus, TicketInfo } from "../lib/ipc-types";
+import type { HostConfig, HostStatus, ReceivePolicy, TicketInfo } from "@contracts/ipc";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { midTruncate, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
-import { AnimatePresence, Disclosure, Icon, Nest, Row, Section, Toggle, Words } from "../components/ui";
+import { AnimatePresence, EASE, Icon, Nest, Row, Section, Toggle, Words, motion } from "../components/ui";
 import { LinkMaker, LinkBackend } from "../components/LinkMaker";
 import { JobList } from "../components/JobList";
 import { QrLink } from "../components/QrLink";
@@ -11,6 +11,7 @@ import { ConnectionSection } from "../components/Connection";
 import { FirewallSheet } from "../components/Firewall";
 import { RemoteUpdate, UpdateSection } from "../components/Update";
 import { Hint } from "../components/Hint";
+import { useReducedMotion } from "motion/react";
 
 const ALIAS_RE = /^[A-Za-z0-9_-]{1,32}$/;
 /** Host mode listens on this UDP port unless the user picks another (contracts/speed-v0.4.md §2). */
@@ -52,23 +53,98 @@ function DeviceSection() {
             })}><Icon name="folder" />Đổi…</button>
           </div>
         </div>
-        <Row title="Mở cùng máy" hint="Tự chạy ẩn khi bật máy — để luôn nhận được file">
-          <Toggle on={app.autostart} label="Tự khởi động" onChange={(on) => guard(async () => { await api.set_autostart({ on }); patch({ autostart: on }); })} />
-        </Row>
-        <div className="text-xs text-mute flex items-center justify-between">
-          <span>ID máy: <span className="mono selectable">{shortId(app.endpoint_id, 12)}</span></span>
-          <span>Toss {app.version}{isMock ? " · MOCK" : ""}</span>
+        <div className="divide-y divide-line/10">
+          <Row title="Mở cùng máy" hint="Tự chạy ẩn khi bật máy — để luôn nhận được file">
+            <Toggle on={app.autostart} label="Mở cùng máy" onChange={(on) => guard(async () => { await api.set_autostart({ on }); patch({ autostart: on }); })} />
+          </Row>
+          <Row title="Chuột phải: “Gửi bằng Toss”" hint="Chuột phải vào file hoặc folder bất kỳ để gửi">
+            <Toggle on={app.context_menu} label="Chuột phải: Gửi bằng Toss" onChange={(on) => guard(async () => { await api.set_context_menu({ on }); patch({ context_menu: on }); })} />
+          </Row>
         </div>
+        <div className="text-xs text-mute">ID máy: <span className="mono selectable">{shortId(app.endpoint_id, 12)}</span>{isMock ? " · MOCK" : ""}</div>
       </div>
     </Section>
   );
 }
 
 // ---------------------------------------------------------------------------
-function ShareSection() {
+const POLICIES: { value: ReceivePolicy; title: string; hint: string }[] = [
+  { value: "off", title: "Tắt", hint: "Ai gửi cũng hỏi bạn trước" },
+  { value: "contacts", title: "Chỉ danh bạ", hint: "Danh bạ nhận luôn, máy lạ thì hỏi" },
+  { value: "everyone", title: "Mọi người cùng mạng", hint: "Máy nào cùng wifi cũng nhận luôn" },
+];
+
+/** Who may send straight in; LocalSend visibility and the LocalSend devices that are always accepted. */
+function ReceiveSection() {
   const app = useStore((s) => s.app)!;
   const toast = useStore((s) => s.toast);
   const patch = useStore((s) => s.patchApp);
+  const refreshApp = useRefreshApp();
+  const guard = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { toast(errorMessage(e), "error"); } };
+  const fallback = app.ls_enabled && app.ls_port != null && app.ls_port !== 53317;
+
+  return (
+    <Section title="Nhận">
+      <div className="text-sm text-mute mb-2.5">Ai được gửi thẳng vào máy này mà không cần bạn bấm Nhận?</div>
+      <div role="radiogroup" aria-label="Ai được gửi thẳng" className="space-y-1.5">
+        {POLICIES.map((o) => {
+          const on = app.receive_policy === o.value;
+          return (
+            <button
+              key={o.value} role="radio" aria-checked={on}
+              onClick={() => guard(async () => { await api.set_receive_policy({ policy: o.value }); patch({ receive_policy: o.value }); })}
+              className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-[14px] transition-[background-color,box-shadow] duration-500 ease-aura active:scale-[0.99] ${on ? "bg-accent/10 shadow-[inset_0_0_0_1.5px_rgb(var(--accent)/0.7)]" : "hair bg-line/[0.03] hover:bg-line/[0.06]"}`}
+            >
+              <span className={`grid place-items-center w-[18px] h-[18px] rounded-full shrink-0 border-[1.5px] transition-colors duration-500 ${on ? "border-accent" : "border-line/30"}`}>
+                <span className={`w-2 h-2 rounded-full bg-accent transition-transform duration-500 ${on ? "scale-100" : "scale-0"}`} style={{ transitionTimingFunction: "var(--spring)" }} />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-base font-medium">{o.title}</span>
+                <span className="block text-xs text-mute">{o.hint}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {app.receive_policy === "everyone" && <Hint className="mt-2 !text-warn">Dùng wifi công cộng thì nên chọn “Chỉ danh bạ”: ai cùng mạng cũng gửi file vào máy bạn được.</Hint>}
+
+      <div className="divide-y divide-line/10 mt-2">
+        <Row title="Bấm link là nhận luôn" hint="Tắt nếu muốn xem trước rồi mới bấm Nhận">
+          <Toggle on={app.auto_receive} label="Tự động nhận khi bấm link" onChange={(on) => guard(async () => { await api.set_auto_receive({ on }); patch({ auto_receive: on }); })} />
+        </Row>
+        <Row title="Hiện với máy LocalSend" hint="Điện thoại, máy tính dùng LocalSend thấy và gửi được cho bạn">
+          <Toggle on={app.ls_enabled} label="Hiện với máy LocalSend" onChange={(on) => guard(async () => { await api.set_ls_enabled({ on }); patch({ ls_enabled: on, ls_port: on ? app.ls_port : null }); })} />
+        </Row>
+      </div>
+      {fallback && <Hint className="mt-1.5">Cổng 53317 đang bận nên Toss dùng cổng {app.ls_port}. LocalSend vẫn tìm thấy bạn.</Hint>}
+
+      <div className="mt-3">
+        <div className="label !mb-1.5">Máy LocalSend tin cậy</div>
+        {app.ls_trusted.length === 0 ? (
+          <div className="text-xs text-mute">Chưa có máy nào. Khi có máy gửi đến, bấm “Luôn nhận từ máy này” để lần sau nhận luôn.</div>
+        ) : (
+          <ul className="divide-y divide-line/10 -my-1">
+            {app.ls_trusted.map((d) => (
+              <li key={d.fingerprint} className="flex items-center gap-2.5 py-2">
+                <span className="grid place-items-center w-8 h-8 rounded-full shrink-0 bg-ok/15 text-ok"><Icon name="shield" className="w-4 h-4" weight="bold" /></span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-base">{d.alias}</div>
+                  <div className="mono text-[11px] text-mute truncate selectable" title={d.fingerprint}>{shortId(d.fingerprint, 14)}</div>
+                </div>
+                <button className="btn btn-ghost btn-danger !h-8 shrink-0" onClick={() => guard(async () => { await api.forget_trusted({ fingerprint: d.fingerprint }); await refreshApp(); toast(`Đã quên ${d.alias}`); })}>Quên</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+/** Quick-share links that are still open (advanced: most people never need to revoke one by hand). */
+function OpenLinks() {
+  const toast = useStore((s) => s.toast);
   const openShare = useStore((s) => s.openShare);
   const rev = useStore((s) => s.sharesRev);
   const refreshApp = useRefreshApp();
@@ -93,47 +169,36 @@ function ShareSection() {
   }
 
   return (
-    <>
-      <Section title="Nhận & gửi">
-        <Row title="Bấm link là nhận luôn" hint="Tắt nếu muốn xem trước rồi mới bấm Nhận">
-          <Toggle on={app.auto_receive} label="Tự động nhận khi bấm link" onChange={(on) => guard(async () => { await api.set_auto_receive({ on }); patch({ auto_receive: on }); })} />
-        </Row>
-        <Row title="Chuột phải: “Gửi bằng Toss”" hint="Chuột phải vào folder bất kỳ để gửi cho ai đó hoặc tạo link">
-          <Toggle on={app.context_menu} label="Chuột phải: Gửi bằng Toss" onChange={(on) => guard(async () => { await api.set_context_menu({ on }); patch({ context_menu: on }); })} />
-        </Row>
-      </Section>
-
-      <Section
-        title="Link đang mở"
-        right={<button className="btn btn-ghost !h-7 !px-2.5 !text-xs -mt-1" onClick={() => guard(async () => {
-          const p = await api.pick_folder({ title: "Chọn folder để chia sẻ" });
-          if (p) openShare(p);
-        })}><Icon name="plus" className="w-3.5 h-3.5" />Tạo link…</button>}
-      >
-        {shares === null ? (
-          <div className="text-sm text-mute">Đang tải…</div>
-        ) : shares.length === 0 ? (
-          <div className="text-sm text-mute">Chưa có link nào. Folder bạn tạo link sẽ nằm ở đây; bấm “Gỡ” để thu hồi link.</div>
-        ) : (
-          <ul className="divide-y divide-line/10 -my-1">
-            {shares.map((s) => (
-              <li key={s.alias} className="flex items-center gap-2.5 py-2.5">
-                <span className="grid place-items-center w-8 h-8 rounded-full shrink-0 bg-accent/15 text-accent"><Icon name="folder" className="w-4 h-4" weight="bold" /></span>
-                <div className="min-w-0 flex-1">
-                  <div className="mono text-xs text-ink selectable whitespace-nowrap overflow-hidden" title={s.path}>{midTruncate(s.path, 8, 18)}</div>
-                  <div className="text-xs text-mute">{s.job_id ? <>Job <span className="mono selectable">{shortId(s.job_id, 8)}</span></> : "Chưa có link"}</div>
-                </div>
-                <button
-                  className={`btn btn-ghost btn-danger shrink-0 !h-8 ${confirm === s.alias ? "!bg-bad/10" : ""}`}
-                  onClick={() => void remove(s.alias)}
-                  title="Thu hồi link: người có link không lấy được file nữa"
-                >{confirm === s.alias ? "Bấm lại để gỡ" : "Gỡ"}</button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
-    </>
+    <Section
+      title="Link đang mở"
+      right={<button className="btn btn-ghost !h-7 !px-2.5 !text-xs -mt-1" onClick={() => guard(async () => {
+        const p = await api.pick_folder({ title: "Chọn folder để chia sẻ" });
+        if (p) openShare(p);
+      })}><Icon name="plus" className="w-3.5 h-3.5" />Tạo link…</button>}
+    >
+      {shares === null ? (
+        <div className="text-sm text-mute">Đang tải…</div>
+      ) : shares.length === 0 ? (
+        <div className="text-sm text-mute">Chưa có link nào. File hoặc folder bạn tạo link sẽ nằm ở đây; bấm “Gỡ” để thu hồi link.</div>
+      ) : (
+        <ul className="divide-y divide-line/10 -my-1">
+          {shares.map((s) => (
+            <li key={s.alias} className="flex items-center gap-2.5 py-2.5">
+              <span className="grid place-items-center w-8 h-8 rounded-full shrink-0 bg-accent/15 text-accent"><Icon name="folder" className="w-4 h-4" weight="bold" /></span>
+              <div className="min-w-0 flex-1">
+                <div className="mono text-xs text-ink selectable whitespace-nowrap overflow-hidden" title={s.path}>{midTruncate(s.path, 8, 18)}</div>
+                <div className="text-xs text-mute">{s.job_id ? <>Job <span className="mono selectable">{shortId(s.job_id, 8)}</span></> : "Chưa có link"}</div>
+              </div>
+              <button
+                className={`btn btn-ghost btn-danger shrink-0 !h-8 ${confirm === s.alias ? "!bg-bad/10" : ""}`}
+                onClick={() => void remove(s.alias)}
+                title="Thu hồi link: người có link không lấy được file nữa"
+              >{confirm === s.alias ? "Bấm lại để gỡ" : "Gỡ"}</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
   );
 }
 
@@ -306,7 +371,7 @@ function LocalHostTools() {
             try { setAdmin(await api.create_admin_ticket({ days: adminDays })); } catch (e) { toast(errorMessage(e), "error"); }
           }}><Icon name="shield" />Tạo link điều khiển<Nest /></button>
         </div>
-        {admin && <div className="mt-3"><QrLink info={admin} caption="Trên máy kia: Cài đặt → Nâng cao → Điều khiển máy khác → dán link" /></div>}
+        {admin && <div className="mt-3"><QrLink info={admin} caption="Trên máy kia: Cài đặt → Chẩn đoán & nâng cao → Điều khiển máy khác → dán link" /></div>}
       </Section>
     </>
   );
@@ -411,32 +476,60 @@ function RemoteSection() {
 }
 
 // ---------------------------------------------------------------------------
+/** Everything that is not part of everyday use, in one collapsed block. */
+function Advanced({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const app = useStore((s) => s.app)!;
+  const reduce = useReducedMotion();
+  return (
+    <div className="mt-2 mb-4">
+      <button
+        type="button" aria-expanded={open} onClick={onToggle}
+        className="w-full card px-3.5 py-3 flex items-center gap-3 text-left transition-colors duration-500 ease-aura hover:bg-line/[0.04] active:scale-[0.99]"
+      >
+        <span className="grid place-items-center w-9 h-9 rounded-full bg-line/10 text-mute shrink-0"><Icon name="settings" className="w-[18px] h-[18px]" /></span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-base font-medium">Chẩn đoán &amp; nâng cao</span>
+          <span className="block text-xs text-mute">Kết nối, folder cố định, link, điều khiển từ xa, xuất log</span>
+        </span>
+        <motion.span animate={{ rotate: open ? 180 : 0 }} transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 24 }} className="grid text-mute">
+          <Icon name="chevron" className="w-4 h-4" weight="bold" />
+        </motion.span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="adv" className="overflow-hidden"
+            initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }} animate={reduce ? { opacity: 1 } : { height: "auto", opacity: 1 }}
+            exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }} transition={{ duration: reduce ? 0 : 0.5, ease: EASE }}
+          >
+            <div className="pt-3">
+              <ConnectionSection />
+              <OpenLinks />
+              <HostEditor />
+              {app.host && <LocalHostTools />}
+              <RemoteSection />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export function Settings() {
   const app = useStore((s) => s.app);
   const diagFocus = useStore((s) => s.diagFocus);
   const [adv, setAdv] = useState(false);
-  // "Vì sao chậm?" on a transfer jumps to Kết nối, which lives under Nâng cao
+  // "Vì sao chậm?" on a transfer jumps to Kết nối, which lives under Chẩn đoán & nâng cao
   useEffect(() => { if (diagFocus && Date.now() - diagFocus < 5000) setAdv(true); }, [diagFocus]);
   if (!app) return null;
   return (
     <div className="p-4">
       <Words text="Cài đặt" accent={["đặt"]} className="text-[30px] mb-4" />
       <DeviceSection />
+      <ReceiveSection />
       <UpdateSection />
-      <ShareSection />
-      <div className="mt-2 mb-4">
-        <Disclosure
-          title={adv ? "Ẩn nâng cao" : "Nâng cao"} open={adv} onToggle={() => setAdv(!adv)}
-          aside={<span className="text-xs text-mute">Mạng, folder cố định, điều khiển từ xa</span>}
-        >
-          <div className="pt-3">
-            <ConnectionSection />
-            <HostEditor />
-            {app.host && <LocalHostTools />}
-            <RemoteSection />
-          </div>
-        </Disclosure>
-      </div>
+      <Advanced open={adv} onToggle={() => setAdv(!adv)} />
     </div>
   );
 }

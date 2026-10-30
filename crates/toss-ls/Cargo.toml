@@ -1,0 +1,21 @@
+[package]
+name = "toss-ls"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+localsend = { path = "../../third_party/localsend-core", features = ["discovery", "http"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+if-addrs = "0.15"
+pem = "4"
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }

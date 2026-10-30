@@ -435,12 +435,12 @@ async fn push_waits_for_user_answer() {
     assert_eq!(json["push_id"], incoming.push_id.as_str());
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(b.transfer(&t.id).unwrap().status, Status::Connecting);
-    a.answer_push(&incoming.push_id, false).unwrap();
+    a.answer_push(&incoming.push_id, false, false).unwrap();
     let st = wait_final(&t).await;
     assert_eq!(st.status, Status::Error);
     assert_eq!(st.error.as_deref(), Some("người nhận đã từ chối"));
     assert!(a.incoming_pushes().is_empty());
-    assert!(a.answer_push(&incoming.push_id, true).is_err());
+    assert!(a.answer_push(&incoming.push_id, true, false).is_err());
     assert!(!a.inbox_dir().join("Editor B/Job/x.bin").exists());
 
     // Accepted.
@@ -450,7 +450,7 @@ async fn push_waits_for_user_answer() {
     })
     .await;
     let p = a.incoming_pushes().remove(0);
-    a.answer_push(&p.push_id, true).unwrap();
+    a.answer_push(&p.push_id, true, false).unwrap();
     assert_eq!(wait_final(&t).await.status, Status::Done);
     assert_same_tree(&src, &a.inbox_dir().join("Editor B/Job"));
     a.shutdown().await;
@@ -573,8 +573,14 @@ async fn restart_mid_get_resumes_from_transfers_json() {
     .await;
     assert!(std::fs::read(&fin).unwrap() == std::fs::read(&src).unwrap());
     assert!(!part.exists());
-    let saved = std::fs::read_to_string(t.join("client-data/transfers.json")).unwrap();
-    assert!(saved.contains("\"done\""), "{saved}");
+    // transfers.json is written right after the final event, not before it: wait for it.
+    let tj = t.join("client-data/transfers.json");
+    wait_until(
+        "transfers.json records done",
+        Duration::from_secs(10),
+        || std::fs::read_to_string(&tj).is_ok_and(|s| s.contains("\"done\"")),
+    )
+    .await;
     assert_eq!(client.transfer(&paused.id).unwrap().status, Status::Paused);
     client.resume(&paused.id).await.unwrap();
     wait_done(

@@ -231,27 +231,25 @@ pub struct TicketSpec {
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum TicketError {
     /// Not a `toss1…` string.
-    #[error("not a Toss ticket (expected 'toss1…')")]
+    #[error("Không phải link Toss (cần dạng 'toss1…')")]
     BadPrefix,
     /// Base32 decoding failed.
-    #[error("ticket is damaged (base32): {0}")]
+    #[error("Link bị hỏng (thiếu hoặc sai ký tự)")]
     BadEncoding(String),
     /// Postcard decoding failed.
-    #[error("ticket is damaged (decode): {0}")]
+    #[error("Link bị hỏng")]
     BadFormat(String),
     /// Unknown version (v1 tickets are no longer accepted).
-    #[error(
-        "ticket format v{0} is not supported by this app (expected v2); ask the host for a new link"
-    )]
+    #[error("Link dạng cũ (v{0}) không còn dùng được — xin máy chia sẻ một link mới")]
     BadVersion(u8),
     /// Signature does not verify or host key mismatch.
-    #[error("ticket signature is invalid")]
+    #[error("Link không hợp lệ (sai chữ ký)")]
     BadSignature,
     /// The ticket was issued by another host.
-    #[error("ticket belongs to another host")]
+    #[error("Link này thuộc máy khác")]
     WrongHost,
     /// `exp` has passed.
-    #[error("ticket expired")]
+    #[error("Link đã hết hạn — xin link mới")]
     Expired,
 }
 
@@ -743,7 +741,7 @@ mod tests {
         );
         let err = Ticket::from_str(&s).unwrap_err();
         assert_eq!(err, TicketError::BadVersion(1));
-        assert!(err.to_string().contains("new link"), "{err}");
+        assert!(err.to_string().contains("link mới"), "{err}");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { TicketInfo } from "../lib/ipc-types";
+import type { TicketInfo } from "@contracts/ipc";
 import { api, errorMessage } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { Icon } from "./ui";

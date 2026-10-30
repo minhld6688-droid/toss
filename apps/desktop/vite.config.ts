@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// UI imports of "@contracts/ipc" (= ../../contracts/ipc.ts, see tsconfig paths) are type-only: erased at build, no alias needed.
 // Tauri expects a fixed dev port (see src-tauri/tauri.conf.json -> build.devUrl).
 export default defineConfig({
   plugins: [react()],

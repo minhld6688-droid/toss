@@ -129,6 +129,19 @@ pub enum TransferEvent {
         /// Admin device name.
         device: String,
     },
+    /// v0.8: the nearby list (`Node::nearby`) changed.
+    NearbyChanged {},
+    /// v0.8: a text message from a contact or a nearby device (nothing saved).
+    TextIncoming {
+        /// Sender endpoint id (hex).
+        from_id: String,
+        /// Sender name (contact name, else the name it sent).
+        from_name: String,
+        /// The message (≤ 60 KiB; newlines kept).
+        text: String,
+        /// Unix seconds.
+        at: u64,
+    },
 }
 
 /// Which side of a transfer this node is.

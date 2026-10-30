@@ -47,7 +47,17 @@ export function fmtAgo(unix: number, now = Date.now() / 1000): string {
   return `${Math.floor(s / 86400)} ngày trước`;
 }
 
-export const PLATFORM_LABEL: Record<string, string> = { macos: "macOS", windows: "Windows", linux: "Linux" };
+export const PLATFORM_LABEL: Record<string, string> = { macos: "macOS", windows: "Windows", linux: "Linux", ios: "iOS", android: "Android", web: "Trình duyệt" };
+
+/** Bytes of a string as UTF-8 (text messages are limited to 60 KiB). */
+export function utf8Bytes(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/** "3 file · 12 MB" */
+export function fmtItems(files: number, bytes: number): string {
+  return `${files} file · ${fmtBytes(bytes)}`;
+}
 
 /** Two-letter avatar text: first letters of the first two words ("Từ Đạt – Mac" → "TĐ"), or the first two letters. */
 export function initials(name: string): string {

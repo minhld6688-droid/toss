@@ -20,7 +20,8 @@ use crate::{
     resume::{Kind, TransferRecord},
     ticket::Ticket,
     transfer::{conn_path, ConnPath, ErrorCode, Side, Status, Tracker, Transfer},
-    util::{now_unix, random_suffix},
+    util::{clean_text, now_unix, random_suffix},
+    vi::ui,
     wire::{
         read_msg, read_msg_max, write_msg, ClientHello, DenyReason, Done, FileEntry, HostHello,
         Manifest, Op, PeerReq, PeerResp, Want, WantItem, MAX_HELLO,
@@ -63,37 +64,36 @@ pub(crate) async fn start(
     paths: Vec<PathBuf>,
 ) -> Result<Transfer> {
     if ticket.body.admin {
-        bail!("this is an admin ticket; use it for remote control, not transfers");
+        return Err(ui(
+            "Đây là link điều khiển máy chủ, không dùng để chuyển file",
+        ));
     }
     match op {
-        Op::Get if !ticket.body.get => bail!("ticket does not allow downloading"),
-        Op::Put if !ticket.body.put => bail!("ticket does not allow uploading"),
+        Op::Get if !ticket.body.get => return Err(ui("Link này không cho phép tải về")),
+        Op::Put if !ticket.body.put => return Err(ui("Link này không cho phép gửi file lên")),
         _ => {}
     }
-    ticket.verify_signature().map_err(|e| anyhow!(e))?;
-    let host = ticket.host().map_err(|e| anyhow!(e))?;
+    ticket.verify_signature().map_err(|e| ui(e.to_string()))?;
+    let host = ticket.host().map_err(|e| ui(e.to_string()))?;
     if host == inner.endpoint.id() {
-        bail!("this ticket was issued by this device");
+        return Err(ui("Link này do chính máy này tạo"));
     }
     let job_dir = match (op, dest) {
         (Op::Get, Some(dest)) => {
             let fallback = format!("toss-{}", &ticket.id_hex()[..8]);
             let dir = dest.join(sanitize_component(&ticket.body.job, &fallback));
-            tokio::fs::create_dir_all(&dir)
-                .await
-                .with_context(|| format!("create {}", dir.display()))?;
+            tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+                ui(format!(
+                    "Không tạo được thư mục {}: {}",
+                    dir.display(),
+                    crate::vi::io_msg(&e.into())
+                ))
+            })?;
             Some(dir)
         }
-        (Op::Get, None) => bail!("get needs a destination"),
+        (Op::Get, None) => return Err(ui("Chưa chọn thư mục để lưu")),
         (Op::Put, _) => {
-            if paths.is_empty() {
-                bail!("nothing to send");
-            }
-            for p in &paths {
-                tokio::fs::symlink_metadata(p)
-                    .await
-                    .with_context(|| format!("cannot read {}", p.display()))?;
-            }
+            check_paths(&paths).await?;
             None
         }
     };
@@ -129,6 +129,7 @@ pub(crate) async fn start(
         files_total: 0,
         files_done: 0,
         error: None,
+        stranger: false,
     };
     let job = Arc::new(ClientJob {
         target: Target::Ticket(ticket),
@@ -186,33 +187,75 @@ pub(crate) async fn start(
     Ok(Transfer { id, rx })
 }
 
+/// Every selected path must exist (else a Vietnamese error naming it).
+async fn check_paths(paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        return Err(ui("Chưa chọn file nào để gửi"));
+    }
+    for p in paths {
+        if tokio::fs::symlink_metadata(p).await.is_err() {
+            return Err(ui(format!(
+                "Không đọc được {} (đã bị xoá hoặc đổi tên?)",
+                p.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// v0.5: creates and starts a push to contact `contact_id` (hex).
 pub(crate) async fn start_push(
     inner: &Arc<Inner>,
     contact_id: &str,
     paths: Vec<PathBuf>,
 ) -> Result<Transfer> {
+    let contact_id = contact_id.trim().to_ascii_lowercase();
     let contact = inner
         .contacts
-        .get(contact_id)
-        .ok_or_else(|| anyhow!("không có máy {contact_id} trong danh bạ"))?
+        .get(&contact_id)
+        .ok_or_else(|| ui("Không có máy này trong danh bạ"))?
         .c;
-    let id = crate::peer::parse_endpoint_id(&contact.id)?;
-    if paths.is_empty() {
-        bail!("nothing to send");
+    start_push_to(inner, &contact.id, &contact.name, false, paths).await
+}
+
+/// v0.8 `Node::send_to_peer`: a contact (as [`start_push`]) or a device in
+/// the nearby store (a stranger push, `PushFrom`).
+pub(crate) async fn start_push_peer(
+    inner: &Arc<Inner>,
+    peer_id: &str,
+    paths: Vec<PathBuf>,
+) -> Result<Transfer> {
+    let hex = peer_id.trim().to_ascii_lowercase();
+    if inner.contacts.contains(&hex) {
+        return start_push(inner, &hex, paths).await;
     }
-    for p in &paths {
-        tokio::fs::symlink_metadata(p)
-            .await
-            .with_context(|| format!("cannot read {}", p.display()))?;
+    let peer = inner.nearby.get(&hex).ok_or_else(|| {
+        ui("Không thấy máy này trong mạng LAN nữa — kiểm tra máy kia còn mở Toss và cùng mạng")
+    })?;
+    let id = crate::peer::parse_endpoint_id(&hex)?;
+    if id == inner.endpoint.id() {
+        return Err(ui("Không thể gửi cho chính máy này"));
     }
+    let name = crate::peer::nearby_name(&peer);
+    start_push_to(inner, &hex, &name, true, paths).await
+}
+
+async fn start_push_to(
+    inner: &Arc<Inner>,
+    hex: &str,
+    name: &str,
+    stranger: bool,
+    paths: Vec<PathBuf>,
+) -> Result<Transfer> {
+    let id = crate::peer::parse_endpoint_id(hex)?;
+    check_paths(&paths).await?;
     let job_name = push_job_name(&paths);
     let push_id = crate::util::random_id();
     let rec = TransferRecord {
         id: format!("{}-{}", hex::encode(push_id), random_suffix()),
         kind: Kind::Push,
         ticket: None,
-        contact: Some(contact.id.clone()),
+        contact: Some(hex.to_string()),
         paths: Some(paths.clone()),
         dest: None,
         job: job_name.clone(),
@@ -221,16 +264,18 @@ pub(crate) async fn start_push(
         bytes_total: 0,
         created: now_unix(),
         push_id: Some(hex::encode(push_id)),
-        peer: contact.name.clone(),
+        peer: name.to_string(),
         files_total: 0,
         files_done: 0,
         error: None,
+        stranger,
     };
     let job = Arc::new(ClientJob {
         target: Target::Contact {
             id,
             push_id,
             job: job_name,
+            stranger,
         },
         op: Op::Put,
         job_dir: None,
@@ -341,7 +386,7 @@ fn restore_job(inner: &Inner, rec: &TransferRecord) -> Result<Arc<ClientJob>> {
         }
         Kind::Push => {
             let cid = rec.contact.as_deref().unwrap_or_default();
-            if !inner.contacts.contains(cid) {
+            if !rec.stranger && !inner.contacts.contains(cid) {
                 bail!("contact {cid} is gone");
             }
             let push_id: [u8; 16] = hex::decode(rec.push_id.as_deref().unwrap_or_default())
@@ -352,6 +397,7 @@ fn restore_job(inner: &Inner, rec: &TransferRecord) -> Result<Arc<ClientJob>> {
                 id: crate::peer::parse_endpoint_id(cid)?,
                 push_id,
                 job: rec.job.clone(),
+                stranger: rec.stranger,
             };
             (target, Op::Put, None)
         }
@@ -404,8 +450,8 @@ pub(crate) async fn resume(
         return Ok(());
     }
     match tracker.status() {
-        Status::Done => bail!("transfer already finished"),
-        Status::Cancelled => bail!("transfer was cancelled"),
+        Status::Done => return Err(ui("Lượt chuyển này đã xong")),
+        Status::Cancelled => return Err(ui("Lượt chuyển này đã bị huỷ")),
         _ => {}
     }
     spawn_locked(&mut running, inner, job.clone(), tracker);
@@ -425,10 +471,10 @@ pub(crate) async fn cancel(job: Arc<ClientJob>, tracker: Arc<Tracker>) -> Result
     }
     if !was_running {
         if tracker.status() == Status::Done {
-            bail!("transfer already finished");
+            return Err(ui("Lượt chuyển này đã xong"));
         }
         delete_parts(&job).await;
-        tracker.error(ErrorCode::Cancelled, "cancelled".into(), None);
+        tracker.error(ErrorCode::Cancelled, crate::vi::CANCELLED.into(), None);
     }
     Ok(())
 }
@@ -461,7 +507,7 @@ impl Drop for EndGuard {
         if !st.is_final() && st != Status::Paused {
             self.0.error(
                 ErrorCode::Other,
-                "transfer task ended unexpectedly".into(),
+                "Lượt chuyển dừng bất thường — bấm Tiếp tục để thử lại".into(),
                 None,
             );
         }
@@ -496,7 +542,7 @@ async fn run(
             match c {
                 Ctrl::Cancel => {
                     delete_parts(&job).await;
-                    tracker.error(ErrorCode::Cancelled, "cancelled".into(), None);
+                    tracker.error(ErrorCode::Cancelled, crate::vi::CANCELLED.into(), None);
                 }
                 _ => tracker.paused(),
             }
@@ -524,8 +570,8 @@ async fn drive(
     job: &Arc<ClientJob>,
     tracker: &Arc<Tracker>,
 ) -> Result<ConnPath, (ErrorCode, String)> {
-    if let Target::Contact { id, .. } = &job.target {
-        return drive_push(inner, job, tracker, *id).await;
+    if let Target::Contact { id, stranger, .. } = &job.target {
+        return drive_push(inner, job, tracker, *id, *stranger).await;
     }
     let mut since = Instant::now();
     let mut hash_retry_used = false;
@@ -538,24 +584,41 @@ async fn drive(
             Ok(SessionEnd::Complete(p)) => return Ok(p),
             Ok(SessionEnd::Mismatch(msg)) => {
                 if hash_retry_used {
-                    return Err((ErrorCode::HashMismatch, msg));
+                    tracing::warn!(id = %tracker.id, "{msg}");
+                    return Err((ErrorCode::HashMismatch, crate::vi::DONE_FAILED.into()));
                 }
                 tracing::warn!("{msg}; retrying once on a fresh connection");
                 hash_retry_used = true;
                 continue;
             }
-            Err(SessErr::Denied(DenyReason::Busy)) => {
-                (ErrorCode::Busy, "host is busy".to_string(), BUSY_LIMIT)
-            }
+            Err(SessErr::Denied(DenyReason::Busy)) => (
+                ErrorCode::Busy,
+                format!("Máy chia sẻ đang bận — tự thử lại sau {RETRY_SECS} giây"),
+                BUSY_LIMIT,
+            ),
             Err(SessErr::Denied(r)) => return Err((deny_code(&r), r.to_string())),
-            Err(SessErr::Offline { connected, err }) => {
-                if connected {
+            Err(e @ SessErr::Offline { .. }) => {
+                let SessErr::Offline { connected, err } = &e else {
+                    unreachable!()
+                };
+                if *connected {
                     since = Instant::now();
                 }
-                (ErrorCode::HostOffline, format!("{err:#}"), OFFLINE_LIMIT)
+                tracing::info!(id = %tracker.id, "session failed: {err:#}");
+                let msg = format!(
+                    "{} — tự thử lại sau {RETRY_SECS} giây",
+                    crate::vi::sess_msg(&e)
+                );
+                (ErrorCode::HostOffline, msg, OFFLINE_LIMIT)
             }
-            Err(SessErr::Io(e)) => return Err((ErrorCode::Io, format!("{e:#}"))),
-            Err(SessErr::Other(e)) => return Err((ErrorCode::Other, format!("{e:#}"))),
+            Err(e @ SessErr::Io(_)) => {
+                tracing::warn!(id = %tracker.id, "session failed: {e}");
+                return Err((ErrorCode::Io, crate::vi::sess_msg(&e)));
+            }
+            Err(e @ SessErr::Other(_)) => {
+                tracing::warn!(id = %tracker.id, "session failed: {e}");
+                return Err((ErrorCode::Other, crate::vi::sess_msg(&e)));
+            }
         };
         if since.elapsed() >= limit {
             return Err((code, msg));
@@ -595,7 +658,7 @@ async fn open(
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
     let hello = ClientHello::v1 {
         ticket: ticket.clone(),
-        device: inner.cfg.device_name.clone(),
+        device: inner.device_name().to_string(),
         op: job.op,
         app_version: inner.cfg.app_version.clone(),
     };
@@ -692,7 +755,11 @@ async fn get_session(
         return Ok(SessionEnd::Mismatch(done.msg));
     }
     if !plan.skipped.is_empty() {
-        return Err(SessErr::Other(anyhow!("{}", done.msg)));
+        tracing::warn!("get: {}", done.msg);
+        return Err(SessErr::Other(ui(format!(
+            "Bỏ qua file có tên không dùng được trên máy này: {}",
+            plan.skipped.join("; ")
+        ))));
     }
     Ok(SessionEnd::Complete(path))
 }
@@ -842,7 +909,11 @@ async fn put_data_phase(
         if done.msg.contains("hash mismatch") {
             return Ok(SessionEnd::Mismatch(done.msg));
         }
-        return Err(SessErr::Other(anyhow!("host: {}", done.msg)));
+        tracing::warn!(id = %tracker.id, "receiver: {}", done.msg);
+        return Err(SessErr::Other(ui(format!(
+            "Máy nhận báo lỗi: {}",
+            clean_text(&done.msg, 300)
+        ))));
     }
     Ok(SessionEnd::Complete(path))
 }
@@ -855,35 +926,46 @@ async fn drive_push(
     job: &Arc<ClientJob>,
     tracker: &Arc<Tracker>,
     id: iroh::EndpointId,
+    stranger: bool,
 ) -> Result<ConnPath, (ErrorCode, String)> {
     let mut hash_retry_used = false;
     loop {
-        crate::peer::wait_online(inner, id, tracker)
+        crate::peer::wait_reachable(inner, id, tracker, stranger)
             .await
             .map_err(|e| (ErrorCode::Other, e))?;
         let (code, msg) = match push_session(inner, job, tracker).await {
             Ok(SessionEnd::Complete(p)) => return Ok(p),
             Ok(SessionEnd::Mismatch(msg)) => {
                 if hash_retry_used {
-                    return Err((ErrorCode::HashMismatch, msg));
+                    tracing::warn!(id = %tracker.id, "{msg}");
+                    return Err((ErrorCode::HashMismatch, crate::vi::DONE_FAILED.into()));
                 }
                 tracing::warn!("{msg}; retrying once on a fresh connection");
                 hash_retry_used = true;
                 continue;
             }
             Err(SessErr::Denied(r)) => return Err((ErrorCode::Denied, r.to_string())),
-            Err(SessErr::Offline { connected, err }) => {
-                tracing::info!(id = %tracker.id, "push: contact unreachable: {err:#}");
+            Err(e @ SessErr::Offline { .. }) => {
+                let SessErr::Offline { connected, err } = &e else {
+                    unreachable!()
+                };
+                tracing::info!(id = %tracker.id, "push: receiver unreachable: {err:#}");
                 crate::peer::note_unreachable(inner, id);
                 if !connected {
                     // Presence may still say online (another live connection):
                     // don't spin on a contact we cannot dial.
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                (ErrorCode::HostOffline, format!("{err:#}"))
+                (ErrorCode::HostOffline, crate::vi::sess_msg(&e))
             }
-            Err(SessErr::Io(e)) => return Err((ErrorCode::Io, format!("{e:#}"))),
-            Err(SessErr::Other(e)) => return Err((ErrorCode::Other, format!("{e:#}"))),
+            Err(e @ SessErr::Io(_)) => {
+                tracing::warn!(id = %tracker.id, "push failed: {e}");
+                return Err((ErrorCode::Io, crate::vi::sess_msg(&e)));
+            }
+            Err(e @ SessErr::Other(_)) => {
+                tracing::warn!(id = %tracker.id, "push failed: {e}");
+                return Err((ErrorCode::Other, crate::vi::sess_msg(&e)));
+            }
         };
         tracker.error(code, msg, Some(crate::peer::PRESENCE_INTERVAL.as_secs()));
     }
@@ -901,6 +983,7 @@ async fn push_session(
         id,
         push_id,
         job: job_name,
+        ..
     } = &job.target
     else {
         return Err(SessErr::Other(anyhow!("not a push")));
@@ -914,24 +997,51 @@ async fn push_session(
             .map_err(SessErr::Io)?;
 
     tracker.set_status(Status::Connecting);
-    let conn = crate::peer::dial_contact(inner, *id)
+    let hex = crate::peer::id_hex(*id);
+    // A contact gets `Push` (0.6 contacts understand it); anyone else is a
+    // nearby device and gets `PushFrom` with our name (v0.8).
+    let contact = inner.contacts.contains(&hex);
+    let conn = crate::peer::dial_peer(inner, *id)
         .await
         .map_err(net(false))?;
-    let _live = crate::peer::LiveGuard::new(inner, *id);
+    let _live = contact.then(|| crate::peer::LiveGuard::new(inner, *id));
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(false)(e.into()))?;
-    let req = PeerReq::Push {
-        push_id: *push_id,
-        job: job_name.clone(),
-        files: manifest.files.len() as u32,
-        bytes: manifest.total,
+    let (files, bytes) = (manifest.files.len() as u32, manifest.total);
+    let req = if contact {
+        PeerReq::Push {
+            push_id: *push_id,
+            job: job_name.clone(),
+            files,
+            bytes,
+        }
+    } else {
+        PeerReq::PushFrom {
+            push_id: *push_id,
+            job: job_name.clone(),
+            files,
+            bytes,
+            name: inner.device_name().to_string(),
+            platform: crate::contacts::platform(),
+            version: inner.cfg.app_version.clone(),
+        }
     };
     write_msg(&mut send, &req).await.map_err(net(false))?;
-    let mut resp: PeerResp = timed(
+    let first = timed(
         "waiting for the push answer",
         Duration::from_secs(60),
         read_msg_max(&mut recv, MAX_HELLO),
     )
-    .await?;
+    .await;
+    let mut resp: PeerResp = match first {
+        Ok(r) => r,
+        Err(e) if !contact && crate::peer::refused_as_old(&conn).await => {
+            tracing::info!(id = %tracker.id, "push: receiver is a Toss < 0.8 ({e})");
+            return Err(SessErr::Denied(DenyReason::Other(
+                crate::vi::OLD_PEER.into(),
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     if resp == PeerResp::PushQueued {
         let name = tracker.snapshot().peer;
         tracing::info!(id = %tracker.id, "push queued: waiting for {name} to accept");
@@ -945,15 +1055,18 @@ async fn push_session(
     }
     match resp {
         PeerResp::PushAccepted => {}
+        PeerResp::PushAcceptedPaired { name, platform, .. } if !contact => {
+            // "Luôn nhận từ máy này" on the receiver: pair back.
+            crate::peer::pair_back(inner, &conn, &name, &platform).await;
+        }
         PeerResp::PushDeclined { reason } | PeerResp::Denied { reason } => {
             conn.close(0u32.into(), b"declined");
-            return Err(SessErr::Denied(DenyReason::Other(reason)));
+            return Err(SessErr::Denied(DenyReason::Other(clean_text(&reason, 300))));
         }
         other => {
+            tracing::info!(id = %tracker.id, "unexpected answer to a push: {other:?}");
             conn.close(1u32.into(), b"protocol");
-            return Err(SessErr::Other(anyhow!(
-                "unexpected answer to Push: {other:?}"
-            )));
+            return Err(SessErr::Other(ui(crate::vi::PROTOCOL)));
         }
     }
     tracker.update(|s| s.error = None);
@@ -977,14 +1090,21 @@ fn build_put_manifest(
     let mut seen = BTreeSet::new();
     let single_folder = push && paths.len() == 1 && paths[0].is_dir();
     for p in paths {
-        let name = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("cannot send {}: no usable name", p.display()))?;
+        let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+            ui(format!(
+                "Không gửi được {}: tên file không dùng được",
+                p.display()
+            ))
+        })?;
         let prefix = if single_folder {
             crate::paths::RelPath::default()
         } else {
-            sanitize_rel(name).with_context(|| format!("cannot send {}", p.display()))?
+            sanitize_rel(name).map_err(|_| {
+                ui(format!(
+                    "Không gửi được {}: tên file không dùng được",
+                    p.display()
+                ))
+            })?
         };
         for f in walk(p, &prefix)? {
             let rel = f.rel.as_str();
@@ -1007,4 +1127,43 @@ fn build_put_manifest(
         });
     }
     Ok((manifest, abs))
+}
+
+/// v0.8 `Node::resend`: the same paths to the same target (push or ticket
+/// put), or the same download again (ticket get).
+pub(crate) async fn resend(inner: &Arc<Inner>, id: &str) -> Result<Transfer> {
+    let job = {
+        let map = inner.transfers.lock();
+        let e = map
+            .get(id)
+            .ok_or_else(|| ui("Không tìm thấy lượt chuyển này"))?;
+        match &e.kind {
+            EntryKind::Client(j) => j.clone(),
+            EntryKind::Host(_) => {
+                return Err(ui("Chỉ gửi lại được lượt chuyển do máy này gửi đi"));
+            }
+        }
+    };
+    match &job.target {
+        Target::Ticket(t) => {
+            if t.is_expired() {
+                return Err(ui("Link đã hết hạn nên không gửi lại được — xin link mới"));
+            }
+            match job.op {
+                Op::Put => start(inner, t.clone(), Op::Put, None, job.paths.clone()).await,
+                Op::Get => {
+                    let dest = job
+                        .job_dir
+                        .as_ref()
+                        .and_then(|d| d.parent())
+                        .map(Path::to_path_buf)
+                        .ok_or_else(|| ui("Không biết thư mục lưu của lượt tải này"))?;
+                    start(inner, t.clone(), Op::Get, Some(dest), Vec::new()).await
+                }
+            }
+        }
+        Target::Contact { id, .. } => {
+            start_push_peer(inner, &crate::peer::id_hex(*id), job.paths.clone()).await
+        }
+    }
 }

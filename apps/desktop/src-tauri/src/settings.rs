@@ -36,6 +36,25 @@ pub struct Settings {
     /// = on for a host (máy tổng, often unattended), off otherwise; see
     /// [`Settings::auto_update`].
     pub auto_update: Option<bool>,
+    /// v0.8: who may send without asking (Toss pushes and LocalSend). Default "contacts".
+    pub receive_policy: ReceivePolicy,
+    /// v0.8: show this machine to LocalSend apps / run the LocalSend bridge (default on).
+    pub ls_enabled: bool,
+    /// v0.8: LocalSend devices accepted without asking ("Luôn nhận từ máy này").
+    pub ls_trusted: Vec<LsTrusted>,
+    /// v0.8: the one-time 0.8 migration (autostart forced on) has run.
+    pub migrated_v08: bool,
+}
+
+/// v0.8 receive policy (ipc.ts `ReceivePolicy`: "off" | "contacts" | "everyone"); persisted here,
+/// pushed to the core on start.
+pub use toss_core::ReceivePolicy;
+
+/// One trusted LocalSend device (ipc.ts `AppState.ls_trusted`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LsTrusted {
+    pub fingerprint: String,
+    pub alias: String,
 }
 
 /// One quick-shared folder (ipc.ts `list_quick_shares`).
@@ -57,7 +76,8 @@ impl Default for Settings {
             dest_dir: home.join("Toss").to_string_lossy().into_owned(),
             host: None,
             admin_ticket: None,
-            autostart: false,
+            // v0.8: every machine starts with the OS unless the user turns it off.
+            autostart: true,
             first_run: true,
             page_host: None,
             context_menu: true,
@@ -66,6 +86,10 @@ impl Default for Settings {
             host_auto: false,
             net: toss_core::NetConfig::default(),
             auto_update: None,
+            receive_policy: ReceivePolicy::Contacts,
+            ls_enabled: true,
+            ls_trusted: Vec::new(),
+            migrated_v08: false,
         }
     }
 }
@@ -125,6 +149,11 @@ impl Settings {
     /// setting means on (machines are often reached only remotely).
     pub fn auto_update(&self) -> bool {
         self.auto_update.unwrap_or(true)
+    }
+
+    /// True when the LocalSend device `fingerprint` is in `ls_trusted`.
+    pub fn ls_is_trusted(&self, fingerprint: &str) -> bool {
+        self.ls_trusted.iter().any(|t| t.fingerprint == fingerprint)
     }
 
     pub fn page_host(&self) -> String {
@@ -202,7 +231,10 @@ mod tests {
     #[test]
     fn auto_update_defaults_to_on() {
         let mut s = Settings::default();
-        assert!(s.auto_update(), "v0.6: every machine updates by itself unless turned off");
+        assert!(
+            s.auto_update(),
+            "v0.6: every machine updates by itself unless turned off"
+        );
         s.host = Some(HostConfig::default());
         assert!(s.auto_update());
         s.auto_update = Some(false);
@@ -213,6 +245,48 @@ mod tests {
         let dir = tmp("au");
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir).auto_update, Some(true));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v08_fields_default_and_round_trip() {
+        let dir = tmp("v08");
+        fs::create_dir_all(&dir).unwrap();
+        // A 0.6 file: no v0.8 fields, autostart off.
+        fs::write(
+            Settings::path(&dir),
+            r#"{"device_name":"May","autostart":false,"first_run":false}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&dir);
+        assert_eq!(s.receive_policy, ReceivePolicy::Contacts);
+        assert!(s.ls_enabled && s.ls_trusted.is_empty());
+        assert!(!s.migrated_v08, "0.6 files still need the 0.8 migration");
+        assert!(
+            !s.autostart,
+            "the file value is kept until the migration runs"
+        );
+        assert!(
+            Settings::default().autostart,
+            "new installs start with the OS"
+        );
+        let s = Settings {
+            receive_policy: ReceivePolicy::Everyone,
+            ls_enabled: false,
+            ls_trusted: vec![LsTrusted {
+                fingerprint: "ab12".into(),
+                alias: "iPhone của Minh".into(),
+            }],
+            migrated_v08: true,
+            ..s
+        };
+        s.save(&dir).unwrap();
+        let raw = fs::read_to_string(Settings::path(&dir)).unwrap();
+        assert!(raw.contains("\"receive_policy\": \"everyone\""), "{raw}");
+        let back = Settings::load(&dir);
+        assert_eq!(back.receive_policy, ReceivePolicy::Everyone);
+        assert!(!back.ls_enabled && back.migrated_v08);
+        assert!(back.ls_is_trusted("ab12") && !back.ls_is_trusted("cd34"));
         let _ = fs::remove_dir_all(&dir);
     }
 

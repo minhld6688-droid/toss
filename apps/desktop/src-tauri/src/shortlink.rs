@@ -54,7 +54,11 @@ impl ShortLinks {
     /// Cached short url for `text` (a `toss1…` / `tossinv1…` string), if any.
     pub fn get(&self, text: &str) -> Option<String> {
         let links = self.links.lock().unwrap();
-        links.iter().rev().find(|(k, _)| k == text).map(|(_, v)| v.clone())
+        links
+            .iter()
+            .rev()
+            .find(|(k, _)| k == text)
+            .map(|(_, v)| v.clone())
     }
 
     fn put(&self, text: &str, url: &str) {
@@ -144,7 +148,10 @@ async fn request_short(page_host: &str, text: &str) -> Result<String> {
     let status = r.status();
     let bytes = r.bytes().await?;
     if !status.is_success() {
-        bail!("{status}: {}", String::from_utf8_lossy(&bytes[..bytes.len().min(200)]));
+        bail!(
+            "{status}: {}",
+            String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
+        );
     }
     let resp: Resp = serde_json::from_slice(&bytes)?;
     if !is_code(&resp.code) {
@@ -155,7 +162,9 @@ async fn request_short(page_host: &str, text: &str) -> Result<String> {
 }
 
 fn is_code(s: &str) -> bool {
-    s.len() == CODE_LEN && s.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+    s.len() == CODE_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
 }
 
 /// Finds a short link in pasted text: `[https://]host/<code>[/]`, anywhere among
@@ -218,7 +227,10 @@ mod tests {
         let want = Some(("toss-link.vercel.app".to_string(), "k7q2xa3mp".to_string()));
         assert_eq!(find_short("https://toss-link.vercel.app/k7q2xa3mp"), want);
         assert_eq!(find_short("toss-link.vercel.app/K7Q2XA3MP/"), want);
-        assert_eq!(find_short("📁 RAWW · 57 MB — https://toss-link.vercel.app/k7q2xa3mp."), want);
+        assert_eq!(
+            find_short("📁 RAWW · 57 MB — https://toss-link.vercel.app/k7q2xa3mp."),
+            want
+        );
         assert_eq!(find_short("https://toss-link.vercel.app/#toss1abc"), None);
         assert_eq!(find_short("https://toss-link.vercel.app/k7q2xa3m"), None);
         assert_eq!(find_short("https://toss-link.vercel.app/k7q2xa3m1"), None);
@@ -228,8 +240,14 @@ mod tests {
 
     #[test]
     fn bare_hosts() {
-        assert_eq!(bare_host("toss-link.vercel.app"), Some("toss-link.vercel.app"));
-        assert_eq!(bare_host("https://toss-link.vercel.app/"), Some("toss-link.vercel.app"));
+        assert_eq!(
+            bare_host("toss-link.vercel.app"),
+            Some("toss-link.vercel.app")
+        );
+        assert_eq!(
+            bare_host("https://toss-link.vercel.app/"),
+            Some("toss-link.vercel.app")
+        );
         assert_eq!(bare_host("minhld6688-droid.github.io/toss"), None);
         assert_eq!(bare_host(""), None);
     }

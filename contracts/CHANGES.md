@@ -147,3 +147,10 @@ Owner: no more "máy tổng / editor" roles; any machine makes a link or drops f
 - macOS menu bar drop: `src-tauri/src/traydrop.rs` adds a transparent `NSView` (registered for file URLs) inside tray-icon's `TaoTrayTarget`; clicks are forwarded to its superview. Windows' notification area cannot accept drops (OS limit): right-click "Gửi bằng Toss" + window drop cover it.
 - macOS Dock drop: `CFBundleDocumentTypes` (public.folder, public.data, rank None) + `RunEvent::Opened` → `send`.
 - `auto_update` untouched now defaults to on for every machine (was: on only with host mode).
+
+## 0.8.0 — "Gần là thấy, thả là xong" (30/10/2026)
+Spec: `contracts/nearby-v0.8.md`. Wire: `contracts/wire.md` §7 (append-only, 0.6 peers unaffected).
+- LocalSend core vendored unmodified at `third_party/localsend-core` (Apache-2.0, LICENSE + NOTICE); bridge crate `crates/toss-ls`: HTTPS server (port 53317, fallback 53318–53327), multicast + subnet discovery, receive asks, send files/folders/text, browser share, busy-receiver (409) wait.
+- Core: nearby Toss machines from mDNS (`n=;p=;v=` user data), `PushFrom`/`Text` requests and `PushAcceptedPaired`/`TextOk` replies, receive policy Off/Contacts/Everyone, "Luôn nhận" pairs both sides, `resend`, single-file tickets, Vietnamese errors (`vi.rs`).
+- Shell: unified nearby list (Toss mDNS ∪ LocalSend, same-IP Toss de-dup → `toss_lan`), one `Incoming` ask for both sources, notifications on receive (click → folder), `received.json` history, right-click + Windows "Send to" for files, firewall rule TCP/UDP 53317–53327, autostart forced on once (`migrated_v08`), `core_v05.rs` folded, host-setup script removed.
+- UI: 1-screen wizard, Home = drop zone + Gần đây + Danh bạ + one paste field, "Gửi tới ai?" with browser share and text, Nhận / Luôn nhận / Từ chối sheet, Settings 3 sections + "Chẩn đoán & nâng cao", `ipc-types.ts` copy removed (UI imports `contracts/ipc.ts`).

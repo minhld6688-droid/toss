@@ -205,6 +205,70 @@ pub fn resolve_inside(root: &Path, rel: &str) -> Result<PathBuf> {
     resolve_rel(root, &rel)
 }
 
+/// v0.8 quick share of one folder **or one file** (nearby-v0.8.md §1.3).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ShareTarget {
+    /// Folder to serve as the host root (canonical): the folder itself, or the
+    /// file's parent folder.
+    pub root: PathBuf,
+    /// `TicketSpec::path` under `root`: "" for a folder, the file name for a file.
+    pub path: String,
+    /// Job name: the folder name, or the file name without its extension
+    /// (`get` saves `<dest>/<job>/<file name>`).
+    pub job: String,
+    /// The shared item is a file.
+    pub is_file: bool,
+}
+
+/// Splits a path to share into root folder + ticket path + job name. A folder
+/// is shared as itself (`path` ""); a file as `path` = its name under its
+/// parent folder, so the ticket's manifest holds exactly that one file.
+/// Errors (Vietnamese) when it does not exist, is neither file nor folder, or
+/// its name cannot cross the wire.
+pub fn share_target(p: &Path) -> Result<ShareTarget> {
+    let canon =
+        canonicalize(p).map_err(|_| crate::vi::ui(format!("Không tìm thấy {}", p.display())))?;
+    let meta = std::fs::metadata(&canon)
+        .map_err(|_| crate::vi::ui(format!("Không đọc được {}", canon.display())))?;
+    let name = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string);
+    if meta.is_dir() {
+        let job = name.unwrap_or_else(|| "Toss".to_string());
+        return Ok(ShareTarget {
+            root: canon,
+            path: String::new(),
+            job: job.chars().take(crate::ticket::MAX_JOB_LEN).collect(),
+            is_file: false,
+        });
+    }
+    if !meta.is_file() {
+        return Err(crate::vi::ui(format!(
+            "{} không phải file hay thư mục",
+            canon.display()
+        )));
+    }
+    let bad = || crate::vi::ui(format!("Tên file không dùng được: {}", canon.display()));
+    let name = name.ok_or_else(bad)?;
+    let rel = sanitize_rel(&name).map_err(|_| bad())?;
+    if rel.segments().len() != 1 {
+        return Err(bad());
+    }
+    let parent = canon.parent().ok_or_else(bad)?.to_path_buf();
+    let stem = Path::new(&name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&name);
+    Ok(ShareTarget {
+        root: parent,
+        path: rel.as_str(),
+        job: stem.chars().take(crate::ticket::MAX_JOB_LEN).collect(),
+        is_file: true,
+    })
+}
+
 /// Same as [`resolve_inside`] for an already validated [`RelPath`].
 pub fn resolve_rel(root: &Path, rel: &RelPath) -> Result<PathBuf> {
     let root_c = canonicalize(root)?;

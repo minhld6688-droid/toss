@@ -1,0 +1,3 @@
+Vendored from https://github.com/localsend/localsend (packages/core), Apache License 2.0.
+Copyright (c) LocalSend contributors. See LICENSE in this folder. Toss uses it unmodified
+to speak the LocalSend protocol; Toss itself stays MIT.

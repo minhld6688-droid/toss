@@ -27,6 +27,7 @@ use crate::{
     fsutil::{is_hidden, HashCache, PART_SUFFIX},
     host,
     jobs::{JobRecord, JobStore},
+    nearby::{NearbyPeer, ReceivePolicy},
     paths::{canonicalize, resolve_inside},
     peer::PeerState,
     resume::TransferStore,
@@ -170,22 +171,35 @@ impl HostRuntime {
         let mut seen = BTreeSet::new();
         for r in &cfg.roots {
             if !valid_alias(&r.alias) {
-                bail!(
-                    "invalid root alias {:?} (use A-Z a-z 0-9 _ -, max 32)",
+                return Err(crate::vi::ui(format!(
+                    "Tên thư mục gốc “{}” không hợp lệ (chỉ dùng A-Z a-z 0-9 _ -, tối đa 32 ký tự)",
                     r.alias
-                );
+                )));
             }
             if !seen.insert(r.alias.clone()) {
-                bail!("duplicate root alias {:?}", r.alias);
+                return Err(crate::vi::ui(format!(
+                    "Trùng tên thư mục gốc “{}”",
+                    r.alias
+                )));
             }
-            let p = canonicalize(&r.path).with_context(|| format!("root {}", r.alias))?;
+            let p = canonicalize(&r.path).map_err(|_| {
+                crate::vi::ui(format!("Không tìm thấy thư mục {}", r.path.display()))
+            })?;
             if !p.is_dir() {
-                bail!("root {} ({}) is not a folder", r.alias, p.display());
+                return Err(crate::vi::ui(format!(
+                    "{} không phải là thư mục",
+                    p.display()
+                )));
             }
             roots.push((r.alias.clone(), p));
         }
-        std::fs::create_dir_all(&cfg.return_root)
-            .with_context(|| format!("create return root {}", cfg.return_root.display()))?;
+        std::fs::create_dir_all(&cfg.return_root).map_err(|e| {
+            crate::vi::ui(format!(
+                "Không tạo được thư mục nhận {}: {}",
+                cfg.return_root.display(),
+                crate::vi::io_msg(&e.into())
+            ))
+        })?;
         let return_root_c = canonicalize(&cfg.return_root)?;
         Ok(HostRuntime {
             cfg,
@@ -228,7 +242,8 @@ pub(crate) struct Running {
 pub(crate) enum Target {
     /// get/put with a ticket.
     Ticket(Ticket),
-    /// v0.5 push to a contact (`op` = Put).
+    /// v0.5 push to a contact (`op` = Put); v0.8 also to a nearby device
+    /// that is not a contact (`stranger`, sent as `PushFrom`).
     Contact {
         /// Contact endpoint id.
         id: EndpointId,
@@ -236,6 +251,8 @@ pub(crate) enum Target {
         push_id: [u8; 16],
         /// Job (folder) name announced to the receiver.
         job: String,
+        /// v0.8: not a contact when the push started.
+        stranger: bool,
     },
 }
 
@@ -319,9 +336,20 @@ pub(crate) struct Inner {
     pub store: Arc<TransferStore>,
     /// v0.5: macOS Local Network access denied (lanprobe).
     pub lan_blocked: AtomicBool,
+    /// v0.8: Toss devices seen on this LAN (mDNS).
+    pub nearby: crate::nearby::NearbyStore,
+    /// v0.8: publishes this node's name/platform/version in mDNS (None = mDNS off).
+    pub advertiser: Option<crate::mdns::Advertiser>,
+    /// v0.8: current device name (`Node::set_device_name`); starts as `cfg.device_name`.
+    pub name: RwLock<&'static str>,
 }
 
 impl Inner {
+    /// Current device name (Hello / Pair / PushFrom / Text / ctl / xfer hellos).
+    pub fn device_name(&self) -> &'static str {
+        *self.name.read()
+    }
+
     /// Emits an event to all subscribers.
     pub fn emit(&self, ev: TransferEvent) {
         let _ = self.events.send(ev);
@@ -347,7 +375,7 @@ impl Inner {
             seen.len() as u32
         };
         Some(wire::HostStatus {
-            device: self.cfg.device_name.clone(),
+            device: self.device_name().to_string(),
             version: self.cfg.app_version.clone(),
             roots: rt.roots.iter().map(|(a, _)| a.clone()).collect(),
             active: self.active.load(Ordering::Relaxed),
@@ -583,6 +611,37 @@ impl Node {
         Node::start_inner(cfg, port, Vec::new()).await
     }
 
+    /// `start_inner` with a Vietnamese top-level message (shown by the app
+    /// when Toss cannot start); the English chain goes to the log.
+    async fn start_inner(
+        cfg: NodeConfig,
+        port: Option<u16>,
+        net_notes: Vec<String>,
+    ) -> Result<Node> {
+        let data_dir = cfg.data_dir.clone();
+        Node::start_inner2(cfg, port, net_notes).await.map_err(|e| {
+            if crate::vi::ui_text(&e).is_some() {
+                return e;
+            }
+            tracing::error!("node start failed: {e:#}");
+            let msg = format!("{e:#}");
+            crate::vi::ui(if msg.contains("bind") {
+                match port {
+                    Some(p) => format!(
+                        "Không mở được cổng mạng UDP {p} — có thể Toss đang chạy ở cửa sổ khác"
+                    ),
+                    None => "Không mở được cổng mạng — kiểm tra mạng rồi mở lại Toss".to_string(),
+                }
+            } else {
+                format!(
+                    "Không khởi động được Toss: {} ({})",
+                    crate::vi::io_msg(&e),
+                    data_dir.display()
+                )
+            })
+        })
+    }
+
     /// v0.4 host start: binds `port` or, when `None`,
     /// [`crate::net::DEFAULT_HOST_PORT`] (41820, the port the firewall rule,
     /// port mapping and router forwards expect). If that port cannot be bound
@@ -604,7 +663,7 @@ impl Node {
         }
     }
 
-    async fn start_inner(
+    async fn start_inner2(
         cfg: NodeConfig,
         port: Option<u16>,
         mut net_notes: Vec<String>,
@@ -653,8 +712,13 @@ impl Node {
                     Some(p) => format!("bind iroh endpoint on UDP port {p}"),
                     None => "bind iroh endpoint".to_string(),
                 })?;
+        let user_data = crate::nearby::encode_user_data(
+            &cfg.device_name,
+            &crate::contacts::platform(),
+            &cfg.app_version,
+        );
         let mdns = if cfg.net.mdns {
-            match crate::mdns::start(&endpoint) {
+            match crate::mdns::start(&endpoint, &user_data) {
                 Ok(m) => Some(m),
                 Err(e) => {
                     tracing::warn!("mDNS unavailable, same-LAN discovery off: {e}");
@@ -678,7 +742,15 @@ impl Node {
             "toss node started"
         );
         let (events, _) = broadcast::channel(1024);
+        let (mdns, advertiser) = match mdns {
+            Some((m, a)) => (Some(m), Some(a)),
+            None => (None, None),
+        };
+        let name = RwLock::new(crate::util::intern(&clean_device_name(&cfg.device_name)));
         let inner = Arc::new(Inner {
+            nearby: Default::default(),
+            advertiser,
+            name,
             endpoint: endpoint.clone(),
             secret,
             jobs: JobStore::open(&cfg.data_dir),
@@ -706,6 +778,7 @@ impl Node {
         tokio::spawn(accept_loop(endpoint, Arc::downgrade(&inner)));
         // v0.5: restore persisted transfers, presence pings, Local Network probe.
         client::restore_all(&inner);
+        crate::mdns::spawn_nearby(&inner).await;
         crate::peer::spawn_presence(&inner);
         crate::lanprobe::spawn(&inner);
         Ok(Node { inner })
@@ -716,9 +789,9 @@ impl Node {
         self.inner.endpoint.id()
     }
 
-    /// Device name from the config.
+    /// Device name (from the config, or the last [`Node::set_device_name`]).
     pub fn device_name(&self) -> &str {
-        &self.inner.cfg.device_name
+        self.inner.device_name()
     }
 
     /// The underlying iroh endpoint (advanced use: `online()`, `addr()`, …).
@@ -828,7 +901,7 @@ impl Node {
         let rt = self
             .inner
             .host_runtime()
-            .ok_or_else(|| anyhow!("host mode is off"))?;
+            .ok_or_else(|| crate::vi::ui("Chế độ máy chủ đang tắt"))?;
         // v0.4: also starts hashing the job's source folder in the background,
         // so the manifest is ready when the editor clicks the link.
         host::issue_ticket_and_prehash(&self.inner, &rt, spec)
@@ -837,7 +910,7 @@ impl Node {
     /// Creates an admin ticket (control channel access). Errors if host mode is off.
     pub fn create_admin_ticket(&self, days: u32) -> Result<Ticket> {
         if self.inner.host.read().is_none() {
-            bail!("host mode is off");
+            return Err(crate::vi::ui("Chế độ máy chủ đang tắt"));
         }
         host::issue_admin_ticket(
             &self.inner.secret,
@@ -871,7 +944,7 @@ impl Node {
         let rt = self
             .inner
             .host_runtime()
-            .ok_or_else(|| anyhow!("host mode is off"))?;
+            .ok_or_else(|| crate::vi::ui("Chế độ máy chủ đang tắt"))?;
         list_dir(&rt, root, rel)
     }
 
@@ -948,7 +1021,7 @@ impl Node {
             let map = self.inner.transfers.lock();
             let e = map
                 .get(id)
-                .ok_or_else(|| anyhow!("unknown transfer {id}"))?;
+                .ok_or_else(|| crate::vi::ui("Không tìm thấy lượt chuyển này"))?;
             match &e.kind {
                 EntryKind::Client(j) => Ok((j.clone(), e.tracker.clone())),
                 EntryKind::Host(c) => Err((c.clone(), e.tracker.clone())),
@@ -960,7 +1033,7 @@ impl Node {
                 conn.close(2u32.into(), b"cancelled by host");
                 tracker.error(
                     crate::transfer::ErrorCode::Cancelled,
-                    "cancelled".into(),
+                    crate::vi::CANCELLED.into(),
                     None,
                 );
                 Ok(())
@@ -972,10 +1045,12 @@ impl Node {
         let map = self.inner.transfers.lock();
         let e = map
             .get(id)
-            .ok_or_else(|| anyhow!("unknown transfer {id}"))?;
+            .ok_or_else(|| crate::vi::ui("Không tìm thấy lượt chuyển này"))?;
         match &e.kind {
             EntryKind::Client(j) => Ok((j.clone(), e.tracker.clone())),
-            EntryKind::Host(_) => bail!("host-side transfers cannot be paused or resumed"),
+            EntryKind::Host(_) => Err(crate::vi::ui(
+                "Chỉ tạm dừng/tiếp tục được lượt chuyển do máy này bắt đầu",
+            )),
         }
     }
 
@@ -1027,7 +1102,7 @@ impl Node {
         let inv = crate::contacts::issue_invite(
             &self.inner.invites,
             &self.inner.secret,
-            &self.inner.cfg.device_name,
+            self.inner.device_name(),
             days,
             &self.inner.host_addr(),
         )?;
@@ -1096,15 +1171,88 @@ impl Node {
         self.inner.peer.incoming()
     }
 
-    /// Accepts or declines a waiting push.
-    pub fn answer_push(&self, push_id: &str, accept: bool) -> Result<()> {
-        self.inner.peer.answer(push_id, accept)
+    /// Accepts or declines a waiting push (v0.8: replaces the 2-argument form).
+    /// `always` ("Luôn nhận từ máy này", with `accept`): a contact gets
+    /// `auto_accept = true`; a nearby stranger is added as a contact
+    /// (auto-accept) and, because it sent `PushFrom`, adds this device too.
+    pub fn answer_push(&self, push_id: &str, accept: bool, always: bool) -> Result<()> {
+        crate::peer::answer_push(&self.inner, push_id, accept, always)
     }
 
     /// Pings every contact now and waits for the answers (≤ ~15 s).
     pub async fn refresh_presence(&self) {
         crate::peer::ping_all(&self.inner).await;
     }
+}
+
+/// v0.8 "Gần đây" (contracts/nearby-v0.8.md §1): Toss devices on this LAN,
+/// pushes and text to devices that are not contacts, receive policy, resend.
+impl Node {
+    /// Toss devices seen on this LAN via mDNS, sorted by name (self excluded;
+    /// empty when `net.mdns` is off). `contact` tells which are contacts.
+    pub fn nearby(&self) -> Vec<NearbyPeer> {
+        crate::peer::nearby_list(&self.inner)
+    }
+
+    /// Changes the name this device shows to others: `Hello`/`Pair`/push
+    /// requests from now on, the mDNS user data at once, and contacts learn
+    /// it with the next presence round (started now). Empty names are ignored.
+    pub fn set_device_name(&self, name: &str) {
+        let name = clean_device_name(name);
+        if name.trim().is_empty() || name == self.inner.device_name() {
+            return;
+        }
+        *self.inner.name.write() = crate::util::intern(&name);
+        if let Some(a) = &self.inner.advertiser {
+            a.set_user_data(&crate::nearby::encode_user_data(
+                &name,
+                &crate::contacts::platform(),
+                &self.inner.cfg.app_version,
+            ));
+        }
+        tracing::info!(%name, "device name changed");
+        self.inner.peer.kick.notify_one();
+    }
+
+    /// Sends files/folders to a contact (like [`Node::send_to_contact`]) or to
+    /// a device in [`Node::nearby`] that is not a contact (it asks its user
+    /// unless its policy is "everyone"). `id` = endpoint id hex.
+    pub async fn send_to_peer(&self, id: &str, paths: Vec<PathBuf>) -> Result<crate::Transfer> {
+        client::start_push_peer(&self.inner, id, paths).await
+    }
+
+    /// Sends a text message (≤ 60 KiB) to a contact or a nearby device; Ok
+    /// once the other side showed it.
+    pub async fn send_text(&self, id: &str, text: &str) -> Result<()> {
+        crate::peer::send_text(&self.inner, id, text).await
+    }
+
+    /// Who may send to this device without being asked (the shell persists it
+    /// and sets it on start). Default [`ReceivePolicy::Contacts`].
+    pub fn set_receive_policy(&self, p: ReceivePolicy) {
+        *self.inner.peer.policy.write() = p;
+        tracing::info!(policy = ?p, "receive policy");
+    }
+
+    /// Current receive policy.
+    pub fn receive_policy(&self) -> ReceivePolicy {
+        *self.inner.peer.policy.read()
+    }
+
+    /// Starts the same transfer again as a new one: a push (contact or nearby
+    /// device) or ticket put with the same paths to the same target, or a
+    /// ticket get into the same folder. Errors (Vietnamese) for receive-side
+    /// transfers, expired links and missing files.
+    pub async fn resend(&self, transfer_id: &TransferId) -> Result<crate::Transfer> {
+        client::resend(&self.inner, transfer_id).await
+    }
+}
+
+/// A device name as stored and sent: no control characters, ≤ 64 chars, trimmed.
+fn clean_device_name(name: &str) -> String {
+    crate::util::clean_text(name.trim(), crate::contacts::MAX_NAME)
+        .trim()
+        .to_string()
 }
 
 async fn accept_loop(endpoint: Endpoint, inner: Weak<Inner>) {
@@ -1174,10 +1322,16 @@ async fn accept_loop(endpoint: Endpoint, inner: Weak<Inner>) {
 pub(crate) fn list_dir(rt: &HostRuntime, root: &str, rel: &str) -> Result<Vec<DirEntry>> {
     let base = rt
         .root(root)
-        .ok_or_else(|| anyhow!("unknown root {root:?}"))?;
-    let dir = resolve_inside(base, rel)?;
+        .ok_or_else(|| crate::vi::ui(format!("Không có thư mục gốc “{root}”")))?;
+    let dir = resolve_inside(base, rel)
+        .map_err(|_| crate::vi::ui(format!("Đường dẫn không hợp lệ: {rel}")))?;
     let mut out = Vec::new();
-    for e in std::fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))? {
+    let rd = std::fs::read_dir(&dir).map_err(|e| {
+        crate::vi::ui(crate::vi::io_msg(
+            &anyhow::Error::from(e).context(format!("open {}", dir.display())),
+        ))
+    })?;
+    for e in rd {
         let Ok(e) = e else { continue };
         let Ok(name) = e.file_name().into_string() else {
             continue;

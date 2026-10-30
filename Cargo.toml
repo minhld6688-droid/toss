@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/toss-core", "crates/toss-cli", "apps/desktop/src-tauri"]
+members = ["crates/toss-core", "crates/toss-cli", "crates/toss-ls", "apps/desktop/src-tauri"]
+exclude = ["third_party"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 

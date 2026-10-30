@@ -1,6 +1,7 @@
 # Cài đặt Toss
 
 Từ **v0.6** máy nào cài Toss cũng như nhau: máy nào cũng gửi, nhận, tạo link được. Không còn "máy tổng" hay "editor".
+Từ **v0.8**: máy cùng mạng tự hiện ra trong mục **Gần đây** (cả điện thoại / máy tính chạy app **LocalSend**), Toss tự mở cùng máy, và bản cập nhật 0.8 tự bật "Mở cùng máy" một lần cho mọi máy.
 
 Tải bản mới nhất: `https://github.com/minhld6688-droid/toss/releases/latest`
 (trực tiếp: `.../releases/latest/download/Toss.dmg` cho Mac, `.../Toss-setup.exe` cho Windows). Từ 0.5.2 trở đi Toss tự cập nhật; muốn kiểm tra ngay thì bấm **Cập nhật** ở góc Trang chính.
@@ -13,36 +14,42 @@ Tải bản mới nhất: `https://github.com/minhld6688-droid/toss/releases/lat
 
 1. Mở `Toss.dmg`, kéo **Toss** vào **Applications**.
 2. Bản chưa ký Apple nên lần đầu macOS chặn: vào **Applications**, **chuột phải vào Toss → Open → Open** (một lần). Vẫn bị chặn: System Settings → Privacy & Security → **Open Anyway**.
-3. Mở Toss, đặt tên máy (người khác thấy tên này) và chọn folder nhận file (mặc định `~/Toss`).
+3. Mở Toss: một màn hình duy nhất — tên máy (người khác thấy tên này), folder nhận file (mặc định `~/Toss`), **Mở cùng máy** (đã bật sẵn) → **Bắt đầu**.
+4. macOS hỏi **"Toss muốn tìm thiết bị trong mạng cục bộ"**: bấm **Cho phép** (không cho thì máy cùng mạng không thấy nhau và chuyển file rất chậm). Lỡ bấm từ chối: System Settings → Privacy & Security → **Local Network** → bật Toss, rồi mở lại Toss.
 
 ### Windows
 
 1. Chạy `Toss-setup.exe`. Nếu hiện **Windows protected your PC**: **More info → Run anyway**.
-2. Mở Toss một lần sau khi cài. Nếu Toss hỏi **Cho phép qua firewall**, bấm đồng ý để máy khác nối thẳng (nhanh hơn).
+2. Mở Toss một lần sau khi cài. Nếu Toss hỏi **Cho phép qua firewall**, bấm đồng ý để máy khác nối thẳng (nhanh hơn) và để điện thoại / máy LocalSend gửi được vào máy này.
 
 ---
 
 ## 2. Dùng
 
-- **Ghép máy (một lần)**: Trang chính → **Thêm máy** → gửi lời mời cho máy kia. Từ đó hai máy thấy nhau trong **Danh bạ**.
-- **Gửi**: kéo folder thả vào **tên một máy** trong danh bạ. Hoặc:
-  - Mac: thả lên **icon Toss trên thanh menu** — cửa sổ bật ra ngay dưới icon, kéo tiếp vào tên người nhận. Thả thẳng lên icon (hoặc lên icon Toss ở Dock) thì hiện bảng **Gửi tới ai?**.
-  - **Chuột phải vào folder → Gửi bằng Toss** (Windows 11: *Show more options*; Mac: *Quick Actions*) → **Gửi tới ai?**
-  - Thả folder vào chỗ trống trong cửa sổ Toss → **Gửi tới ai?**
-  - Windows: khay hệ thống của Windows không nhận thả file lên icon (giới hạn của Windows) — dùng chuột phải hoặc kéo vào cửa sổ.
-- **Gửi cho người chưa có trong danh bạ**: trong **Gửi tới ai?** chọn **Tạo link**. Link tự copy sẵn; dán vào Zalo/Messenger. Bật **Cho phép gửi file ngược lại** nếu muốn họ gửi lại về máy bạn.
-- **Nhận**: bấm link người khác gửi (hoặc dán vào ô trên Trang chính). File nằm trong `<folder nhận>/<tên>/`. Từ danh bạ thì file tự về, không cần bấm gì.
-- Đứt mạng / tắt máy giữa chừng: mở lại Toss (hoặc bấm lại link), Toss chạy tiếp từ chỗ dở. Gửi cho máy đang offline: file chờ sẵn, máy đó mở Toss là tự đi.
+- **Gần đây**: máy cùng mạng (Wi-Fi / LAN) đang mở Toss hoặc **LocalSend** tự hiện ở Trang chính, không cần ghép. Kéo folder/file thả vào tên máy là gửi. Không thấy máy nào: hai máy phải cùng một mạng (không phải Wi-Fi khách), bấm nút làm mới; trên Mac kiểm tra quyền **Mạng cục bộ** (mục 1).
+- **Điện thoại**: cài app **LocalSend** (miễn phí, iOS/Android). Máy Toss hiện trong LocalSend như một máy bình thường: gửi ảnh từ điện thoại vào máy tính, hoặc từ Toss chọn tên điện thoại để gửi sang.
+- **Danh bạ (máy ở xa)**: Trang chính → **Mời máy ở xa** → gửi lời mời cho máy kia. Từ đó hai máy thấy nhau trong **Danh bạ** dù ở đâu (qua Internet).
+- **Gửi**: kéo folder hoặc file thả vào **tên một máy**. Hoặc:
+  - Mac: thả lên **icon Toss trên thanh menu** (hoặc icon ở Dock) → **Gửi tới ai?**.
+  - **Chuột phải vào folder hoặc file → Gửi bằng Toss** (Windows 11: *Show more options*; Mac: *Quick Actions*) → **Gửi tới ai?**
+  - Windows: chọn nhiều file → chuột phải → **Send to → Toss**.
+  - Thả vào chỗ trống trong cửa sổ Toss → **Gửi tới ai?**
+- **Gửi tới ai?**: *Gần đây* · *Danh bạ* · **Tạo link** (một file hoặc một folder; link tự copy sẵn, dán vào Zalo/Messenger) · **Chia sẻ qua trình duyệt** (máy cùng mạng mở link/quét QR là tải được, không cần cài gì). Có ô **Gửi chữ** để gửi nhanh một đoạn chữ (địa chỉ, ghi chú).
+- **Nhận**: máy lạ gửi tới → hiện bảng "**<tên> muốn gửi <job>**": **Nhận** · **Luôn nhận từ máy này** · Từ chối. Xong có thông báo "Đã nhận …", bấm vào là mở folder. File nằm trong `<folder nhận>/<tên máy gửi>/<job>/`.
+- **Ai được gửi thẳng** (Cài đặt → Nhận): *Tắt* (lần nào cũng hỏi) · **Chỉ danh bạ** (mặc định: máy trong danh bạ và máy LocalSend đã "Luôn nhận" thì tự nhận, máy lạ phải hỏi) · *Mọi người cùng mạng*. Máy LocalSend tin cậy có nút **Quên**. Tắt "**Hiện với máy LocalSend**" nếu không muốn máy LocalSend thấy máy này.
+- **Link**: bấm link người khác gửi (hoặc dán vào ô trên Trang chính).
+- Đứt mạng / tắt máy giữa chừng (giữa hai máy Toss): mở lại Toss, Toss chạy tiếp từ chỗ dở. Gửi cho máy trong danh bạ đang offline: file chờ sẵn, máy đó mở Toss là tự đi. Chuyển qua LocalSend không nối tiếp được: bấm **Gửi lại** trong danh sách chuyển.
 
 ### Máy luôn bật, không có người ngồi (vd. máy ở studio)
 
-Không cần chế độ gì riêng, chỉ cần máy luôn chạy Toss:
+Không cần cài thêm gì: Toss mở cùng máy và nằm ẩn ở khay hệ thống (bản 0.8 tự bật "Mở cùng máy" cho mọi máy).
 
-1. Cài `Toss-setup.exe` **cho tất cả người dùng** (tự thêm luật Windows Firewall cho `Toss.exe`, chiều vào, UDP).
-2. Chạy `installer/host-setup/windows-host.ps1` bằng PowerShell *Run as administrator*:
-   `powershell -ExecutionPolicy Bypass -File .\windows-host.ps1` — tắt sleep, tạo Scheduled Task chạy `Toss.exe --hidden` lúc đăng nhập. Chi tiết: [`installer/host-setup/README.md`](../installer/host-setup/README.md).
-3. Bật tự đăng nhập Windows (`netplwiz`), BIOS **Restore on AC Power Loss = Power On**.
-4. Muốn điều khiển máy này từ xa (tạo link trong folder của nó, bảo nó tự cập nhật): trên máy đó **Cài đặt → Nâng cao → Link điều khiển**; dán link vào máy của bạn ở **Cài đặt → Nâng cao → Điều khiển máy khác**. Muốn tạo link cho folder con bên trong một kho lớn: thêm kho đó ở **Nâng cao → Folder cố định**.
+1. Cài `Toss-setup.exe` **cho tất cả người dùng** (tự thêm luật Windows Firewall cho `Toss.exe`).
+2. Windows: tắt Sleep khi cắm điện (Settings → System → Power → *Never*).
+3. Bật tự đăng nhập Windows: `Win + R` → `netplwiz` → bỏ tick *Users must enter a user name and password…* (không thấy ô tick: Settings → Accounts → Sign-in options → tắt *only allow Windows Hello sign-in*). Toss chỉ chạy sau khi tài khoản đã đăng nhập. BIOS: **Restore on AC Power Loss = Power On**.
+4. Muốn điều khiển máy này từ xa (tạo link trong folder của nó, bảo nó tự cập nhật): trên máy đó **Cài đặt → Chẩn đoán & nâng cao → Link điều khiển**; dán link vào máy của bạn ở **Chẩn đoán & nâng cao → Điều khiển máy khác**. Muốn tạo link cho folder con bên trong một kho lớn: thêm kho đó ở **Folder cố định**.
+
+Windows Update tự khởi động lại máy: máy bật lại → tự đăng nhập → Toss tự chạy, online lại sau vài chục giây; máy đang tải sẽ tự nối tiếp.
 
 ### Cổng UDP 41820
 
@@ -63,10 +70,9 @@ Mọi thứ dưới đây nhằm một việc: để thẻ truyền hiện **Tr�
 
 ### Firewall (Windows)
 
-- Cài Toss bằng **"cho tất cả người dùng"** (có UAC) thì trình cài tự thêm **một** luật tên `Toss`: chiều vào, giao thức **UDP**, chương trình `Toss.exe`. Không mở TCP.
-- Cài "chỉ mình tôi" không có quyền Administrator, hoặc ai đó đã xoá luật: mở Toss → **Cài đặt → Nâng cao → Kết nối**, dòng **Firewall**. Nếu hiện "Thiếu", bấm **Cho phép qua firewall** (một lần hỏi quyền Administrator).
-- Hoặc chạy `installer/host-setup/windows-host.ps1` bằng PowerShell Administrator, script cũng tạo đúng luật này (và thay luật cũ chỉ-theo-chương-trình).
-- Tự kiểm tra: PowerShell `Get-NetFirewallRule -DisplayName Toss | Get-NetFirewallPortFilter` phải thấy `Protocol : UDP`.
+- Cài Toss bằng **"cho tất cả người dùng"** (có UAC) thì trình cài tự thêm luật cho chương trình `Toss.exe`, chiều vào: `Toss` (**UDP**, mọi cổng — chuyển file Toss) và `Toss LocalSend` (**TCP + UDP 53317–53327** — để điện thoại / máy LocalSend thấy và gửi vào máy này).
+- Cài "chỉ mình tôi" không có quyền Administrator, máy nâng cấp từ bản cũ, hoặc ai đó đã xoá luật: mở Toss → **Cài đặt → Chẩn đoán & nâng cao → Kết nối**, dòng **Firewall**. Nếu hiện "Thiếu", bấm **Cho phép qua firewall** (một lần hỏi quyền Administrator; tạo cả hai luật).
+- Tự kiểm tra: PowerShell `Get-NetFirewallRule -DisplayName Toss | Get-NetFirewallPortFilter` phải thấy `Protocol : UDP`; `Get-NetFirewallRule -DisplayName 'Toss LocalSend' | Get-NetFirewallPortFilter` thấy TCP và UDP `53317-53327`.
 - Mac: cùng nút đó (hỏi mật khẩu quản trị), hoặc System Settings → Network → Firewall → Options → thêm Toss và chọn *Allow incoming connections*. Nếu tường lửa Mac đang tắt thì không cần làm gì.
 
 ### Router studio: bật UPnP hoặc forward UDP 41820
@@ -90,7 +96,7 @@ Cắm máy ở studio bằng **cáp mạng (Ethernet)**, đừng dùng Wi-Fi. Wi
 
 Nếu cả mạng studio và mạng máy ở xa đều có **IPv6 công cộng** (bảng Kết nối hiện địa chỉ IPv6 và khả năng **Cao**), hai máy có thể nối trực tiếp mà không cần forward IPv4. Nhiều router chặn IPv6 đi vào theo mặc định: nếu vẫn ra Relay, vào mục *IPv6 firewall* của router và cho phép UDP 41820 tới máy ở studio. Luật Windows Firewall ở trên đã bao gồm IPv6.
 
-### Đọc bảng Kết nối (Cài đặt → Nâng cao → Kết nối)
+### Đọc bảng Kết nối (Cài đặt → Chẩn đoán & nâng cao → Kết nối)
 
 Bảng cho biết tình trạng mạng **của máy đang mở Toss**. Quan trọng nhất là xem ở **máy ở studio**, rồi dùng nút thử từ máy ở xa.
 
@@ -113,12 +119,12 @@ Trên thẻ truyền, cạnh nhãn **Trực tiếp / Relay** là độ trễ (v�
 
 ### Relay riêng (khi Direct không được)
 
-Một số mạng (NAT đối xứng, CGNAT, mạng khách sạn/công ty chặn UDP) không bao giờ nối trực tiếp được. Khi đó thay vì relay công cộng ở xa, studio có thể thuê một VPS nhỏ trong nước làm **relay riêng**: nhanh hơn nhiều, chi phí khoảng vài trăm nghìn đồng mỗi tháng, và Toss vẫn tự quay về relay công cộng nếu relay riêng sập. Cách làm 6 bước, chi phí và theo dõi: [`hub/relay/README.md`](../hub/relay/README.md). Cuối cùng dán địa chỉ vào **Cài đặt → Nâng cao → Kết nối → Nâng cao → Relay riêng** trên **cả máy ở studio và các máy ở xa**.
+Một số mạng (NAT đối xứng, CGNAT, mạng khách sạn/công ty chặn UDP) không bao giờ nối trực tiếp được. Khi đó thay vì relay công cộng ở xa, studio có thể thuê một VPS nhỏ trong nước làm **relay riêng**: nhanh hơn nhiều, chi phí khoảng vài trăm nghìn đồng mỗi tháng, và Toss vẫn tự quay về relay công cộng nếu relay riêng sập. Cách làm 6 bước, chi phí và theo dõi: [`hub/relay/README.md`](../hub/relay/README.md). Cuối cùng dán địa chỉ vào **Cài đặt → Chẩn đoán & nâng cao → Kết nối → Relay riêng** trên **cả máy ở studio và các máy ở xa**.
 
 ### Checklist nhanh khi thẻ truyền hiện "Relay"
 
 1. **Đợi 10-20 giây**: Toss thử lại địa chỉ sau 10 giây và nhiều khi tự nâng lên Trực tiếp. Không cần dừng việc đang tải.
-2. **Máy ở studio đang bật và Toss chạy ở chế độ máy ở studio?** Cài đặt → Nâng cao → Kết nối → *Cổng UDP* phải là **41820**.
+2. **Máy ở studio đang bật và Toss chạy ở chế độ máy ở studio?** Cài đặt → Chẩn đoán & nâng cao → Kết nối → *Cổng UDP* phải là **41820**.
 3. **Firewall = OK?** Nếu "Thiếu", bấm **Cho phép qua firewall**.
 4. **Port mapping = đã map?** Nếu không: bật UPnP trên router, hoặc forward tay UDP 41820 tới IP cố định của máy ở studio. Rồi **tạo link job mới**.
 5. **Máy ở studio cắm dây LAN**, không dùng Wi-Fi.
@@ -142,7 +148,10 @@ Một số mạng (NAT đối xứng, CGNAT, mạng khách sạn/công ty chặn
 
 | Triệu chứng | Nguyên nhân thường gặp / cách xử lý |
 | --- | --- |
-| "Host offline" / không kết nối được | Máy ở studio đang tắt, đang restart, hoặc kẹt ở màn hình đăng nhập. Kiểm tra auto-login và Scheduled Task (`Get-ScheduledTask Toss`). Toss tự thử lại, cứ để cửa sổ mở. |
+| "Host offline" / không kết nối được | Máy ở studio đang tắt, đang restart, hoặc kẹt ở màn hình đăng nhập. Kiểm tra auto-login và **Mở cùng máy** (Cài đặt → Máy này). Toss tự thử lại, cứ để cửa sổ mở. |
+| Không thấy máy cùng mạng trong **Gần đây** | Hai máy khác mạng (Wi-Fi khách / AP isolation / VLAN), firewall thiếu luật `Toss LocalSend` (mục 3), hoặc Mac chưa cho quyền **Mạng cục bộ**. Bấm làm mới; vẫn không thấy thì dùng Danh bạ (qua Internet). |
+| Điện thoại LocalSend báo "yêu cầu mã PIN" / "từ chối" | Tắt PIN trong LocalSend của máy kia; "từ chối" = người bên kia bấm Từ chối hoặc không trả lời trong 60 giây. |
+| Cổng 53317 bị chiếm | Toss tự dùng 53318–53327 (máy LocalSend vẫn tìm thấy). |
 | Báo "Busy" / xếp hàng | Máy ở studio giới hạn số job chạy cùng lúc (mặc định 2). Toss tự thử lại mỗi 30 giây trong tối đa 1 giờ. |
 | Tốc độ chậm | Xem nhãn kết nối trong tiến trình: **Direct** là nhanh, **Relay** là đi vòng nên chậm. Làm theo "Checklist nhanh khi thẻ truyền hiện Relay" ở mục 3 (firewall, UPnP / forward UDP 41820, cắm LAN, tắt VPN, relay riêng). Đôi khi sau vài giây kết nối tự nâng từ Relay lên Direct. |
 | Bấm link mà Toss không mở | Chưa cài hoặc chưa mở Toss lần nào. Cài, mở một lần, bấm lại link. Trình duyệt hỏi "Open Toss?" thì chọn Open. Dùng nút **Copy ticket** rồi dán vào Toss nếu vẫn không được. |

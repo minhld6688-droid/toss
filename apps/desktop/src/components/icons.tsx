@@ -71,6 +71,10 @@ export const TOSS_ICONS = {
   clock: [RING(12, 12, 8.4), S("M12 7.4V12l3.1 1.9"), DOT(12, 12, 1.1)],
   // v0.5.1 update: two arcs chase each other around the new version, the spark at the centre
   update: [S("M4.7 13.2a7.4 7.4 0 0 0 13.4 3.4"), S("M19.3 10.8A7.4 7.4 0 0 0 5.9 7.4"), S("M5.6 3.8v3.9h3.9"), S("M18.4 20.2v-3.9h-3.9"), DOT(12, 12, 1.5)],
+  // v0.8 nearby: phone (screen with a spark for the speaker), browser (orbit ring), message bubble
+  phone: [RECT(7, 3, 10, 18, 2.4, "f"), RECT(7, 3, 10, 18, 2.4), S("M10.6 17.4h2.8"), DOT(12, 6.6, 1)],
+  globe: [RING(12, 12, 8.4), S("M3.8 12h16.4"), S("M12 3.6c2.5 2.3 3.7 5.1 3.7 8.4s-1.2 6.1-3.7 8.4c-2.5-2.3-3.7-5.1-3.7-8.4s1.2-6.1 3.7-8.4Z"), DOT(12, 12, 1.2)],
+  chat: [F("M5 6.6A2.6 2.6 0 0 1 7.6 4h8.8A2.6 2.6 0 0 1 19 6.6v5.8a2.6 2.6 0 0 1-2.6 2.6H11l-3.8 3.6V15A2.6 2.6 0 0 1 5 12.4Z"), S("M5 6.6A2.6 2.6 0 0 1 7.6 4h8.8A2.6 2.6 0 0 1 19 6.6v5.8a2.6 2.6 0 0 1-2.6 2.6H11l-3.8 3.6V15A2.6 2.6 0 0 1 5 12.4Z"), S("M9 8.2h6"), DOT(9.2, 11.4, 1)],
   // qr: three finders and the data spark
   qr: [RECT(4, 4, 6.4, 6.4, 1.6), RECT(13.6, 4, 6.4, 6.4, 1.6), RECT(4, 13.6, 6.4, 6.4, 1.6), DOT(16.8, 16.8, 1.7), S("M13.8 20h6.2"), S("M20 13.8v.4")],
 } satisfies Record<string, Part[]>;
