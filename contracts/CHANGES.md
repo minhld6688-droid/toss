@@ -2,6 +2,14 @@
 
 Format: `## <date> <agent> — <file>` then the change and why. The coordinator marks each `APPROVED` / `REJECTED`.
 
+
+## 2026-11-11 0.9 studio pipeline — ipc.ts + core API (additive, nothing removed/renamed) — APPROVED
+- `AppState.last_get_dir?`, `AppState.studio_on?`; `TransferState.receipt?` (a send the receiver confirmed: blake3 checked + synced).
+- `start_get(args.dest?)`: the folder picked in the link sheet, remembered as `last_get_dir`.
+- New commands (shell-only, ipc-extra.ts): `studio_view`, `studio_set`, `studio_scan`, `studio_link_folder`, `studio_backup_link`, `studio_remove`, `free_up`; event `studio:links`.
+- Core: `Node::receipts/receipt/free_up/set_stay_awake`, modules `jobwatch`, `receipt`, `awake`; `fsutil::available_space`. A get stops before any byte moves when the destination lacks room; Busy is retried for 24 h.
+- Behaviour change: `auto_receive` now defaults to off (a clicked link asks where to save).
+
 ## 2026-10-22 desktop-agent — ipc.ts (additive; UI + shell already implement these, nothing breaks if ignored) — APPROVED
 The desktop app adds these on top of the frozen contract (declared in `apps/desktop/src/lib/ipc-extra.ts`):
 - Command `ui_ready(): Promise<void>` — the UI calls it once its listeners are registered; the shell then flushes `deep-link` events that arrived during startup (cold start via `toss://`).
