@@ -6944,6 +6944,7 @@ dependencies = [
  "hex",
  "iroh",
  "iroh-mdns-address-lookup",
+ "libc",
  "n0-future",
  "netwatch",
  "noq-proto",

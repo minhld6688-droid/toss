@@ -1227,6 +1227,23 @@ impl Node {
         crate::peer::send_text(&self.inner, id, text).await
     }
 
+    /// Backup receipts (puts the receiver confirmed), newest first.
+    pub fn receipts(&self) -> Vec<crate::ReceiptSummary> {
+        crate::receipt::list(&self.inner.cfg.data_dir)
+    }
+
+    /// Deletes the local files a receipt covers, if unchanged since the backup.
+    pub async fn free_up(&self, transfer_id: &str) -> Result<crate::Freed> {
+        let dir = self.inner.cfg.data_dir.clone();
+        let id = transfer_id.to_string();
+        tokio::task::spawn_blocking(move || crate::receipt::free(&dir, &id)).await?
+    }
+
+    /// Keeps the machine awake while the node runs (a host that must stay reachable).
+    pub fn set_stay_awake(&self, on: bool) {
+        crate::awake::set_always(on);
+    }
+
     /// Who may send to this device without being asked (the shell persists it
     /// and sets it on start). Default [`ReceivePolicy::Contacts`].
     pub fn set_receive_policy(&self, p: ReceivePolicy) {

@@ -28,6 +28,9 @@ noq-proto = { version = "1.4", default-features = false }
 bytes = "1"
 netwatch = "0.19.3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

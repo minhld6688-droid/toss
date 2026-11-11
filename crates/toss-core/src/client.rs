@@ -32,8 +32,11 @@ use crate::{
 
 /// Seconds between retries for Busy / HostOffline.
 pub const RETRY_SECS: u64 = 30;
-/// Give up on Busy after this long.
-pub const BUSY_LIMIT: Duration = Duration::from_secs(3600);
+/// Give up on Busy after this long. A studio host serves a few 30–60 GB
+/// folders at a time, so waiting in line can take hours.
+pub const BUSY_LIMIT: Duration = Duration::from_secs(24 * 3600);
+/// Room kept free on the destination on top of what a download still needs.
+pub const FREE_MARGIN: u64 = 256 << 20;
 /// Give up on HostOffline after this long.
 pub const OFFLINE_LIMIT: Duration = Duration::from_secs(24 * 3600);
 /// Streams of an xfer/1 put (old hosts).
@@ -686,6 +689,7 @@ async fn get_session(
     job: &Arc<ClientJob>,
     tracker: &Arc<Tracker>,
 ) -> Result<SessionEnd, SessErr> {
+    let _awake = crate::awake::hold();
     let job_dir = job
         .job_dir
         .clone()
@@ -700,6 +704,15 @@ async fn get_session(
         .await
         .map_err(|e| SessErr::Other(e.into()))?
         .map_err(SessErr::Io)?;
+    let free = crate::fsutil::available_space(&plan.base_c).unwrap_or(u64::MAX);
+    if plan.to_do_bytes > 0 && free < plan.to_do_bytes.saturating_add(FREE_MARGIN) {
+        conn.close(2u32.into(), b"no space");
+        return Err(SessErr::Other(ui(format!(
+            "Ổ đích thiếu chỗ: cần thêm {}, còn trống {}. Dọn bớt hoặc chọn ổ khác rồi bấm Tiếp tục.",
+            gb(plan.to_do_bytes.saturating_add(FREE_MARGIN)),
+            gb(free)
+        ))));
+    }
     job.part_files
         .lock()
         .extend(plan.items.values().map(|i| i.part.clone()));
@@ -828,6 +841,7 @@ async fn put_session(
     job: &Arc<ClientJob>,
     tracker: &Arc<Tracker>,
 ) -> Result<SessionEnd, SessErr> {
+    let _awake = crate::awake::hold();
     // Build (and hash) the manifest before dialing so the host slot is not held while hashing.
     let paths = job.paths.clone();
     let hashes = inner.hashes.clone();
@@ -840,7 +854,7 @@ async fn put_session(
     let (conn, mut send, mut recv) = open(inner, job, tracker).await?;
     let v2 = conn.alpn() == ALPN_XFER2;
     put_data_phase(
-        inner, &conn, &mut send, &mut recv, &manifest, &abs, tracker, v2,
+        inner, &conn, &mut send, &mut recv, &manifest, &abs, &job.paths, tracker, v2,
     )
     .await
 }
@@ -855,6 +869,7 @@ async fn put_data_phase(
     recv: &mut iroh::endpoint::RecvStream,
     manifest: &Manifest,
     abs: &[PathBuf],
+    roots: &[PathBuf],
     tracker: &Arc<Tracker>,
     v2: bool,
 ) -> Result<SessionEnd, SessErr> {
@@ -915,7 +930,64 @@ async fn put_data_phase(
             clean_text(&done.msg, 300)
         ))));
     }
+    // Every file is verified and on the receiver's disk: keep a receipt.
+    let (inner2, tracker2) = (inner.clone(), tracker.clone());
+    let (m, a, r) = (manifest.clone(), abs.to_vec(), roots.to_vec());
+    match tokio::task::spawn_blocking(move || write_receipt(&inner2, &tracker2, &m, &a, &r)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(id = %tracker.id, "receipt: {e:#}"),
+        Err(e) => tracing::warn!(id = %tracker.id, "receipt: {e}"),
+    }
     Ok(SessionEnd::Complete(path))
+}
+
+/// Records what the receiver confirmed: only files that still hold the bytes
+/// that were sent (same size, same blake3) go into the receipt.
+fn write_receipt(
+    inner: &Inner,
+    tracker: &Tracker,
+    manifest: &Manifest,
+    abs: &[PathBuf],
+    roots: &[PathBuf],
+) -> Result<()> {
+    let st = tracker.snapshot();
+    let mut files = Vec::with_capacity(abs.len());
+    for (e, p) in manifest.files.iter().zip(abs) {
+        let Ok(m) = std::fs::metadata(p) else { continue };
+        if m.len() != e.size || inner.hashes.hash(p).ok() != Some(e.hash) {
+            tracing::warn!("receipt: {} changed after sending, not included", p.display());
+            continue;
+        }
+        files.push(crate::receipt::ReceiptFile {
+            path: p.clone(),
+            size: e.size,
+            mtime: crate::receipt::mtime_of(&m),
+            hash: hex::encode(e.hash),
+        });
+    }
+    let bytes = files.iter().map(|f| f.size).sum();
+    crate::receipt::save(
+        &inner.cfg.data_dir,
+        &crate::receipt::Receipt {
+            id: st.id,
+            job: st.job,
+            to: st.peer,
+            at: now_unix(),
+            roots: roots.to_vec(),
+            files,
+            bytes,
+            freed: None,
+        },
+    )
+}
+
+/// "12,3 GB" (decimal, one place), for messages.
+fn gb(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1} GB", n as f64 / 1e9).replace('.', ",")
+    } else {
+        format!("{} MB", n.div_ceil(1_000_000))
+    }
 }
 
 /// v0.5 push to a contact: waits until presence sees the contact online, then
@@ -979,6 +1051,7 @@ async fn push_session(
     job: &Arc<ClientJob>,
     tracker: &Arc<Tracker>,
 ) -> Result<SessionEnd, SessErr> {
+    let _awake = crate::awake::hold();
     let Target::Contact {
         id,
         push_id,
@@ -1071,7 +1144,7 @@ async fn push_session(
     }
     tracker.update(|s| s.error = None);
     put_data_phase(
-        inner, &conn, &mut send, &mut recv, &manifest, &abs, tracker, true,
+        inner, &conn, &mut send, &mut recv, &manifest, &abs, &job.paths, tracker, true,
     )
     .await
 }
