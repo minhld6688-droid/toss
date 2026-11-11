@@ -307,8 +307,8 @@ impl Engine {
         v["outgoing"] = json!(v["side"] == "client" && v["op"] != "get");
         // 0.9: the receiver confirmed every byte: the local copies may be freed
         if v["outgoing"] == json!(true) && t.status == toss_core::transfer::Status::Done {
-            if let Ok(r) = toss_core::receipt::load(&self.data, &t.id) {
-                v["receipt"] = serde_json::to_value(r.summary()).unwrap_or_default();
+            if let Some(r) = toss_core::receipt::summary(&self.data, &t.id) {
+                v["receipt"] = serde_json::to_value(r).unwrap_or_default();
             }
         }
         v

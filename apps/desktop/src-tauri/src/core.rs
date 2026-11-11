@@ -912,15 +912,16 @@ impl Core {
     pub async fn list_transfers(&self) -> Result<Vec<Value>> {
         let node = self.node().await?;
         // 0.9: a send the receiver confirmed carries its receipt (backup → free up).
-        let receipts: HashMap<String, toss_core::ReceiptSummary> =
-            node.receipts().into_iter().map(|r| (r.id.clone(), r)).collect();
         let mut v: Vec<Value> = node
             .transfers()
             .iter()
             .filter_map(|t| {
                 let mut v = serde_json::to_value(t).ok()?;
-                if let Some(r) = receipts.get(&t.id) {
-                    v["receipt"] = serde_json::to_value(r).unwrap_or_default();
+                let sent = t.side == toss_core::transfer::Side::Client && t.op == Op::Put;
+                if sent && t.status == toss_core::transfer::Status::Done {
+                    if let Some(r) = node.receipt(&t.id) {
+                        v["receipt"] = serde_json::to_value(r).unwrap_or_default();
+                    }
                 }
                 Some(v)
             })

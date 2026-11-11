@@ -114,40 +114,76 @@ fn dir(data_dir: &Path) -> PathBuf {
     data_dir.join(DIR)
 }
 
-fn file(data_dir: &Path, id: &str) -> Result<PathBuf> {
+/// `<id>.json` holds the summary (small, read by lists), `<id>.files.json` the file list
+/// (thousands of entries, read only to free).
+fn file(data_dir: &Path, id: &str, ext: &str) -> Result<PathBuf> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         bail!("bad receipt id");
     }
-    Ok(dir(data_dir).join(format!("{id}.json")))
+    Ok(dir(data_dir).join(format!("{id}.{ext}")))
 }
 
-/// Writes (or replaces) a receipt atomically.
-pub fn save(data_dir: &Path, r: &Receipt) -> Result<()> {
-    let path = file(data_dir, &r.id)?;
-    std::fs::create_dir_all(dir(data_dir))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(r)?)?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("save {}", path.display()))?;
+#[derive(Serialize, Deserialize)]
+struct Head {
+    #[serde(flatten)]
+    summary: ReceiptSummary,
+    roots: Vec<PathBuf>,
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).with_context(|| format!("save {}", path.display()))?;
     Ok(())
 }
 
-/// Reads one receipt.
-pub fn load(data_dir: &Path, id: &str) -> Result<Receipt> {
-    let path = file(data_dir, id)?;
-    let bytes = std::fs::read(&path).with_context(|| format!("Không có biên nhận {id}"))?;
-    Ok(serde_json::from_slice(&bytes)?)
+/// Writes (or replaces) a receipt atomically: the file list first, then the summary that
+/// makes it visible.
+pub fn save(data_dir: &Path, r: &Receipt) -> Result<()> {
+    std::fs::create_dir_all(dir(data_dir))?;
+    write_atomic(&file(data_dir, &r.id, "files.json")?, &serde_json::to_vec(&r.files)?)?;
+    let head = Head { summary: r.summary(), roots: r.roots.clone() };
+    write_atomic(&file(data_dir, &r.id, "json")?, &serde_json::to_vec_pretty(&head)?)
 }
 
-/// Every receipt, newest first.
+/// The summary of one receipt, if there is one (cheap: never reads the file list).
+pub fn summary(data_dir: &Path, id: &str) -> Option<ReceiptSummary> {
+    let bytes = std::fs::read(file(data_dir, id, "json").ok()?).ok()?;
+    serde_json::from_slice::<Head>(&bytes).ok().map(|h| h.summary)
+}
+
+/// Reads one receipt, file list included.
+pub fn load(data_dir: &Path, id: &str) -> Result<Receipt> {
+    let head = std::fs::read(file(data_dir, id, "json")?).with_context(|| format!("Không có biên nhận {id}"))?;
+    let head: Head = serde_json::from_slice(&head)?;
+    let files = std::fs::read(file(data_dir, id, "files.json")?).with_context(|| format!("Biên nhận {id} thiếu danh sách file"))?;
+    let s = head.summary;
+    Ok(Receipt {
+        id: s.id,
+        job: s.job,
+        to: s.to,
+        at: s.at,
+        roots: head.roots,
+        files: serde_json::from_slice(&files)?,
+        bytes: s.bytes,
+        freed: s.freed,
+    })
+}
+
+/// Every receipt, newest first (summaries only).
 pub fn list(data_dir: &Path) -> Vec<ReceiptSummary> {
     let mut out: Vec<ReceiptSummary> = std::fs::read_dir(dir(data_dir))
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            n.ends_with(".json") && !n.ends_with(".files.json")
+        })
         .filter_map(|e| std::fs::read(e.path()).ok())
-        .filter_map(|b| serde_json::from_slice::<Receipt>(&b).ok())
-        .map(|r| r.summary())
+        .filter_map(|b| serde_json::from_slice::<Head>(&b).ok())
+        .map(|h| h.summary)
         .collect();
     out.sort_by_key(|r| std::cmp::Reverse(r.at));
     out
@@ -305,6 +341,26 @@ mod tests {
         let f = free(&data, "r2").unwrap();
         assert_eq!((f.files, f.kept.len()), (1, 0));
         assert!(!root.exists(), "the emptied job folder goes too");
+    }
+
+    #[test]
+    fn lists_read_only_the_small_summary() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let root = t.path().join("Job");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..5 {
+            std::fs::write(root.join(format!("{i}.nef")), [i as u8; 10]).unwrap();
+        }
+        receipt_for(&data, &root, "r3");
+        assert!(data.join("receipts/r3.files.json").is_file());
+        // a broken file list does not hide the receipt from lists, only from freeing
+        std::fs::write(data.join("receipts/r3.files.json"), b"not json").unwrap();
+        let s = summary(&data, "r3").unwrap();
+        assert_eq!((s.files, s.bytes), (5, 50));
+        assert_eq!(list(&data).len(), 1);
+        assert!(free(&data, "r3").is_err());
+        assert!(summary(&data, "nope").is_none());
     }
 
     #[test]

@@ -1232,6 +1232,11 @@ impl Node {
         crate::receipt::list(&self.inner.cfg.data_dir)
     }
 
+    /// The receipt of one finished send, if the receiver confirmed it (cheap).
+    pub fn receipt(&self, transfer_id: &str) -> Option<crate::ReceiptSummary> {
+        crate::receipt::summary(&self.inner.cfg.data_dir, transfer_id)
+    }
+
     /// Deletes the local files a receipt covers, if unchanged since the backup.
     pub async fn free_up(&self, transfer_id: &str) -> Result<crate::Freed> {
         let dir = self.inner.cfg.data_dir.clone();

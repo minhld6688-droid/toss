@@ -111,14 +111,15 @@ fn count(dir: &Path) -> (u64, u64) {
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
-            let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+            // The listing's own metadata: no extra call per file on Windows (lstat on Unix)
+            let (Ok(t), Ok(m)) = (e.file_type(), e.metadata()) else { continue };
             let name = e.file_name().to_string_lossy().into_owned();
-            if crate::fsutil::is_hidden(&name, &m) || m.file_type().is_symlink() {
+            if t.is_symlink() || crate::fsutil::is_hidden(&name, &m) {
                 continue;
             }
-            if m.is_dir() {
+            if t.is_dir() {
                 stack.push(e.path());
-            } else if m.is_file() && !name.ends_with(crate::fsutil::PART_SUFFIX) {
+            } else if t.is_file() && !name.ends_with(crate::fsutil::PART_SUFFIX) {
                 files += 1;
                 bytes += m.len();
             }

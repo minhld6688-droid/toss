@@ -19,6 +19,9 @@ const LINKS_FILE: &str = "studio-links.json";
 pub(crate) const SCAN_EVERY: Duration = Duration::from_secs(30);
 /// A folder whose numbers stay the same this long has finished copying.
 const QUIET: Duration = Duration::from_secs(120);
+/// Shooter folders untouched for longer are settled jobs: not counted again every half minute
+/// (a new card copied into one touches its folder and brings it back).
+const WINDOW_SECS: u64 = 2 * 24 * 3600;
 
 /// One link the studio handed out (ipc.ts `StudioLink`).
 #[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -204,7 +207,7 @@ impl Core {
             self.studio_note(Some(format!("Không thấy {} (ổ chưa cắm?)", root.display())));
             return;
         }
-        let since = UNIX_EPOCH + Duration::from_secs(s.studio.since);
+        let since = UNIX_EPOCH + Duration::from_secs(s.studio.since.max(now().saturating_sub(WINDOW_SECS)));
         let r = root.clone();
         let found = match tokio::task::spawn_blocking(move || jobwatch::scan(&r, since)).await {
             Ok(f) => f,
