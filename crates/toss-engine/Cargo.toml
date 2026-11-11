@@ -1,0 +1,25 @@
+[package]
+name = "toss-engine"
+description = "Toss without a window: toss-core and toss-ls behind JSON lines on stdin/stdout, for host apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "toss-engine"
+path = "src/main.rs"
+
+[dependencies]
+toss-core = { path = "../toss-core" }
+toss-ls = { path = "../toss-ls" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+gethostname = "1"
+# Short links (same as the desktop shell, whose module is reused as is)
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

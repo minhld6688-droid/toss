@@ -7002,6 +7002,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "toss-engine"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "gethostname",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toss-core",
+ "toss-ls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "toss-ls"
 version = "0.8.1"
 dependencies = [

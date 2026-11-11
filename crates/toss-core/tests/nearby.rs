@@ -398,7 +398,7 @@ async fn stranger_push_ask_decline_and_always_pairs_both_sides() {
     assert!(on_a[0].auto_accept);
     assert_eq!(wait_final(&t).await.status, Status::Done);
     assert_eq!(
-        std::fs::read(a.inbox_dir().join("Editor B/1 file/note.txt")).unwrap(),
+        std::fs::read(a.inbox_dir().join("Editor B/note/note.txt")).unwrap(),
         b"hello"
     );
     next_event(&mut b_ev, |e| {

@@ -290,13 +290,13 @@ async fn start_push_to(
     })
 }
 
-/// Job name of a push: the dropped folder's name (one folder), else "N file".
+/// Job name of a push: the name of the one thing dropped, else "N file".
 fn push_job_name(paths: &[PathBuf]) -> String {
     if let [p] = paths {
-        if p.is_dir() {
-            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                return name.chars().take(crate::ticket::MAX_JOB_LEN).collect();
-            }
+        // One file or folder: its own name, so nothing lands in a folder called "1 file"
+        let name = if p.is_dir() { p.file_name() } else { p.file_stem() };
+        if let Some(name) = name.and_then(|n| n.to_str()) {
+            return name.chars().take(crate::ticket::MAX_JOB_LEN).collect();
         }
     }
     format!("{} file", paths.len())
