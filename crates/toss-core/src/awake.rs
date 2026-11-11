@@ -149,11 +149,16 @@ mod sys {
 
 #[cfg(not(any(target_os = "macos", windows)))]
 mod sys {
+    /// Nothing to ask the OS for; the state is only remembered.
     #[derive(Default)]
-    pub struct Request;
+    pub struct Request {
+        _on: bool,
+    }
 
     impl Request {
-        pub fn set(&mut self, _on: bool) {}
+        pub fn set(&mut self, on: bool) {
+            self._on = on;
+        }
     }
 }
 
