@@ -149,7 +149,7 @@ pub fn list(data_dir: &Path) -> Vec<ReceiptSummary> {
         .filter_map(|b| serde_json::from_slice::<Receipt>(&b).ok())
         .map(|r| r.summary())
         .collect();
-    out.sort_by(|a, b| b.at.cmp(&a.at));
+    out.sort_by_key(|r| std::cmp::Reverse(r.at));
     out
 }
 

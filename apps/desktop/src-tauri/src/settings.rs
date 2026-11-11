@@ -44,6 +44,31 @@ pub struct Settings {
     pub ls_trusted: Vec<LsTrusted>,
     /// v0.8: the one-time 0.8 migration (autostart forced on) has run.
     pub migrated_v08: bool,
+    /// 0.9: folder last chosen for a download, offered first next time.
+    pub last_get_dir: Option<String>,
+    /// 0.9: studio machine mode (auto links for shooter folders, always awake).
+    pub studio: StudioSettings,
+}
+
+/// 0.9 studio machine mode (ipc.ts `StudioView`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct StudioSettings {
+    /// On: shooter folders get links by themselves, the machine never sleeps.
+    pub on: bool,
+    /// Alias of the "Folder cố định" holding the jobs (e.g. `D:\Jobs`).
+    pub root: String,
+    /// Days a shooter link lasts (0 = never).
+    pub days: u32,
+    /// Unix seconds: shooter folders unchanged since before this are old jobs
+    /// and get no automatic link (right-click still works).
+    pub since: u64,
+}
+
+impl Default for StudioSettings {
+    fn default() -> Self {
+        StudioSettings { on: false, root: String::new(), days: 30, since: 0 }
+    }
 }
 
 /// v0.8 receive policy (ipc.ts `ReceivePolicy`: "off" | "contacts" | "everyone"); persisted here,
@@ -81,7 +106,8 @@ impl Default for Settings {
             first_run: true,
             page_host: None,
             context_menu: true,
-            auto_receive: true,
+            // 0.9: a clicked link asks where to save (Settings can turn instant start back on).
+            auto_receive: false,
             quick_shares: Vec::new(),
             host_auto: false,
             net: toss_core::NetConfig::default(),
@@ -90,6 +116,8 @@ impl Default for Settings {
             ls_enabled: true,
             ls_trusted: Vec::new(),
             migrated_v08: false,
+            last_get_dir: None,
+            studio: StudioSettings::default(),
         }
     }
 }
@@ -218,7 +246,7 @@ mod tests {
         let s = Settings::load(&dir);
         assert_eq!(s.device_name, "May");
         assert!(s.context_menu, "context menu defaults to on");
-        assert!(s.auto_receive, "auto receive defaults to on");
+        assert!(!s.auto_receive, "0.9: a clicked link asks where to save by default");
         assert!(s.quick_shares.is_empty() && !s.host_auto);
         assert_eq!(
             s.net,

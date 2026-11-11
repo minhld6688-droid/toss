@@ -28,6 +28,14 @@ pub const SHARE_FLAG: &str = "--share";
 /// v0.8 argv flag: every following argument is a file / folder to send.
 pub const SEND_FLAG: &str = "--send";
 
+/// 0.9 argv flag: make (or reuse) the folder's link, copy it, notify. Windows only.
+pub const LINK_FLAG: &str = "--link";
+/// 0.9 menu text of [`WIN_LINK_KEY`].
+pub const LINK_LABEL: &str = "Tạo link Toss";
+/// 0.9 Explorer verb on folders: `"<exe>" --link "%1"` (the studio's quick link).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const WIN_LINK_KEY: &str = r"Software\Classes\Directory\shell\TossLink";
+
 /// Registry keys (under HKCU), the flag, and the placeholder Explorer substitutes:
 /// `%1` = the item right-clicked, `%V` = the folder whose background was right-clicked.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -76,6 +84,12 @@ pub fn win_entries(exe: &str) -> Vec<WinEntry> {
             icon: format!("\"{exe}\",0"),
             command: win_command(exe, flag, ph),
         })
+        .chain(std::iter::once(WinEntry {
+            key: WIN_LINK_KEY,
+            label: LINK_LABEL.to_string(),
+            icon: format!("\"{exe}\",0"),
+            command: win_command(exe, LINK_FLAG, "%1"),
+        }))
         .collect()
 }
 
@@ -172,7 +186,7 @@ mod imp {
                 }
             }
         } else {
-            for (key, _, _) in super::WIN_KEYS {
+            for key in super::WIN_KEYS.iter().map(|k| k.0).chain([super::WIN_LINK_KEY]) {
                 match hkcu.delete_subkey_all(key) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -224,7 +238,11 @@ mod tests {
     fn windows_entries() {
         let exe = r"C:\Users\Minh\AppData\Local\Toss\Toss.exe";
         let e = win_entries(exe);
-        assert_eq!(e.len(), 3);
+        assert_eq!(e.len(), 4);
+        // 0.9: folder → "Tạo link Toss" (copies the link, no window)
+        assert_eq!(e[3].key, r"Software\Classes\Directory\shell\TossLink");
+        assert_eq!(e[3].label, "Tạo link Toss");
+        assert_eq!(e[3].command, r#""C:\Users\Minh\AppData\Local\Toss\Toss.exe" --link "%1""#);
         assert_eq!(e[0].key, r"Software\Classes\Directory\shell\Toss");
         assert_eq!(
             e[0].command,
@@ -243,8 +261,10 @@ mod tests {
             e[2].command,
             r#""C:\Users\Minh\AppData\Local\Toss\Toss.exe" --send "%1""#
         );
-        for x in &e {
+        for x in &e[..3] {
             assert_eq!(x.label, "Gửi bằng Toss");
+        }
+        for x in &e {
             assert_eq!(x.icon, format!("\"{exe}\",0"));
         }
     }
@@ -268,7 +288,7 @@ mod tests {
     #[test]
     fn hooks_nsh_removes_the_same_keys() {
         let nsh = include_str!("../bundle/hooks.nsh");
-        for (key, _, _) in WIN_KEYS {
+        for key in WIN_KEYS.iter().map(|k| k.0).chain([WIN_LINK_KEY]) {
             assert!(
                 nsh.contains(&format!("DeleteRegKey HKCU \"{key}\"")),
                 "hooks.nsh must delete {key}"

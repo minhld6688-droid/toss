@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(s.feed(&[f(30, 300)], t0 + Duration::from_secs(460)).len(), 1, "settles at the new size");
         let empty = Found { files: 0, bytes: 0, ..f(0, 0) };
         let mut s = Settle::new(Duration::ZERO);
-        assert!(s.feed(&[empty.clone()], t0).is_empty());
+        assert!(s.feed(std::slice::from_ref(&empty), t0).is_empty());
         assert!(s.feed(&[empty], t0 + Duration::from_secs(1)).is_empty(), "empty folders never get a link");
     }
 }

@@ -16,7 +16,6 @@ mod shortlink;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };

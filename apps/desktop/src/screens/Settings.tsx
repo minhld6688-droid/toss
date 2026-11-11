@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { HostConfig, HostStatus, ReceivePolicy, TicketInfo } from "@contracts/ipc";
+import type { HostConfig, HostStatus, ReceivePolicy, StudioView, TicketInfo } from "@contracts/ipc";
 import { api, errorMessage, isMock } from "../lib/ipc";
 import { midTruncate, shortId } from "../lib/format";
 import { useStore } from "../lib/store";
@@ -109,7 +109,7 @@ function ReceiveSection() {
       {app.receive_policy === "everyone" && <Hint className="mt-2 !text-warn">Dùng wifi công cộng thì nên chọn “Chỉ danh bạ”: ai cùng mạng cũng gửi file vào máy bạn được.</Hint>}
 
       <div className="divide-y divide-line/10 mt-2">
-        <Row title="Bấm link là nhận luôn" hint="Tắt nếu muốn xem trước rồi mới bấm Nhận">
+        <Row title="Bấm link là nhận luôn" hint="Bật: tải ngay vào folder lần trước, không hỏi. Tắt: hỏi lưu vào đâu rồi mới tải">
           <Toggle on={app.auto_receive} label="Tự động nhận khi bấm link" onChange={(on) => guard(async () => { await api.set_auto_receive({ on }); patch({ auto_receive: on }); })} />
         </Row>
         <Row title="Hiện với máy LocalSend" hint="Điện thoại, máy tính dùng LocalSend thấy và gửi được cho bạn">
@@ -477,6 +477,57 @@ function RemoteSection() {
 
 // ---------------------------------------------------------------------------
 /** Everything that is not part of everyday use, in one collapsed block. */
+// ---------------------------------------------------------------------------
+// 0.9 Máy studio: one switch; the jobs folder is one of the "Folder cố định".
+const STUDIO_DAYS = [{ v: 7, t: "7 ngày" }, { v: 14, t: "14 ngày" }, { v: 30, t: "30 ngày" }, { v: 90, t: "90 ngày" }, { v: 0, t: "Không hết hạn" }];
+
+function StudioSection({ openAdvanced }: { openAdvanced: () => void }) {
+  const app = useStore((s) => s.app)!;
+  const patchApp = useStore((s) => s.patchApp);
+  const toast = useStore((s) => s.toast);
+  const [view, setView] = useState<StudioView | null>(null);
+  const roots = app.host?.roots ?? [];
+  useEffect(() => { api.studio_view().then(setView).catch(() => setView(null)); }, [app.host, app.studio_on]);
+  const root = view?.root && roots.some((r) => r.alias === view.root) ? view.root : roots[0]?.alias ?? "";
+  const days = view?.days ?? 30;
+  async function save(on: boolean, r: string, d: number) {
+    try {
+      const v = await api.studio_set({ on, root: r, days: d });
+      setView(v);
+      patchApp({ studio_on: v.on });
+      if (on && !app.studio_on) toast("Đã bật máy studio: xem link ở tab Links");
+    } catch (e) { toast(errorMessage(e), "error"); }
+  }
+  const rootPath = roots.find((r) => r.alias === root)?.path;
+  return (
+    <Section title="Máy studio">
+      <Row title="Chế độ máy studio" hint="Tự tạo link cho từng folder thợ, giữ máy luôn thức, hiện tab Links">
+        <Toggle on={!!app.studio_on} disabled={roots.length === 0} onChange={(v) => void save(v, root, days)} label="Chế độ máy studio" />
+      </Row>
+      {roots.length === 0 ? (
+        <div className="text-xs text-mute py-1">
+          Thêm thư mục Jobs (VD <span className="mono">D:\Jobs</span>) ở mục Folder cố định trước.{" "}
+          <button className="text-accent underline underline-offset-2" onClick={openAdvanced}>Mở Folder cố định</button>
+        </div>
+      ) : (
+        <>
+          <Row title="Thư mục Jobs" hint={rootPath ? midTruncate(rootPath, 18, 18) : undefined}>
+            <select className="input w-auto max-w-[45%]" value={root} onChange={(e) => void save(!!app.studio_on, e.target.value, days)} aria-label="Thư mục Jobs">
+              {roots.map((r) => <option key={r.alias} value={r.alias}>{r.alias}</option>)}
+            </select>
+          </Row>
+          <Row title="Link folder thợ hết hạn sau">
+            <select className="input w-auto" value={days} onChange={(e) => void save(!!app.studio_on, root, Number(e.target.value))} aria-label="Hạn link">
+              {STUDIO_DAYS.map((d) => <option key={d.v} value={d.v}>{d.t}</option>)}
+            </select>
+          </Row>
+          <Row title="Backup của editor về" hint={app.host?.return_root || "Chưa chọn"} />
+        </>
+      )}
+    </Section>
+  );
+}
+
 function Advanced({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   const app = useStore((s) => s.app)!;
   const reduce = useReducedMotion();
@@ -528,6 +579,7 @@ export function Settings() {
       <Words text="Cài đặt" accent={["đặt"]} className="text-[30px] mb-4" />
       <DeviceSection />
       <ReceiveSection />
+      <StudioSection openAdvanced={() => setAdv(true)} />
       <UpdateSection />
       <Advanced open={adv} onToggle={() => setAdv(!adv)} />
     </div>

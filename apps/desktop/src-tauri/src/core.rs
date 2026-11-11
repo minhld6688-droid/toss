@@ -109,6 +109,10 @@ fn on_removable_root(p: &Path) -> bool {
     false
 }
 
+#[path = "studio.rs"]
+mod studio;
+pub(crate) use studio::SCAN_EVERY as STUDIO_SCAN_EVERY;
+
 pub struct Core {
     data_dir: PathBuf,
     app: OnceLock<AppHandle>,
@@ -127,6 +131,8 @@ pub struct Core {
     short: Arc<ShortLinks>,
     /// v0.8: LocalSend bridge, its asks and transfers, received history.
     pub(crate) v08: V08,
+    /// 0.9: studio machine links and the jobs-folder watcher state.
+    studio: studio::Studio,
 }
 
 impl Core {
@@ -138,6 +144,7 @@ impl Core {
         let settings = Settings::load(&dir);
         let short = Arc::new(ShortLinks::load(&dir));
         let v08 = V08::new(&dir);
+        let studio = studio::Studio::load(&dir);
         Core {
             data_dir: dir,
             app: OnceLock::new(),
@@ -150,6 +157,7 @@ impl Core {
             port_fallback: StdMutex::new(None),
             short,
             v08,
+            studio,
         }
     }
 
@@ -261,6 +269,8 @@ impl Core {
         let s = self.settings();
         node.set_inbox_dir(self.inbox());
         node.set_receive_policy(s.receive_policy);
+        // 0.9: a studio machine must stay reachable.
+        node.set_stay_awake(s.studio.on);
         // Forward events before host mode starts emitting them.
         self.spawn_forwarder(&node);
         if let Some(h) = host {
@@ -459,6 +469,8 @@ impl Core {
             ls_enabled: s.ls_enabled,
             ls_port: self.v08.ls_port(),
             ls_trusted: s.ls_trusted.clone(),
+            last_get_dir: s.last_get_dir.clone(),
+            studio_on: s.studio.on,
         })
     }
 
@@ -845,7 +857,9 @@ impl Core {
         Ok(self.info(&t))
     }
 
-    pub async fn start_get(&self, ticket: String) -> Result<String> {
+    /// `dest`: the folder picked in the link sheet (remembered for next time);
+    /// none = the receive folder.
+    pub async fn start_get(&self, ticket: String, dest: Option<String>) -> Result<String> {
         let ticket = shortlink::expand(ticket.trim()).await?;
         let t =
             Ticket::from_str(ticket.trim()).map_err(|e| anyhow!("không đọc được link ({e})"))?;
@@ -858,7 +872,13 @@ impl Core {
         if t.is_expired() {
             bail!("Link đã hết hạn");
         }
-        let dest = self.inbox();
+        let dest = match dest.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()) {
+            Some(d) => {
+                self.update_settings(|s| s.last_get_dir = Some(d.clone()))?;
+                PathBuf::from(d)
+            }
+            None => self.inbox(),
+        };
         std::fs::create_dir_all(&dest)
             .with_context(|| format!("không tạo được thư mục {}", dest.display()))?;
         let node = self.node().await?;
@@ -891,13 +911,27 @@ impl Core {
     /// Core transfers ∪ v0.8 LocalSend transfers (same `TransferState` shape).
     pub async fn list_transfers(&self) -> Result<Vec<Value>> {
         let node = self.node().await?;
+        // 0.9: a send the receiver confirmed carries its receipt (backup → free up).
+        let receipts: HashMap<String, toss_core::ReceiptSummary> =
+            node.receipts().into_iter().map(|r| (r.id.clone(), r)).collect();
         let mut v: Vec<Value> = node
             .transfers()
             .iter()
-            .filter_map(|t| serde_json::to_value(t).ok())
+            .filter_map(|t| {
+                let mut v = serde_json::to_value(t).ok()?;
+                if let Some(r) = receipts.get(&t.id) {
+                    v["receipt"] = serde_json::to_value(r).unwrap_or_default();
+                }
+                Some(v)
+            })
             .collect();
         v.extend(self.v08.transfer_values());
         Ok(v)
+    }
+
+    /// 0.9: deletes the local copies of a confirmed backup (unchanged files only).
+    pub async fn free_up(&self, id: String) -> Result<toss_core::Freed> {
+        self.node().await?.free_up(&id).await
     }
 
     pub async fn pause(&self, id: String) -> Result<()> {

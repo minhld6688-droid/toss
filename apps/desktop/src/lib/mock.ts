@@ -9,9 +9,10 @@
 //         2.5 s in, "PC dựng phim" on the first "Quét lại". Demo mode (no switches): a LocalSend ask after 6 s, a text message after 16 s.
 //         ?quiet=1 (no automatic ask / text) ?incoming=1|2 (Toss stranger ask, +LocalSend ask) at 0.6 s ?text=1 (text message at 0.6 s)
 //         ?nearby=0 (nothing around) ?lsport=busy (53317 taken → 53318) ?policy=off|everyone ?fw=ok|missing (Windows firewall)
+//         0.9: ?studio=1 (studio machine: Jobs root, Links tab, sample links) ?studioerr=<msg> ?lastdir=<path> (remembered download folder)
 import type {
   AppState, Commands, CommandsV05, CommandsV051, CommandsV08, ConnectReport, Contact, Incoming, IncomingPush, InviteInfo, Nearby, DirEntry, FirewallState, HostConfig, HostStatus, JobRecord,
-  NetConfig, NetDiagUi, Received, TicketInfo, TicketSpec, TransferEvent, TransferState, UpdateInfo,
+  NetConfig, NetDiagUi, Received, StudioLink, StudioView, TicketInfo, TicketSpec, TransferEvent, TransferState, UpdateInfo,
 } from "@contracts/ipc";
 import type { ExtraCommands } from "./ipc-extra";
 
@@ -100,10 +101,16 @@ const issued = new Map<string, TicketInfo>();
 
 // ---- state ---------------------------------------------------------------
 const params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
-const hostOn = params.get("host") === "1";
+const studioOn = params.get("studio") === "1";
+const hostOn = params.get("host") === "1" || studioOn;
 const wizard = params.get("wizard") === "1";
 
-const demoHost: HostConfig = {
+const demoHost: HostConfig = studioOn ? {
+  roots: [{ alias: "Jobs", path: "D:\\Jobs" }],
+  return_root: "E:\\Backup",
+  max_parallel_jobs: 2,
+  bind_port: 41820,
+} : {
   roots: [
     { alias: "RAW", path: "D:\\Studio\\RAW" },
     { alias: "Retouch", path: "D:\\Studio\\Retouch" },
@@ -135,6 +142,8 @@ const state: AppState = {
   ls_enabled: true,
   ls_port: params.get("lsport") === "busy" ? 53318 : 53317,
   ls_trusted: [{ fingerprint: "a91c55d0e3b7", alias: "Galaxy của Lan" }],
+  last_get_dir: params.get("lastdir") ?? null,
+  studio_on: studioOn,
 };
 let adminTicket: string | null = params.get("remote") === "1" ? "toss1mockadmin" + "abcdefghijklmnopqrstuvwxyz234567" : null;
 
@@ -160,6 +169,12 @@ function seed() {
   transfers.set("a2-0002", tfBase({
     id: "a2-0002", job: "12A3 - Retouch (trả)", op: "put", status: "done", bytes_done: 1.1 * GB, bytes_total: 1.1 * GB,
     files_done: 96, files_total: 96, path: "relay", rtt_ms: 164, started_at: now() - 7200,
+  }));
+  // 0.9 backup to the studio, confirmed: can be freed
+  transfers.set("b1-0005", tfBase({
+    id: "b1-0005", job: "Backup · Ngọc Anh", op: "put", peer: "Studio 2007", status: "done", bytes_done: 52.4 * GB, bytes_total: 52.4 * GB,
+    files_done: 1874, files_total: 1874, path: "direct", rtt_ms: 9, started_at: now() - 5400,
+    receipt: { id: "b1-0005", job: "Backup · Ngọc Anh", to: "Studio 2007", at: now() - 3300, files: 1874, bytes: 52.4 * GB, freed: null },
   }));
   transfers.set("a3-0003", tfBase({
     id: "a3-0003", job: "12A3 - RAW", status: "running", bytes_done: 1.7 * GB, bytes_total: 5.6 * GB,
@@ -524,9 +539,62 @@ function mockReport(): ConnectReport {
   };
 }
 
+// ---- 0.9 studio ------------------------------------------------------------
+const studioLinks: StudioLink[] = [];
+let studioDays = 30;
+function seedStudio() {
+  if (!studioOn) return;
+  const mk = (job: string, shooter: string, gb: number, files: number, ago: number, extra: Partial<StudioLink> = {}): StudioLink => ({
+    kind: "shooter", id: hex(32), url: `https://toss-link.vercel.app/${fakeCode(job + shooter)}`, job, shooter,
+    rel: `2026/11/${job}/1_RAW/${shooter}`, files, bytes: gb * GB, at: now() - ago, exp: now() - ago + 30 * 86400, revoked: false, last: null, active: [], ...extra,
+  });
+  const j1 = "10.11.26 12A1 Doan Ket HBT", j2 = "09.11.26 11A6 Chu Van An";
+  studioLinks.push(
+    mk(j2, "Huu Duc CAV", 38.6, 1502, 2 * 86400, { last: { at: now() - 86400, device: "Mac Ngọc Anh", op: "get", files: 1502, bytes: 38.6 * GB, ok: true, msg: "" } }),
+    mk(j2, "Minhfatz", 44.1, 1730, 2 * 86400 - 300, { last: { at: now() - 80000, device: "PC Tuấn", op: "get", files: 1730, bytes: 44.1 * GB, ok: true, msg: "" } }),
+    mk(j1, "Tuan Future", 48.2, 1912, 3 * 3600, { active: [{ peer: "Mac Ngọc Anh", op: "get", bytes_done: 21.3 * GB, bytes_total: 48.2 * GB, speed_bps: 41 * MB, path: "direct", status: "running" }] }),
+    mk(j1, "Minhfatz", 31.0, 1204, 3 * 3600 - 120),
+    mk(j1, "BuiGiaPhu PTS", 56.7, 2210, 240),
+    { kind: "backup", id: hex(32), url: `https://toss-link.vercel.app/${fakeCode("backup ngoc anh")}`, job: "Ngọc Anh", shooter: "", rel: "", files: 0, bytes: 0, at: now() - 9 * 86400, revoked: false, exp: 0,
+      last: { at: now() - 3300, device: "Mac Ngọc Anh", op: "put", files: 1874, bytes: 52.4 * GB, ok: true, msg: "" }, active: [] },
+  );
+}
+function studioView(): StudioView {
+  return {
+    on: studioOn, root: "Jobs", root_path: "D:\\Jobs", days: studioDays, roots: state.host?.roots.map((r) => r.alias) ?? [],
+    return_root: state.host?.return_root ?? null, parallel: state.host?.max_parallel_jobs ?? null,
+    links: structuredClone(studioLinks).sort((a, b) => b.at - a.at), last_scan: now() - 12, error: params.get("studioerr") ?? null, awake: studioOn,
+  };
+}
+
 // ---- api -----------------------------------------------------------------
 export const mockApi: Commands & CommandsV05 & CommandsV051 & CommandsV08 & ExtraCommands = {
   async get_state() { await sleep(60); return structuredClone(state); },
+  async studio_view() { await sleep(80); return studioView(); },
+  async studio_set({ on, days }) { state.studio_on = on; studioDays = days; return studioView(); },
+  async studio_scan() { await sleep(400); return studioView(); },
+  async studio_link_folder({ path }) {
+    const name = path.split(/[\\/]/).filter(Boolean).pop() ?? "Folder";
+    const l: StudioLink = { kind: "folder", id: hex(32), url: `https://toss-link.vercel.app/${fakeCode(path)}`, job: name, shooter: "", rel: "", files: 212, bytes: 7.4 * GB, at: now(), revoked: false, active: [] };
+    studioLinks.push(l); emit("studio:links", {}); return structuredClone(l);
+  },
+  async studio_backup_link({ editor }) {
+    const name = editor.trim();
+    if (!name) throw new Error("Nhập tên editor");
+    const old = studioLinks.find((l) => l.kind === "backup" && l.job.toLowerCase() === name.toLowerCase() && !l.revoked);
+    if (old) return structuredClone(old);
+    const l: StudioLink = { kind: "backup", id: hex(32), url: `https://toss-link.vercel.app/${fakeCode("backup " + name)}`, job: name, shooter: "", rel: "", files: 0, bytes: 0, at: now(), revoked: false, exp: 0, active: [] };
+    studioLinks.push(l); return structuredClone(l);
+  },
+  async studio_remove({ id }) { const i = studioLinks.findIndex((l) => l.id === id); if (i >= 0) studioLinks.splice(i, 1); return studioView(); },
+  async free_up({ id }) {
+    await sleep(700);
+    const t = transfers.get(id);
+    if (!t?.receipt) throw new Error("Không có biên nhận");
+    const freed = { at: now(), files: t.receipt.files - 1, bytes: t.receipt.bytes - 24 * MB, kept: ["/Users/ngocanh/Jobs/12A1/Color/DSC_0412.jpg"] };
+    t.receipt.freed = freed;
+    return freed;
+  },
   async finish_setup({ device_name, dest_dir }) {
     state.device_name = device_name; state.dest_dir = dest_dir; state.first_run = false; return structuredClone(state);
   },
@@ -832,5 +900,6 @@ seedShares();
 if (params.get("restored") === "1") seedRestored();
 seedNearby();
 seedReceived();
+seedStudio();
 // screenshot / test hook (mock only): lets a script fire shell events such as drop:hover / drop:over
 (window as unknown as { __tossMock?: unknown }).__tossMock = { emit };

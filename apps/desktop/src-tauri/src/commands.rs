@@ -213,8 +213,50 @@ pub async fn parse_ticket(core: C<'_>, text: String) -> Res<TicketInfo> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn start_get(core: C<'_>, ticket: String) -> Res<String> {
-    Ok(core.start_get(ticket).await?)
+pub async fn start_get(core: C<'_>, ticket: String, dest: Option<String>) -> Res<String> {
+    Ok(core.start_get(ticket, dest).await?)
+}
+
+// ---- 0.9 studio machine and backups -------------------------------------------------------------
+#[tauri::command(rename_all = "snake_case")]
+pub async fn studio_view(core: C<'_>) -> Res<Value> {
+    Ok(core.studio_view().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn studio_set(core: C<'_>, on: bool, root: String, days: u32) -> Res<Value> {
+    Ok(core.studio_set(on, root, days).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn studio_scan(core: C<'_>) -> Res<Value> {
+    core.studio_tick().await;
+    Ok(core.studio_view().await?)
+}
+
+/// Link for a folder (right-click or the Links screen); the link is copied too.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn studio_link_folder(app: AppHandle, core: C<'_>, path: String) -> Res<Value> {
+    let l = core.studio_link_folder(path).await?;
+    let _ = app.clipboard().write_text(l.url.clone());
+    serde_json::to_value(l).map_err(|e| CmdError(e.to_string()))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn studio_backup_link(core: C<'_>, editor: String) -> Res<Value> {
+    let l = core.studio_backup_link(editor).await?;
+    serde_json::to_value(l).map_err(|e| CmdError(e.to_string()))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn studio_remove(core: C<'_>, id: String) -> Res<Value> {
+    Ok(core.studio_remove(id).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn free_up(core: C<'_>, id: String) -> Res<Value> {
+    let f = core.free_up(id).await?;
+    serde_json::to_value(f).map_err(|e| CmdError(e.to_string()))
 }
 
 #[tauri::command(rename_all = "snake_case")]
