@@ -183,6 +183,14 @@ impl Engine {
                 "contact": false, "online": true, "nearby": true, "trusted": false, "addrs": p.addrs,
             }));
         }
+        // 0.9: a studio's backup link is a place to drop folders into, like a person
+        for b in self.settings.get()["backups"].as_array().into_iter().flatten() {
+            let Some(id) = b["id"].as_str() else { continue };
+            out.push(json!({
+                "key": format!("b:{id}"), "name": b["name"], "kind": "backup", "platform": "backup",
+                "contact": true, "online": true, "nearby": false, "trusted": true,
+            }));
+        }
         if let Some(ls) = &self.ls {
             let mut seen = Vec::new();
             for d in ls.devices() {
@@ -212,6 +220,21 @@ impl Engine {
         }
         if let Some(id) = key.strip_prefix("t:") {
             return Ok(self.node.send_to_peer(id, paths).await?.id);
+        }
+        if let Some(id) = key.strip_prefix("b:") {
+            let s = self.settings.get();
+            let text = s["backups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|b| b["id"].as_str() == Some(id))
+                .and_then(|b| b["ticket"].as_str().map(str::to_string))
+                .ok_or_else(|| anyhow!("Không còn link backup này"))?;
+            let t = Ticket::from_str(&text).map_err(|e| anyhow!("Link backup hỏng ({e})"))?;
+            if t.is_expired() {
+                bail!("Link backup đã hết hạn, nhờ studio tạo link mới");
+            }
+            return Ok(self.node.put(t, paths).await?.id);
         }
         let fp = key.strip_prefix("l:").ok_or_else(|| anyhow!("Không nhận ra người nhận"))?;
         let ls = self.ls.as_ref().ok_or_else(|| anyhow!("LocalSend đang tắt"))?;
@@ -278,15 +301,21 @@ impl Engine {
 
     // ---- transfers: Toss and LocalSend reach the host in one shape
 
-    fn snapshot(t: &toss_core::TransferState) -> Value {
+    fn snapshot(&self, t: &toss_core::TransferState) -> Value {
         let mut v = serde_json::to_value(t).unwrap_or_default();
         // A push is a put on both ends: only the side that started it is sending
         v["outgoing"] = json!(v["side"] == "client" && v["op"] != "get");
+        // 0.9: the receiver confirmed every byte: the local copies may be freed
+        if v["outgoing"] == json!(true) && t.status == toss_core::transfer::Status::Done {
+            if let Ok(r) = toss_core::receipt::load(&self.data, &t.id) {
+                v["receipt"] = serde_json::to_value(r.summary()).unwrap_or_default();
+            }
+        }
         v
     }
 
     fn transfers(&self) -> Value {
-        let mut v: Vec<Value> = self.node.transfers().iter().map(Self::snapshot).collect();
+        let mut v: Vec<Value> = self.node.transfers().iter().map(|t| self.snapshot(t)).collect();
         v.extend(self.ls_transfers.lock().unwrap().values().cloned());
         Value::Array(v)
     }
@@ -305,7 +334,7 @@ impl Engine {
             _ => {
                 if let Some(id) = v["id"].as_str() {
                     if let Some(t) = self.node.transfer(&id.to_string()) {
-                        event(&self.out, "transfer", Self::snapshot(&t));
+                        event(&self.out, "transfer", self.snapshot(&t));
                     }
                 }
             }
@@ -422,6 +451,9 @@ impl Engine {
             return Ok(json!({ "kind": "contact", "name": c.name }));
         }
         let t = Ticket::from_str(word).map_err(|e| anyhow!("Không đọc được link ({e})"))?;
+        if !t.body.admin && t.body.put && !t.body.get {
+            return self.keep_backup(&t, word);
+        }
         if t.body.admin || !t.body.get {
             bail!("Link này không cho nhận file");
         }
@@ -431,6 +463,42 @@ impl Engine {
         let dest = dest.unwrap_or_else(|| self.settings.dest());
         std::fs::create_dir_all(&dest)?;
         Ok(json!({ "kind": "transfer", "id": self.node.get(t, dest).await?.id }))
+    }
+
+    /// 0.9: a put-only link (a studio's backup link for this editor) is kept as a place to
+    /// drop folders into; the same link again replaces the old entry.
+    fn keep_backup(&self, t: &Ticket, text: &str) -> Result<Value> {
+        if t.is_expired() {
+            bail!("Link đã hết hạn");
+        }
+        let id = t.id_hex();
+        let name = t.body.job.clone();
+        self.settings.update(|s| {
+            if !s["backups"].is_array() {
+                s["backups"] = json!([]);
+            }
+            let list = s["backups"].as_array_mut().unwrap();
+            list.retain(|b| b["id"].as_str() != Some(id.as_str()));
+            list.push(json!({ "id": id, "name": name, "ticket": text, "at": Self::now() }));
+        })?;
+        event(&self.out, "peers", json!({}));
+        Ok(json!({ "kind": "backup", "name": name, "id": id }))
+    }
+
+    /// What a pasted or clicked link is, without acting on it (so the app can ask first).
+    async fn peek(&self, text: &str) -> Result<Value> {
+        let text = shortlink::expand(text.trim()).await?;
+        let word = text
+            .split(|c: char| c.is_whitespace() || c == '#' || c == '/')
+            .find(|w| w.starts_with("toss1") || w.starts_with("tossinv"))
+            .unwrap_or(&text)
+            .to_string();
+        if word.starts_with(toss_core::contacts::INVITE_PREFIX) {
+            return Ok(json!({ "kind": "invite", "text": word }));
+        }
+        let t = Ticket::from_str(&word).map_err(|e| anyhow!("Không đọc được link ({e})"))?;
+        let kind = if t.body.admin { "admin" } else if t.body.get { "get" } else if t.body.put { "put" } else { "none" };
+        Ok(json!({ "kind": kind, "job": t.body.job, "exp": t.body.exp, "expired": t.is_expired(), "text": word }))
     }
 
     // ---- requests
@@ -530,6 +598,18 @@ impl Engine {
                 json!({ "url": url, "name": i.name })
             }
             "open" => self.open(&s("text"), r["dest"].as_str().map(PathBuf::from)).await?,
+            "peek" => self.peek(&s("text")).await?,
+            "free" => serde_json::to_value(self.node.free_up(&tid).await?)?,
+            "forget_backup" => {
+                let id = s("peer").trim_start_matches("b:").to_string();
+                self.settings.update(|v| {
+                    if let Some(list) = v["backups"].as_array_mut() {
+                        list.retain(|b| b["id"].as_str() != Some(id.as_str()));
+                    }
+                })?;
+                event(&self.out, "peers", json!({}));
+                json!(true)
+            }
             "rename" => {
                 self.node.rename_contact(s("peer").trim_start_matches("t:"), &s("name"))?;
                 json!(true)
