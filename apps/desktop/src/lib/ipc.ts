@@ -24,6 +24,8 @@ const COMMAND_NAMES: (keyof AllCommands)[] = [
   // v0.8 nearby + LocalSend
   "list_nearby", "rescan_nearby", "send_to", "send_text", "list_incoming", "answer_incoming", "set_receive_policy", "set_ls_enabled",
   "forget_trusted", "list_received", "resend", "pick_files", "web_share_start", "web_share_stop", "request_local_network",
+  // 0.9 studio pipeline
+  "studio_view", "studio_set", "studio_scan", "studio_link_folder", "studio_backup_link", "studio_remove", "free_up",
 ];
 
 function errText(e: unknown): string {

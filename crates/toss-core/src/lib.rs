@@ -10,14 +10,17 @@
 
 #![warn(missing_docs)]
 
+pub mod awake;
 pub mod contacts;
 pub mod ctl;
 pub mod fsutil;
 pub mod jobs;
+pub mod jobwatch;
 pub mod nearby;
 pub mod net;
 pub mod node;
 pub mod paths;
+pub mod receipt;
 pub mod resume;
 pub mod ticket;
 pub mod transfer;
@@ -96,6 +99,7 @@ pub use jobs::{JobEvent, JobRecord};
 pub use nearby::{NearbyPeer, ReceivePolicy};
 pub use net::{ConnectReport, NetConfig, NetDiag, Tuning};
 pub use node::{HostConfig, Node, NodeConfig, Root};
+pub use receipt::{Freed, Receipt, ReceiptSummary};
 pub use ticket::{HostAddr, Ticket, TicketBody, TicketSpec};
 pub use transfer::{ConnPath, Transfer, TransferEvent, TransferId, TransferState};
 

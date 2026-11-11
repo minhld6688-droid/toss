@@ -5,6 +5,7 @@ import { Screen, scheduleNearbyRefresh, useStore } from "./lib/store";
 import { Home } from "./screens/Home";
 import { Transfers } from "./screens/Transfers";
 import { Settings } from "./screens/Settings";
+import { Links } from "./screens/Links";
 import { TicketSheet } from "./components/TicketSheet";
 import { ShareView } from "./components/ShareView";
 import { SendPicker } from "./components/SendPicker";
@@ -18,8 +19,10 @@ import { TossMark } from "./components/TossMark";
 import { usePointerFx } from "./lib/pointer-fx";
 import { listenUpdates, useUpdate } from "./lib/update";
 
-const TABS: { id: Screen; label: string; icon: "home" | "transfer" | "settings" }[] = [
+const ALL_TABS: { id: Screen; label: string; icon: "home" | "transfer" | "settings" | "link" }[] = [
   { id: "home", label: "Trang chính", icon: "home" },
+  // 0.9: only on the studio machine
+  { id: "links", label: "Links", icon: "link" },
   { id: "transfers", label: "Chuyển file", icon: "transfer" },
   { id: "settings", label: "Cài đặt", icon: "settings" },
 ];
@@ -45,7 +48,7 @@ export default function App() {
   usePointerFx();
 
   // direction of the tab change drives the screen transition
-  const order: Screen[] = ["home", "transfers", "settings"];
+  const order: Screen[] = ["home", "links", "transfers", "settings"];
   const prev = useRef(screen);
   const mainRef = useRef<HTMLElement>(null);
   const dir = order.indexOf(screen) >= order.indexOf(prev.current) ? 1 : -1;
@@ -169,6 +172,7 @@ export default function App() {
             transition={{ duration: 0.55, ease: EASE }}
           >
             {screen === "home" && <Home />}
+            {screen === "links" && <Links />}
             {screen === "transfers" && <Transfers />}
             {screen === "settings" && <Settings />}
           </motion.div>
@@ -178,7 +182,7 @@ export default function App() {
       <nav className="fixed bottom-3 left-0 right-0 z-20 flex justify-center pointer-events-none">
         <LayoutGroup id="tabs">
         <div className="glass pointer-events-auto rounded-full p-1 flex gap-0.5">
-          {TABS.map((t) => {
+          {ALL_TABS.filter((t) => t.id !== "links" || app.studio_on || screen === "links").map((t) => {
             const on = screen === t.id;
             return (
               <button

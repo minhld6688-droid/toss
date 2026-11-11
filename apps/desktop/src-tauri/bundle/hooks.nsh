@@ -44,6 +44,7 @@
   DeleteRegKey HKCU "Software\Classes\Directory\shell\Toss"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\Toss"
   DeleteRegKey HKCU "Software\Classes\*\shell\Toss"
+  DeleteRegKey HKCU "Software\Classes\Directory\shell\TossLink"
   ; v0.8 "Send to -> Toss" shortcut (per user, %APPDATA%; $APPDATA may point to the
   ; all-users folder in a per-machine uninstall, so read the variable).
   ReadEnvStr $1 APPDATA

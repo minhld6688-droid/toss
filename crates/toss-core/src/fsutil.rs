@@ -361,9 +361,66 @@ pub fn numbered_name(name: &str, n: u32) -> String {
     }
 }
 
+/// Test hook: when non-zero, [`available_space`] reports this many bytes.
+#[doc(hidden)]
+pub static FAKE_FREE_SPACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bytes the current user can still write on the volume holding `path`
+/// (`path` or its nearest existing parent).
+pub fn available_space(path: &Path) -> std::io::Result<u64> {
+    let fake = FAKE_FREE_SPACE.load(Ordering::Relaxed);
+    if fake > 0 {
+        return Ok(fake);
+    }
+    let mut p = path;
+    while !p.exists() {
+        p = p.parent().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    }
+    free_on(p)
+}
+
+#[cfg(unix)]
+fn free_on(p: &Path) -> std::io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Ok((s.f_bavail as u64).saturating_mul(s.f_frsize as u64))
+}
+
+#[cfg(windows)]
+fn free_on(p: &Path) -> std::io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, free_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let (mut free, mut total, mut all_free) = (0u64, 0u64, 0u64);
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut all_free) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(free)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn free_on(_p: &Path) -> std::io::Result<u64> {
+    Ok(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_space_is_real() {
+        let dir = std::env::temp_dir().join("toss-free-space").join("not/created/yet");
+        assert!(available_space(&dir).unwrap() > 0);
+    }
 
     #[test]
     fn numbered() {

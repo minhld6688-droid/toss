@@ -244,6 +244,8 @@ async fn deny(conn: &Connection, send: &mut iroh::endpoint::SendStream, reason: 
 
 /// Handles one incoming `toss/xfer/1` connection.
 pub(crate) async fn handle_xfer(inner: Arc<Inner>, conn: Connection) {
+    // Serving or receiving: the machine must not fall asleep mid-transfer.
+    let _awake = crate::awake::hold();
     let remote = conn.remote_id();
     let hello = tokio::time::timeout(xfer::pre_auth_timeout(), async {
         let (send, mut recv) = conn.accept_bi().await?;

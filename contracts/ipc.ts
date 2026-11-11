@@ -29,6 +29,9 @@ export interface AppState {
   ls_enabled: boolean;                                     // visible to / reachable by LocalSend apps (default true)
   ls_port: number | null;                                  // LocalSend port in use; null until the bridge is up
   ls_trusted: { fingerprint: string; alias: string }[];    // LocalSend devices that always get accepted
+  // 0.9 studio pipeline (CHANGES.md 0.9)
+  last_get_dir?: string | null;                            // folder last chosen for a download, offered first
+  studio_on?: boolean;                                     // studio machine mode: auto links, Links tab, always awake
 }
 
 export interface Root { alias: string; path: string }
@@ -52,6 +55,7 @@ export interface TransferState {
   speed_bps: number; eta_s: number | null; path: ConnPath; rtt_ms: number | null; streams: number; dest: string | null; error: string | null;
   started_at: number;
   contact: string | null;       // v0.5: contact id when this transfer is a push to / from a contact
+  receipt?: ReceiptSummary | null;  // 0.9: a send the receiver confirmed byte for byte (backup → free up)
 }
 
 export interface JobRecord {
@@ -108,7 +112,7 @@ export interface Commands {
 
   // tickets / transfers (client)
   parse_ticket(args: { text: string }): Promise<TicketInfo>;                 // throws on bad input
-  start_get(args: { ticket: string }): Promise<string>;                      // returns transfer id
+  start_get(args: { ticket: string; dest?: string | null }): Promise<string>; // returns transfer id; 0.9 dest = folder picked in the sheet (remembered)
   start_put(args: { ticket: string; paths: string[] }): Promise<string>;
   list_transfers(): Promise<TransferState[]>;
   pause(args: { id: string }): Promise<void>;
@@ -282,3 +286,28 @@ export type EventsV08 = {
   "text": TextMsg;
   "ls:port": { port: number; fallback: boolean };
 };
+
+// ---- 0.9 studio pipeline --------------------------------------------------------------------------
+
+/** What `free_up` did. */
+export interface Freed { at: number; files: number; bytes: number; kept: string[] }
+
+/** A confirmed backup: the receiver checked every file's blake3 and synced it. */
+export interface ReceiptSummary { id: string; job: string; to: string; at: number; files: number; bytes: number; freed: Freed | null }
+
+/** One link the studio handed out. kind: "shooter" (auto, …/1_RAW/<thợ>), "folder" (right-click), "backup" (put-only, per editor). */
+export interface StudioLink {
+  kind: "shooter" | "folder" | "backup";
+  id: string; url: string; job: string; shooter: string; rel: string; files: number; bytes: number; at: number;
+  revoked?: boolean; exp?: number;
+  last?: JobRecord["last"];
+  /** downloads / backups moving right now */
+  active?: { peer: string; op: Op; bytes_done: number; bytes_total: number; speed_bps: number; path: ConnPath; status: Status }[];
+}
+
+/** The Links screen. */
+export interface StudioView {
+  on: boolean; root: string; root_path: string | null; days: number; roots: string[];
+  return_root: string | null; parallel: number | null;
+  links: StudioLink[]; last_scan: number; error: string | null; awake: boolean;
+}

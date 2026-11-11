@@ -16,6 +16,16 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
   const doneDest = useStore((s) => Object.values(s.transfers).find((t) => t.op === "get" && t.status === "done" && t.job === info.job && t.dest)?.dest ?? null);
   const [busy, setBusy] = useState(false);
   const exp = fmtExpiry(info.exp);
+  // 0.9: where this download goes; the last choice comes first
+  const app = useStore((s) => s.app);
+  const patchApp = useStore((s) => s.patchApp);
+  const [dest, setDest] = useState<string>(app?.last_get_dir || app?.dest_dir || "");
+  async function changeDest() {
+    try {
+      const p = await api.pick_folder({ title: `Lưu “${info.job}” vào đâu?` });
+      if (p) setDest(p);
+    } catch (e) { toast(errorMessage(e), "error"); }
+  }
 
   const fly = useStore((s) => s.fly);
 
@@ -36,7 +46,10 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
     }
   }
 
-  const doGet = (e?: { currentTarget: Element }) => run(() => api.start_get({ ticket: info.ticket }), "Đang nhận file…", e?.currentTarget);
+  const doGet = (e?: { currentTarget: Element }) => run(async () => {
+    await api.start_get({ ticket: info.ticket, dest: dest || null });
+    if (dest) patchApp({ last_get_dir: dest });
+  }, "Đang nhận file…", e?.currentTarget);
   const doPut = (paths: string[], from?: Element | null) => run(() => api.start_put({ ticket: info.ticket, paths }), "Đang gửi lại file…", from);
   async function pick() {
     const p = await api.pick_folder({ title: "Chọn folder để gửi lại" });
@@ -61,6 +74,18 @@ export function TicketSheet({ info }: { info: TicketInfo }) {
 
       {note && (
         <div className={`rounded-[12px] text-sm px-3 py-2 mb-3 ${note.kind === "error" ? "bg-bad/10 text-bad" : "bg-ok/10 text-ok"}`}>{note.text}</div>
+      )}
+
+      {info.get && !exp.expired && (
+        <div className="rounded-[14px] hair bg-line/[0.04] px-3 py-2.5 mb-3 flex items-center gap-2.5">
+          <Icon name="folder" className="w-4 h-4 text-mute shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] text-mute">Lưu vào</div>
+            <div className="mono text-xs truncate selectable" title={dest}>{dest || "Thư mục nhận mặc định"}</div>
+            <div className="text-[11px] text-mute truncate">Tạo folder “{info.job}” trong đây</div>
+          </div>
+          <button className="btn shrink-0" disabled={busy} onClick={() => void changeDest()}>Đổi…</button>
+        </div>
       )}
 
       {info.get && (

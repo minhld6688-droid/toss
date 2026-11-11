@@ -17,7 +17,7 @@ use tauri::{
 use crate::{
     config,
     core::Core,
-    ctxmenu::{SEND_FLAG, SHARE_FLAG},
+    ctxmenu::{LINK_FLAG, SEND_FLAG, SHARE_FLAG},
 };
 
 /// Max size of a `.toss` file we are willing to read (a ticket is ~330 chars).
@@ -266,6 +266,8 @@ pub fn ticket_from_file(path: &str) -> Option<String> {
 pub struct Args {
     /// `--share <path>`.
     pub share: Option<String>,
+    /// 0.9 `--link <folder>` (Explorer "Tạo link Toss").
+    pub link: Option<String>,
     /// `--send <items…>` (right-click on files, Send to, macOS Quick Action) and bare existing
     /// files / folders (dropped on the exe, "Open with"), absolute.
     pub send: Vec<String>,
@@ -281,6 +283,14 @@ pub fn parse_args(args: &[String], cwd: &Path) -> Args {
     };
     if out.share.is_some() {
         return out;
+    }
+    if let Some(i) = args.iter().skip(1).position(|a| a == LINK_FLAG) {
+        if let Some(p) = args.get(i + 2).filter(|p| !p.trim().is_empty()) {
+            let p = Path::new(p.trim());
+            let p = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+            out.link = Some(p.to_string_lossy().into_owned());
+            return out;
+        }
     }
     let mut sending = false;
     for a in args.iter().skip(1) {
@@ -321,6 +331,10 @@ pub fn handle_args(app: &AppHandle, args: &[String], cwd: &Path) -> bool {
         deliver_share(app, &dir, cwd);
         return true;
     }
+    if let Some(dir) = a.link {
+        make_link(app, dir);
+        return true;
+    }
     for l in &a.links {
         match invite_from_url(l) {
             Some(i) => deliver_invite(app, i),
@@ -335,6 +349,32 @@ pub fn handle_args(app: &AppHandle, args: &[String], cwd: &Path) -> bool {
         deliver_send_batched(app, a.send);
     }
     handled
+}
+
+/// 0.9 right-click "Tạo link Toss": the folder's link goes straight to the clipboard,
+/// with a notification (the window stays hidden; the Links screen lists it).
+fn make_link(app: &AppHandle, dir: String) {
+    if !app.state::<Shell>().first_delivery(&format!("link\u{0}{dir}")) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_clipboard_manager::ClipboardExt as _;
+        let core = app.state::<std::sync::Arc<crate::core::Core>>().inner().clone();
+        let name = Path::new(&dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match core.studio_link_folder(dir.clone()).await {
+            Ok(l) => {
+                let copied = app.clipboard().write_text(l.url.clone()).is_ok();
+                let body = if copied { format!("Đã chép link “{name}”, dán vào 2007ops") } else { format!("Link “{name}”: {}", l.url) };
+                crate::core::notify(&app, &body);
+                let _ = app.emit("studio:links", json!({}));
+            }
+            Err(e) => {
+                tracing::warn!("--link {dir:?}: {e:#}");
+                crate::core::notify(&app, &format!("Không tạo được link “{name}”: {e:#}"));
+            }
+        }
+    });
 }
 
 /// Items from consecutive launches within `SEND_BATCH` go to the UI as one `send`.
@@ -639,6 +679,13 @@ mod tests {
         let a = parse_args(&argv(&["--share", &abs("a.jpg")]), &dir);
         assert_eq!(a.share, Some(abs("a.jpg")));
         assert!(parse_args(&argv(&["--hidden"]), &dir) == Args::default());
+        // 0.9 Explorer "Tạo link Toss": the folder after --link, relative paths from cwd
+        let a = parse_args(&argv(&["--link", &abs("Lớp 12A3")]), &dir);
+        assert_eq!(a.link, Some(abs("Lớp 12A3")));
+        assert!(a.send.is_empty() && a.share.is_none());
+        let a = parse_args(&argv(&["--link", "Lớp 12A3"]), &dir);
+        assert_eq!(a.link, Some(abs("Lớp 12A3")));
+        assert_eq!(parse_args(&argv(&["--link"]), &dir).link, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -135,6 +135,13 @@ pub fn run() {
             commands::web_share_start,
             commands::web_share_stop,
             commands::request_local_network,
+            commands::studio_view,
+            commands::studio_set,
+            commands::studio_scan,
+            commands::studio_link_folder,
+            commands::studio_backup_link,
+            commands::studio_remove,
+            commands::free_up,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -161,6 +168,15 @@ pub fn run() {
 
             // Start the P2P node and the LocalSend bridge in the background; commands also
             // start the node lazily.
+            // 0.9 studio machine: look at the jobs folder every half minute.
+            let c = setup_core.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(crate::core::STUDIO_SCAN_EVERY).await;
+                    c.studio_tick().await;
+                }
+            });
+
             let c = setup_core.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = c.node().await {

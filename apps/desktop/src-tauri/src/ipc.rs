@@ -45,6 +45,10 @@ pub struct AppState {
     pub ls_port: Option<u16>,
     /// v0.8: LocalSend devices accepted without asking.
     pub ls_trusted: Vec<crate::settings::LsTrusted>,
+    /// 0.9: folder last chosen for a download (the link sheet offers it first).
+    pub last_get_dir: Option<String>,
+    /// 0.9: studio machine mode on (the Links tab shows).
+    pub studio_on: bool,
 }
 
 /// v0.4 `get_diagnostics`: the core snapshot plus what only the shell can see.

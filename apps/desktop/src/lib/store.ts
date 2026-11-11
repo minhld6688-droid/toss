@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { AppState, Contact, FirewallState, Incoming, Nearby, Received, TextMsg, TicketInfo, TransferEvent, TransferEventV05, TransferState, WebShare } from "@contracts/ipc";
 import { api, errorMessage } from "./ipc";
 
-export type Screen = "home" | "transfers" | "settings";
+export type Screen = "home" | "links" | "transfers" | "settings";
 
 export interface Recent {
   ticket: string; job: string; get: boolean; put: boolean; exp: number; at: number;
@@ -324,7 +324,7 @@ export const useStore = create<Store>((set, get) => ({
       return;
     }
     try {
-      await api.start_get({ ticket: info.ticket });
+      await api.start_get({ ticket: info.ticket, dest: get().app?.last_get_dir ?? null });
       await get().refreshTransfers();
       get().fly();
       set({ ...NO_SHEETS, screen: "transfers" });

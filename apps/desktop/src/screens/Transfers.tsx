@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { ConnPath, Received, TransferState } from "@contracts/ipc";
 import { api, errorMessage } from "../lib/ipc";
 import { fmtAgo, fmtBytes, fmtEta, fmtItems, fmtSpeed } from "../lib/format";
@@ -22,10 +22,58 @@ function statusLine(t: TransferState, contactName: string | null, contactOnline:
       return "Đang kết nối…";
     case "running": return [fmtSpeed(t.speed_bps), fmtEta(t.eta_s)].filter(Boolean).join(" · ");
     case "paused": return t.bytes_done > 0 ? "Tạm dừng · bấm Tiếp tục để gửi nốt" : "Tạm dừng";
-    case "done": return `Xong · ${t.files_total} file`;
+    case "done": return isIncoming(t) ? `Xong · ${t.files_total} file, khớp từng byte` : `Xong · ${t.files_total} file`;
     case "cancelled": return "Đã huỷ";
     case "error": return t.error ?? "Lỗi";
   }
+}
+
+/** 0.9: a backup the receiver confirmed; the local copies can go (only files unchanged since). */
+function FreeUp({ t }: { t: TransferState }) {
+  const toast = useStore((s) => s.toast);
+  const refresh = useStore((s) => s.refreshTransfers);
+  const [ask, setAsk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const r = t.receipt!;
+  if (r.freed) {
+    const kept = r.freed.kept.length;
+    return (
+      <div className="mt-2 text-xs text-ok">
+        Đã giải phóng {fmtBytes(r.freed.bytes)} trên máy này{kept ? `, giữ lại ${kept} file sửa sau khi backup` : ""}.
+      </div>
+    );
+  }
+  async function free() {
+    setBusy(true);
+    try {
+      const f = await api.free_up({ id: t.id });
+      await refresh();
+      toast(f.kept.length ? `Đã giải phóng ${fmtBytes(f.bytes)}, giữ lại ${f.kept.length} file đã sửa` : `Đã giải phóng ${fmtBytes(f.bytes)}`);
+    } catch (e) { toast(errorMessage(e), "error"); } finally { setBusy(false); setAsk(false); }
+  }
+  return (
+    <div className="mt-3 rounded-[14px] bg-ok/10 px-3 py-2.5">
+      <div className="flex items-center gap-2 text-sm text-ok">
+        <Icon name="shield" className="w-4 h-4 shrink-0" weight="bold" />
+        <span className="min-w-0">An toàn ở {r.to}: {r.files} file đã khớp.</span>
+      </div>
+      {!ask ? (
+        <div className="mt-2 flex justify-end">
+          <button className="btn" onClick={() => setAsk(true)}><Icon name="trash" />Giải phóng trên máy này</button>
+        </div>
+      ) : (
+        <div className="mt-2">
+          <div className="text-xs text-ink mb-2">
+            Xoá {fmtBytes(r.bytes)} ({r.files} file) khỏi máy này? Studio vẫn giữ bản đã khớp. File nào sửa sau lúc backup sẽ được giữ lại.
+          </div>
+          <div className="flex justify-end gap-2">
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setAsk(false)}>Thôi</button>
+            <button className="btn btn-danger" disabled={busy} onClick={() => void free()}><Icon name="trash" />{busy ? "Đang xoá…" : "Xoá khỏi máy này"}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function Item({ t, i }: { t: TransferState; i: number }) {
@@ -86,6 +134,8 @@ function Item({ t, i }: { t: TransferState; i: number }) {
           {t.bytes_total > 0 ? `${fmtBytes(t.bytes_done)} / ${fmtBytes(t.bytes_total)}` : ""}
         </div>
       </div>
+
+      {t.status === "done" && !incoming && t.receipt && <FreeUp t={t} />}
 
       <div className="mt-3 flex flex-wrap gap-2 justify-end">
         {t.status === "running" && <button className="btn" onClick={() => call(() => api.pause({ id: t.id }))}><Icon name="pause" />Tạm dừng</button>}
